@@ -1,0 +1,24 @@
+# Build artifacts
+*.app/
+*.dSYM
+*.swiftmodule
+*.o
+*.out
+*.zip
+
+# Executables
+ProxyManager
+*.exec
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,86 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g., 1.0.0)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=${{ github.event.inputs.version }}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
+      - name: Build app
+        run: |
+          chmod +x build.sh
+          ./build.sh ${{ steps.version.outputs.version }}
+
+      - name: Create ZIP archive
+        run: |
+          zip -r ProxyManager-${{ steps.version.outputs.version }}.zip ProxyManager.app
+
+      - name: Generate release body
+        run: |
+          chmod +x .github/scripts/changelog.sh
+          .github/scripts/changelog.sh > CHANGELOG.md || true
+
+          cat <<'EOF' > INSTALL.md
+          ### Installation
+          1. Download `ProxyManager-${{ steps.version.outputs.version }}.zip`
+          2. Unzip and drag `ProxyManager.app` to your Applications folder
+          3. Launch the app and click the menu bar icon
+
+          ### Requirements
+          - macOS 14.0 or later
+          - An existing SOCKS5 proxy/tunnel (e.g. `ssh -D 1080 user@host`). On first launch, the onboarding guide asks for its address.
+
+          > [!NOTE]
+          > If you encounter security warnings, go to System Settings > Privacy & Security and click "Open Anyway".
+          > The app is not notarized by Apple, so you may need to bypass Gatekeeper.
+          >
+          > On first "Enable Routing" the app will prompt for administrator privileges to set the system proxy.
+          EOF
+
+          if [ -s CHANGELOG.md ]; then
+            cat CHANGELOG.md INSTALL.md > FULL_RELEASE.md
+          else
+            cat INSTALL.md > FULL_RELEASE.md
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          body_path: FULL_RELEASE.md
+          files: |
+            ProxyManager-${{ steps.version.outputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
