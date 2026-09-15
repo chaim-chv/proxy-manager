@@ -1,7 +1,15 @@
 #!/bin/sh
 set -eu
 
-# Get the previous tag before the current one
+# Release-notes generator.
+#
+# Categorizes the commit subjects between the previous tag and HEAD into
+# sections. A Conventional Commit type that is not explicitly mapped below
+# still appears under "Other Changes", so nothing is ever silently dropped.
+#
+# When adding a new commit type that deserves its own section, add a `section()`
+# rule AND an `emit(...)` line in END.
+
 CURRENT_TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || true)
 if [ -n "$CURRENT_TAG" ]; then
     LAST_TAG=$(git tag --sort=-creatordate | grep -v "^$CURRENT_TAG$" | head -n 1 || true)
@@ -15,23 +23,29 @@ else
     RANGE="HEAD"
 fi
 
-# Parse commits
-git log $RANGE --pretty=format:"%s%n%b%n----" | awk '
-BEGIN { feats=""; fixes=""; block=""; first="" }
-/^----$/ {
-    l = tolower(first)
-    if (l ~ /^feat(\([^)]+\))?:/) feats = feats "- " first "\n"
-    else if (l ~ /^fix(\([^)]+\))?:/) fixes = fixes "- " first "\n"
-    block=""; first=""
-    next
+git log "$RANGE" --no-merges --pretty=format:"%s" | awk '
+function section(s,  l) {
+    l = tolower(s)
+    if (l ~ /^feat(\([^)]*\))?!?:/)  return "features"
+    if (l ~ /^perf(\([^)]*\))?!?:/)  return "perf"
+    if (l ~ /^fix(\([^)]*\))?!?:/)   return "fixes"
+    return "other"
 }
-block=="" { first=$0 }
-{ block = block $0 "\n" }
+function emit(title, key) {
+    if (items[key] != "") {
+        print "### " title
+        print ""
+        printf "%s", items[key]
+        print ""
+    }
+}
+{
+    key = section($0)
+    items[key] = items[key] "- " $0 "\n"
+}
 END {
-    l = tolower(first)
-    if (l ~ /^feat(\([^)]+\))?:/) feats = feats "- " first "\n"
-    else if (l ~ /^fix(\([^)]+\))?:/) fixes = fixes "- " first "\n"
-
-    if (feats!="") print "### Features\n" feats
-    if (fixes!="") print "### Bug Fixes\n" fixes
+    emit("Features", "features")
+    emit("Performance Improvements", "perf")
+    emit("Bug Fixes", "fixes")
+    emit("Other Changes", "other")
 }'
