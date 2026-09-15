@@ -308,7 +308,14 @@ final class AppModel: ObservableObject {
                     // the watchdog armed, and keep the listener running so the
                     // machine still has connectivity. The watchdog repairs the
                     // dangling proxy when this process exits.
-                    self.configStore.saveSnapshot(self.snapshot ?? [:])
+                    // Never persist an empty snapshot: the watchdog treats "no
+                    // usable snapshot" as nothing to restore, which would leave
+                    // the proxy dangling after this process exits.
+                    if let snap = self.snapshot {
+                        self.configStore.saveSnapshot(snap)
+                    } else {
+                        Log.app.error("enable(): rollback has no snapshot to persist")
+                    }
                     self.setState(.degraded)
                 }
                 self.setLastError(error.localizedDescription)
@@ -630,8 +637,13 @@ final class AppModel: ObservableObject {
                 return
             }
             Log.app.notice("shutdownForQuit(): restoring system proxy")
+            // `restoreOnQuit` only controls the synchronous quit-path restore;
+            // the armed watchdog restores moments after exit when it is enabled.
+            // If the watchdog is disabled, skipping the restore here would leave
+            // the machine pointing at a dead 127.0.0.1 — so always restore then.
+            let canDelegateToWatchdog = config.system.crashWatchdog
             var restored = false
-            if config.system.restoreOnQuit {
+            if config.system.restoreOnQuit || !canDelegateToWatchdog {
                 do {
                     if let snap = snap {
                         try systemProxyManager.restore(snapshot: snap)
@@ -653,9 +665,9 @@ final class AppModel: ObservableObject {
                 UserDefaults.standard.set(false, forKey: wasOnKey)
                 proxyServer.stop()
             } else {
-                // Either restoreOnQuit is off or the restore failed: leave the
-                // snapshot and the armed watchdog so the proxy is restored
-                // moments after this process exits.
+                // restoreOnQuit is off (and the watchdog is enabled), or the
+                // restore failed: leave the snapshot and the armed watchdog so
+                // the proxy is restored moments after this process exits.
                 Log.app.notice("shutdownForQuit(): leaving watchdog armed to restore")
             }
             telemetry.flushNow()

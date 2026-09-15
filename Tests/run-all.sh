@@ -65,12 +65,14 @@ run_probe() {
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
+  Sources/Proxy/HostClassifier.swift \
   Sources/System/HelperProtocol.swift \
   Tests/RegressionHarness/main.swift
 
 run_harness ProxyE2E \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
+  Sources/Proxy/HostClassifier.swift \
   Sources/Support/Log.swift \
   Sources/Socks/Socket.swift Sources/Socks/SOCKS5.swift \
   Sources/Proxy/ProxyServer.swift Sources/Telemetry/TelemetryStore.swift \
@@ -83,6 +85,10 @@ run_probe CrashProbe_oversized_port \
 run_probe CrashProbe_sigpipe_send \
   Sources/Socks/Socket.swift \
   Tests/CrashProbes/sigpipe_send/main.swift
+
+run_probe CrashProbe_dns_timeout \
+  Sources/Socks/Socket.swift \
+  Tests/CrashProbes/dns_timeout/main.swift
 
 run_harness WatchdogHarness \
   -framework AppKit -framework ServiceManagement \

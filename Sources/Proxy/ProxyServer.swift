@@ -187,7 +187,7 @@ final class ProxyServer {
             // SSRF guard: the proxy has no authentication, so a non-loopback
             // client must never use it to reach loopback/link-local/private
             // destinations. Loopback clients (the normal case) are unaffected.
-            if !clientIsLoopback && Self.isPrivateOrLoopbackHost(host) {
+            if !clientIsLoopback && HostClassifier.isPrivateOrLoopback(host) {
                 route = .block
                 errMsg = "blocked_private_destination"
                 status = 403
@@ -321,7 +321,10 @@ final class ProxyServer {
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 { throw SocketError.message("header read timeout") }
             Socket.setTimeouts(fd, receive: min(remaining, 5), send: min(remaining, 5))
-            let n = Darwin.recv(fd, &chunk, chunk.count, 0)
+            // Never read past the cap: a single `recv` of the full chunk could
+            // otherwise overshoot `maxBytes` by up to `chunk.count - 1`.
+            let want = min(chunk.count, maxBytes - buffer.count)
+            let n = Darwin.recv(fd, &chunk, want, 0)
             if n < 0 {
                 if errno == EINTR { continue }
                 if errno == EAGAIN || errno == EWOULDBLOCK {
@@ -338,25 +341,6 @@ final class ProxyServer {
             }
         }
         throw SocketError.message("header too large")
-    }
-
-    /// True for loopback, link-local, and RFC1918 / unique-local destinations.
-    private static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
-        let h = host.lowercased()
-        if h.isEmpty { return false }
-        if h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") { return true }
-        if h == "::1" || h == "0:0:0:0:0:0:0:1" { return true }
-        if h.hasPrefix("fe80:") || h.hasPrefix("fc") || h.hasPrefix("fd") { return true }
-        let parts = h.split(separator: ".")
-        if parts.count == 4, let a = Int(parts[0]), let b = Int(parts[1]),
-           let c = Int(parts[2]), let d = Int(parts[3]),
-           (0...255).contains(a), (0...255).contains(b), (0...255).contains(c), (0...255).contains(d) {
-            if a == 127 || a == 10 || a == 0 { return true }
-            if a == 172 && (16...31).contains(b) { return true }
-            if a == 192 && b == 168 { return true }
-            if a == 169 && b == 254 { return true }
-        }
-        return false
     }
 
     private func sendResponse(_ fd: Int32, status: Int, reason: String) throws {
@@ -436,7 +420,10 @@ final class ProxyServer {
                     buf[Int(nfds)] = pollfd(fd: upstream, events: upstreamEvents, revents: 0)
                     upstreamIdx = Int(nfds); nfds += 1
                 }
-                let r = poll(buf.baseAddress!, nfds, Int32(timeout * 1000))
+                // Clamp before narrowing: a large (future, configurable) timeout
+                // would otherwise overflow `Int32` and produce a negative wait.
+                let ms = Int32(min(Double(Int32.max), max(0, timeout) * 1000))
+                let r = poll(buf.baseAddress!, nfds, ms)
                 if r > 0 {
                     if clientIdx >= 0 { clientRevents = buf[clientIdx].revents }
                     if upstreamIdx >= 0 { upstreamRevents = buf[upstreamIdx].revents }

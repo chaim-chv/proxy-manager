@@ -55,6 +55,20 @@ check("IPv6 literal direct when unlisted", RoutingEngine().decide(host: "[2001:d
 check("normalize strips numeric port", RoutingEngine.normalize("host.example:8443") == "host.example")
 check("normalize keeps IPv6 colons", RoutingEngine.normalize("2001:db8::1") == "2001:db8::1")
 
+print("== SSRF host classification ==")
+// The proxy has no auth, so non-loopback clients must not reach private
+// destinations. But the fc/fd (IPv6 ULA) check must not swallow ordinary
+// hostnames that merely start with those letters.
+for host in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.1.1",
+             "0.0.0.0", "localhost", "foo.local", "foo.localhost", "::1",
+             "fc00::1", "fd00::1", "fe80::1"] {
+    check("private: \(host)", HostClassifier.isPrivateOrLoopback(host))
+}
+for host in ["example.com", "fcdn.example.com", "fdroid.org", "fc.example.com",
+             "8.8.8.8", "172.32.0.1", "172.15.0.1", "11.0.0.1", "169.253.0.1"] {
+    check("not private: \(host)", !HostClassifier.isPrivateOrLoopback(host))
+}
+
 print("== HTTP parser safety ==")
 let dup = Array("GET / HTTP/1.1\r\nHost: a.com\r\nhost: b.com\r\nX: 1\r\nX: 2\r\n\r\n".utf8)
 check("duplicate-case headers do not crash", HTTPParser.parse(dup) != nil)

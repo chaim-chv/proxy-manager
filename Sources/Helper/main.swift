@@ -1,5 +1,9 @@
 import Foundation
 import Security
+import Darwin
+
+// Same belt-and-suspenders as the app: never die on a peer reset.
+signal(SIGPIPE, SIG_IGN)
 
 /// Entry point for the `ProxyManagerHelper` LaunchDaemon.
 ///

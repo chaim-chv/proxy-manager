@@ -107,6 +107,9 @@ extension ServiceProxyState {
 enum NetworksetupCommands {
     static let bypass = ["*.local", "169.254/16", "localhost", "127.0.0.1", "::1"]
 
+    /// The system proxy is always pointed at loopback: it is a same-machine
+    /// setting, so only a loopback bind is reachable. A non-loopback `bindHost`
+    /// is for other clients (SSRF-guarded) and is intentionally not used here.
     static func applyProxy(services: [String], port: Int) -> [[String]] {
         var cmds: [[String]] = []
         for svc in services {

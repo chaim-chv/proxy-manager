@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuController: StatusMenuController?
@@ -73,6 +74,10 @@ struct AppCommands: Commands {
 @main
 enum Main {
     static func main() {
+        // Belt-and-suspenders for SIGPIPE: every socket also sets SO_NOSIGPIPE
+        // (Socket.setNoSIGPIPE), but ignoring it process-wide means a future fd
+        // that forgets can never kill the app on a peer reset.
+        signal(SIGPIPE, SIG_IGN)
         // Same binary, two roles. The watchdog mode must never touch SwiftUI /
         // AppModel so its idle footprint stays negligible.
         if CommandLine.arguments.contains("--watchdog") {

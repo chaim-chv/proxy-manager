@@ -5,7 +5,23 @@ enum SocketError: Error {
     case message(String)
 }
 
+/// Thread-safe counter used only by the DNS-timeout regression probe to prove
+/// that timed-out lookups do not leak `addrinfo` lists. Production code only
+/// increments/decrements it; nothing reads it except the probe.
+final class SocketResolutionCounter {
+    private let lock = NSLock()
+    private var count = 0
+    func inc() { lock.lock(); count += 1; lock.unlock() }
+    func dec() { lock.lock(); count -= 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+}
+
 enum Socket {
+    /// Diagnostic for the DNS-timeout regression probe: `addrinfo` lists
+    /// allocated by `resolve` and not yet freed. Returns to 0 once every
+    /// resolver thread and caller has drained.
+    static let liveResolutions = SocketResolutionCounter()
+
     /// macOS has no `MSG_NOSIGNAL`; `SO_NOSIGPIPE` is the per-socket equivalent.
     /// Without it a `send()` to a reset peer raises SIGPIPE and kills the app.
     static func setNoSIGPIPE(_ fd: Int32) {
@@ -13,31 +29,85 @@ enum Socket {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
     }
 
+    /// Carries the resolver's result across threads. If the caller times out
+    /// before the detached `getaddrinfo` finishes, `cancel()` marks the box so
+    /// whichever side runs last frees the `addrinfo` list exactly once — without
+    /// it every timed-out lookup leaks the whole result (the detached thread
+    /// still completes and allocates even though the caller has moved on).
     private final class ResolutionBox {
-        var result: UnsafeMutablePointer<addrinfo>?
-        var rc: Int32 = 0
+        private let lock = NSLock()
+        private var result: UnsafeMutablePointer<addrinfo>?
+        private var rc: Int32 = 0
+        private var cancelled = false
+
+        func finish(rc: Int32, result: UnsafeMutablePointer<addrinfo>?) {
+            lock.lock()
+            if cancelled {
+                lock.unlock()
+                if let result {
+                    freeaddrinfo(result)
+                    Socket.liveResolutions.dec()
+                }
+                return
+            }
+            self.rc = rc
+            self.result = result
+            lock.unlock()
+        }
+
+        /// Marks the box cancelled and returns any result already stored, so the
+        /// caller can free it (the resolver will free its own if it finishes
+        /// later). Exactly one of the two paths frees a given result.
+        func cancelAndTake() -> UnsafeMutablePointer<addrinfo>? {
+            lock.lock()
+            cancelled = true
+            let r = result
+            result = nil
+            lock.unlock()
+            return r
+        }
+
+        func take() -> (Int32, UnsafeMutablePointer<addrinfo>?) {
+            lock.lock(); defer { lock.unlock() }
+            return (rc, result)
+        }
     }
 
     /// Resolve `host` with a hard timeout. `getaddrinfo` itself is unbounded, so
     /// it runs on a detached thread and the caller waits with a deadline; a
     /// hung resolver can otherwise pin a connection thread forever.
-    private static func resolve(host: String, port: UInt16, timeout: TimeInterval) throws -> UnsafeMutablePointer<addrinfo> {
+    ///
+    /// `internal` (not private) so the DNS-timeout regression probe can drive it.
+    /// `delay` is a test seam: it makes the resolver thread outlive a short
+    /// caller timeout deterministically (production always passes 0).
+    static func resolve(host: String, port: UInt16, timeout: TimeInterval,
+                        delay: TimeInterval = 0) throws -> UnsafeMutablePointer<addrinfo> {
         let box = ResolutionBox()
         let sem = DispatchSemaphore(value: 0)
         let portStr = String(port)
         Thread.detachNewThread {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             var hints = addrinfo()
             hints.ai_family = AF_UNSPEC
             hints.ai_socktype = SOCK_STREAM
             hints.ai_protocol = IPPROTO_TCP
-            box.rc = getaddrinfo(host, portStr, &hints, &box.result)
+            var result: UnsafeMutablePointer<addrinfo>?
+            let rc = getaddrinfo(host, portStr, &hints, &result)
+            if result != nil { Socket.liveResolutions.inc() }
+            box.finish(rc: rc, result: result)
             sem.signal()
         }
         if sem.wait(timeout: .now() + max(0.1, timeout)) == .timedOut {
+            if let leaked = box.cancelAndTake() {
+                freeaddrinfo(leaked)
+                Socket.liveResolutions.dec()
+            }
             throw SocketError.message("getaddrinfo(\(host)) timed out")
         }
-        guard box.rc == 0, let info = box.result else {
-            throw SocketError.message("getaddrinfo(\(host)): \(String(cString: gai_strerror(box.rc)))")
+        let (rc, info) = box.take()
+        guard rc == 0, let info else {
+            if let info { freeaddrinfo(info); Socket.liveResolutions.dec() }
+            throw SocketError.message("getaddrinfo(\(host)): \(String(cString: gai_strerror(rc)))")
         }
         return info
     }
@@ -48,7 +118,7 @@ enum Socket {
         let budget = max(0.1, timeout)
         let deadline = Date().addingTimeInterval(budget)
         let info = try resolve(host: host, port: port, timeout: budget)
-        defer { freeaddrinfo(info) }
+        defer { freeaddrinfo(info); Socket.liveResolutions.dec() }
 
         var lastError = "no addresses"
         var ptr: UnsafeMutablePointer<addrinfo>? = info
@@ -179,6 +249,10 @@ enum Socket {
                 if n == 0 { throw SocketError.message("connection closed") }
                 if errno == EINTR { continue }
                 if errno == EAGAIN || errno == EWOULDBLOCK {
+                    // Either a non-blocking fd or a blocking fd whose
+                    // `SO_SNDTIMEO` elapsed. Wait for writability and retry
+                    // instead of failing the send outright.
+                    if waitForWritable(fd, timeout: 30) { continue }
                     throw SocketError.message("send timeout")
                 }
                 throw SocketError.message("send failed: \(String(cString: strerror(errno)))")

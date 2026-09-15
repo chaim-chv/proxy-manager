@@ -193,7 +193,6 @@ final class SSHTunnelRunner: ObservableObject {
             "load key",
             "address already in use",
             "cannot listen to port",
-            "bind: ",
         ]
         return fatalMarkers.contains { lower.contains($0) }
     }
