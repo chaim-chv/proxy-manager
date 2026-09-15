@@ -76,7 +76,7 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 
 **Status:** Fixed.
 
-**Summary:** macOS has no `MSG_NOSIGNAL`; a `send()` to a peer that sent RST raises `SIGPIPE`, whose default disposition terminates the process (exit `141`). `Socket.setNoSIGPIPE` (`Sources/Socks/Socket.swift:11-14`) sets `SO_NOSIGPIPE`, and it is called on every fd the app creates or accepts: the listener (`Sources/Proxy/ProxyServer.swift:65`), each accepted client (`:130`), and every `Socket.connect` result (`Sources/Socks/Socket.swift:58`).
+**Summary:** macOS has no `MSG_NOSIGNAL`; a `send()` to a peer that sent RST raises `SIGPIPE`, whose default disposition terminates the process (exit `141`). `Socket.setNoSIGPIPE` (`Sources/Socks/Socket.swift:11-14`) sets `SO_NOSIGPIPE`, and it is called on every fd the app creates or accepts: the listener (`Sources/Proxy/ProxyServer.swift:65`), each accepted client (`:130`), and every `Socket.connect` result (`Sources/Socks/Socket.swift:58`). The app and helper additionally call `signal(SIGPIPE, SIG_IGN)` at startup (`Sources/App.swift`, `Sources/Helper/main.swift`) as belt-and-suspenders.
 
 **Context:** A browser closing a tab, a probe that RSTs after `CONNECT`, or any dead-peer scenario previously killed the app. The regression is `Tests/CrashProbes/sigpipe_send` (must survive an RST peer) plus `Tests/ProxyE2E`'s RST-burst stage (the proxy must still serve). Canonical: [`AGENTS.md`](AGENTS.md) lesson 11.
 

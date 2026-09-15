@@ -31,7 +31,7 @@ Command building is centralized in `NetworksetupCommands` (in `HelperProtocol.sw
 
 `ShellEnvInjector`:
 
-- Writes `~/.config/proxy-manager/env.sh` (`HTTP_PROXY`/`HTTPS_PROXY` = `http://<bindHost>:<port>`, default `127.0.0.1`; `NO_PROXY` = `127.0.0.1,localhost,::1` plus the tunnel host, so CLI tools never loop back through the tunnel; `PROXY_MANAGER_ACTIVE`).
+- Writes `~/.config/proxy-manager/env.sh` (`HTTP_PROXY`/`HTTPS_PROXY` = `http://<host>:<port>`, where a wildcard `bindHost` (`0.0.0.0`/empty) is normalized to `127.0.0.1`; host values are charset-validated so they can't break out of the quoted `export`; `NO_PROXY` = `127.0.0.1,localhost,::1` plus the tunnel host, so CLI tools never loop back through the tunnel; `PROXY_MANAGER_ACTIVE`).
 - Inserts a guarded source line into the configured rc files (default `~/.zshrc`) between `# >>> proxy-manager >>>` / `# <<< proxy-manager <<<` markers; removes it cleanly on disable.
 
 ## Snapshot lifecycle (critical)

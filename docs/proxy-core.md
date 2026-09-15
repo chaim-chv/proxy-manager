@@ -67,7 +67,7 @@ Each connection runs its whole life on **one detached thread**:
 
 ## Audit changes (2026-09-15)
 
-- **SIGPIPE**: `SO_NOSIGPIPE` on every socket the app creates or accepts (listener, accepted client, `Socket.connect` result). macOS has no `MSG_NOSIGNAL`, so this per-socket option is the whole defense — there is no process-wide `signal(SIGPIPE, SIG_IGN)`.
+- **SIGPIPE**: `SO_NOSIGPIPE` on every socket the app creates or accepts (listener, accepted client, `Socket.connect` result), plus a process-wide `signal(SIGPIPE, SIG_IGN)` at startup. macOS has no `MSG_NOSIGNAL`.
 - **SSRF guard**: a **non-loopback** client is refused (`403`) for loopback/link-local/RFC1918 destinations; a non-loopback bind logs a warning. Loopback clients (the normal case) are unaffected.
 - **Direct upstream send timeout**: the direct fd gets `SO_SNDTIMEO`/`SO_RCVTIMEO` (the SOCKS path already did), so a forwarded request to a stalled upstream can't block forever.
 - **Bounded DNS/connect**: `Socket.connect` runs `getaddrinfo` on a detached thread with a deadline and uses one overall budget across all addresses.

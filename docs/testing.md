@@ -22,6 +22,7 @@ EOF
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
+  Sources/Proxy/HostClassifier.swift \
   Sources/Socks/Socket.swift Sources/Socks/SOCKS5.swift \
   Sources/Proxy/ProxyServer.swift Sources/Telemetry/TelemetryStore.swift \
   Sources/Support/Log.swift \
@@ -38,10 +39,11 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 
 | Harness | Covers |
 |---|---|
-| `Tests/RegressionHarness/main.swift` | Routing, HTTP parser safety, config schema migration, snapshot migration, `networksetup` argument validation, snapshot/PAC validation |
+| `Tests/RegressionHarness/main.swift` | Routing, SSRF host classification, HTTP parser safety, config schema migration, snapshot migration, `networksetup` argument validation, snapshot/PAC validation |
 | `Tests/ProxyE2E/main.swift` | Direct + tunneled CONNECT, half-close full body, 200-way concurrency, dead-peer (RST) reaping, dead-peer with a held-open upstream (no busy-spin / no teardown trap) — live BSD sockets with mock origin + mock SOCKS5 |
 | `Tests/CrashProbes/oversized_port` | `GET http://host:99999/` must not trap |
 | `Tests/CrashProbes/sigpipe_send` | Send to an RST peer must not raise SIGPIPE |
+| `Tests/CrashProbes/dns_timeout` | A timed-out `getaddrinfo` must not leak the `addrinfo` list (the `delay` seam forces the resolver thread to outlive the caller) |
 | `Tests/WatchdogHarness/main.swift` | Crash watchdog decision logic (see below) |
 
 All of the above pass on the current code. A failing check is a regression — do not loosen the assertion to match the bug.
@@ -49,18 +51,19 @@ All of the above pass on the current code. A failing check is a regression — d
 ## What must be covered (regression)
 
 1. **Routing engine** — exact / wildcard / leading-dot / apex / case / trailing-dot / empty-host; wildcard must NOT overmatch `evil-example.com`; `matches` requires a pre-normalized host; IPv6 literals are normalized and match rules.
-2. **HTTP parser** — duplicate-case headers (no crash), IPv6 `[::1]:443`, malformed/incomplete, oversized port must not trap.
-3. **Config migration** — a legacy `config.json` missing newer keys must decode; unknown keys must not wipe data; a legacy `system-proxy-snapshot.json` missing `bypassDomains` must decode.
-4. **Validation** — service names with `/` (`USB 10/100/1000 LAN`), PAC `(null)`, port range.
-5. **Proxy end-to-end** — against a mock origin + mock SOCKS5 (detached threads):
+2. **SSRF classification** — loopback/link-local/RFC1918 + IPv6 ULA (`fc00::`/`fd00::`) are private; ordinary hostnames that merely start with `fc`/`fd` (`fcdn.example.com`, `fdroid.org`) are **not**.
+3. **HTTP parser** — duplicate-case headers (no crash), IPv6 `[::1]:443`, malformed/incomplete, oversized port must not trap.
+4. **Config migration** — a legacy `config.json` missing newer keys must decode; unknown keys must not wipe data; a legacy `system-proxy-snapshot.json` missing `bypassDomains` must decode.
+5. **Validation** — service names with `/` (`USB 10/100/1000 LAN`), PAC `(null)`, port range.
+6. **Proxy end-to-end** — against a mock origin + mock SOCKS5 (detached threads):
    - direct `CONNECT` + response body;
    - tunneled `CONNECT` through mock SOCKS5;
    - **half-close** (client `shutdown(SHUT_WR)` after the request, still receives the full response);
    - **concurrency** — 200 parallel connections all succeed;
    - **dead-peer reaping** — a burst of RST peers must not accumulate relay threads/fds and the proxy must still serve (this is the SIGPIPE integration regression);
   - **dead-peer + held-open upstream** — after a client RST with the upstream still open and idle, the relay must not busy-spin, and the server must not deallocate while a relay permit is outstanding (catches the libdispatch "semaphore deallocated while in use" trap).
-6. **Crash classes** — every trap/SIGPIPE/force-unwrap regression gets a subprocess probe.
-7. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
+7. **Crash classes** — every trap/SIGPIPE/force-unwrap regression gets a subprocess probe; timed-out DNS must not leak `addrinfo` (`CrashProbes/dns_timeout`).
+8. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
 
 ## Crash watchdog harness
 

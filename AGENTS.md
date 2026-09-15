@@ -106,7 +106,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 
 10. **Don't regress `revert.sh`.** It's the user's lifeline when a bug ships.
 
-11. **Suppress SIGPIPE on every socket.** macOS has no `MSG_NOSIGNAL`; a `send()` to a reset peer raises `SIGPIPE` and kills the process. Call `Socket.setNoSIGPIPE(fd)` on every fd you create or accept (the listener, accepted clients, `Socket.connect` results). Per-socket `SO_NOSIGPIPE` is the only defense — there is no process-wide `signal(SIGPIPE, SIG_IGN)`. `Tests/ProxyE2E` (RST burst) and `Tests/CrashProbes/sigpipe_send` are the regressions.
+11. **Suppress SIGPIPE on every socket.** macOS has no `MSG_NOSIGNAL`; a `send()` to a reset peer raises `SIGPIPE` and kills the process. Call `Socket.setNoSIGPIPE(fd)` on every fd you create or accept (the listener, accepted clients, `Socket.connect` results). Per-socket `SO_NOSIGPIPE` is the primary defense; the app and helper also call `signal(SIGPIPE, SIG_IGN)` at startup (`Sources/App.swift`, `Sources/Helper/main.swift`) as belt-and-suspenders. `Tests/ProxyE2E` (RST burst) and `Tests/CrashProbes/sigpipe_send` are the regressions.
 
 12. **Only clear the snapshot / disarm the watchdog after a restore that actually succeeded.** A `try? restore(...)` followed by `clearSnapshot()` + `disarm()` is how a transient `networksetup` failure becomes permanent dead internet. On failure, keep the snapshot on disk, keep the watchdog armed, and keep the listener running; log and surface the error. Never treat an empty restore command list as success (`HelperService.restoreProxy`).
 

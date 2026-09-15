@@ -16,8 +16,8 @@
 
 ### Known sharp edges (see `docs/roadmap.md`)
 
-- `sendAll` treats `EAGAIN` as fatal — fine for blocking sockets, but never call it on a non-blocking fd.
-- `resolve` leaks the `addrinfo` list when DNS times out: the detached thread can still complete `getaddrinfo` after the caller has thrown.
+- `sendAll` waits for writability and retries on `EAGAIN`/`EWOULDBLOCK` (bounded at 30 s), so it is safe on both blocking and non-blocking fds.
+- `resolve` frees the `addrinfo` list exactly once even when DNS times out: the caller marks the box cancelled and whichever side finishes last frees. `Socket.liveResolutions` is a test-only counter proving no leak.
 
 ## SOCKS5.swift (RFC 1928 client)
 
