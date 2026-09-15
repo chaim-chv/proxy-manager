@@ -26,9 +26,11 @@ fi
 git log "$RANGE" --no-merges --pretty=format:"%s" | awk '
 function section(s,  l) {
     l = tolower(s)
-    if (l ~ /^feat(\([^)]*\))?!?:/)  return "features"
-    if (l ~ /^perf(\([^)]*\))?!?:/)  return "perf"
-    if (l ~ /^fix(\([^)]*\))?!?:/)   return "fixes"
+    if (l ~ /^feat(\([^)]*\))?!?:/)     return "features"
+    if (l ~ /^perf(\([^)]*\))?!?:/)     return "perf"
+    if (l ~ /^fix(\([^)]*\))?!?:/)      return "fixes"
+    if (l ~ /^refactor(\([^)]*\))?!?:/) return "refactor"
+    if (l ~ /^docs(\([^)]*\))?!?:/)     return "docs"
     return "other"
 }
 function emit(title, key) {
@@ -47,5 +49,7 @@ END {
     emit("Features", "features")
     emit("Performance Improvements", "perf")
     emit("Bug Fixes", "fixes")
+    emit("Refactors", "refactor")
+    emit("Documentation", "docs")
     emit("Other Changes", "other")
 }'
