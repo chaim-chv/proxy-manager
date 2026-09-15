@@ -178,6 +178,7 @@ ProxyManager/
 
 ## Credits & License
 
-100% vibe coded by [@chaim-chv](https://github.com/chaim-chv/) © 2026
-
-MIT — see [LICENSE](LICENSE).
+100% vibe-coded by [@chaim-chv](https://github.com/chaim-chv/) © 2026.  
+As an agentic harness, I use [**OpenCode**](https://opencode.ai/) with a personally developed set of agents, skills, and plugins.  
+For LLM models, I use **DeepSeek V4** (mostly Flash at default reasoning effort, with some Pro at high reasoning effort for complex tasks) via the [DeepSeek](https://platform.deepseek.com/) API.  
+Released under the [MIT License](LICENSE).
