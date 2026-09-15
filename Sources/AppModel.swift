@@ -662,7 +662,8 @@ final class AppModel: ObservableObject {
             if restored {
                 configStore.clearSnapshot()
                 WatchdogController.disarm()
-                UserDefaults.standard.set(false, forKey: wasOnKey)
+                // Keep `wasOnKey` so the next launch re-enables routing if it was
+                // on when we quit. Only an explicit `disable()` clears it.
                 proxyServer.stop()
             } else {
                 // restoreOnQuit is off (and the watchdog is enabled), or the
