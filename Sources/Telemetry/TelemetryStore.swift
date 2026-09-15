@@ -53,7 +53,7 @@ struct RequestEvent: Identifiable, Equatable {
     }
 }
 
-struct StatsSnapshot {
+struct StatsSnapshot: Equatable {
     var tunneledRequests: Int = 0
     var directRequests: Int = 0
     var blockedRequests: Int = 0
@@ -136,7 +136,7 @@ final class TelemetryStore: ObservableObject {
     private var pendingDelta = StatsSnapshot()
     private var dbAccumulator: [RequestEvent] = []
     private var activeCount = 0
-    private var lastPurge = Date()
+    private var lastPurgeMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
 
     private var flusher: DispatchSourceTimer?
 
@@ -348,7 +348,7 @@ final class TelemetryStore: ObservableObject {
             }
         }
 
-        maybePurge()
+        maybePurge(nowMs: nowMs)
     }
 
     private func applyToUI(starts: [RequestEvent], updates: [RequestEvent],
@@ -358,19 +358,30 @@ final class TelemetryStore: ObservableObject {
         // leave a ghost live row behind.
         let finished = Set(finishes)
 
-        if !liveRequests.isEmpty {
-            // Finalized rows move out of the live list into the completed feed.
-            for id in finishes where !liveRequests.isEmpty {
-                liveRequests.removeAll { $0.id == id }
+        // Rebuild the live list locally and assign it at most once, only when
+        // something actually changed. Each mutation of a `@Published` array
+        // fires `objectWillChange`, so assigning per-operation re-rendered every
+        // observer several times per tick.
+        if !starts.isEmpty || !updates.isEmpty || !finishes.isEmpty {
+            var newLive = liveRequests
+            if !newLive.isEmpty && !finished.isEmpty {
+                newLive.removeAll { finished.contains($0.id) }
             }
-        }
-        for event in starts where !finished.contains(event.id) {
-            liveRequests.insert(event, at: 0)
-        }
-        for event in updates {
-            if let idx = liveRequests.firstIndex(where: { $0.id == event.id }) {
-                liveRequests[idx] = event
+            if !starts.isEmpty {
+                let known = Set(newLive.map(\.id))
+                for event in starts where !finished.contains(event.id) && !known.contains(event.id) {
+                    newLive.insert(event, at: 0)
+                }
             }
+            if !updates.isEmpty && !newLive.isEmpty {
+                var index: [UUID: Int] = [:]
+                index.reserveCapacity(newLive.count)
+                for (i, e) in newLive.enumerated() { index[e.id] = i }
+                for event in updates {
+                    if let idx = index[event.id] { newLive[idx] = event }
+                }
+            }
+            if newLive != liveRequests { liveRequests = newLive }
         }
 
         if !batch.isEmpty {
@@ -379,12 +390,19 @@ final class TelemetryStore: ObservableObject {
                 recentRequests.removeFirst(recentRequests.count - Self.liveFeedCapacity)
             }
         }
-        stats.tunneledRequests += delta.tunneledRequests
-        stats.directRequests += delta.directRequests
-        stats.blockedRequests += delta.blockedRequests
-        stats.bytesIn += delta.bytesIn
-        stats.bytesOut += delta.bytesOut
-        stats.activeConnections = active
+
+        // The six stat fields are written together so a tick that only moves
+        // bytes (or a duration-only tick) doesn't fire six separate changes.
+        if delta != StatsSnapshot() || active != stats.activeConnections {
+            var newStats = stats
+            newStats.tunneledRequests += delta.tunneledRequests
+            newStats.directRequests += delta.directRequests
+            newStats.blockedRequests += delta.blockedRequests
+            newStats.bytesIn += delta.bytesIn
+            newStats.bytesOut += delta.bytesOut
+            newStats.activeConnections = active
+            if newStats != stats { stats = newStats }
+        }
     }
 
     // MARK: - SQLite (batched)
@@ -446,10 +464,11 @@ final class TelemetryStore: ObservableObject {
         sqlite3_bind_text(stmt, idx, (text as NSString).utf8String, -1, SQLITE_TRANSIENT)
     }
 
-    private func maybePurge() {
-        // Retention purge once every 5 minutes.
-        guard Date().timeIntervalSince(lastPurge) > 300 else { return }
-        lastPurge = Date()
+    private func maybePurge(nowMs: Int64) {
+        // Retention purge once every 5 minutes. `nowMs` is reused from `flush`
+        // so the 10 Hz tick does not pay for an extra `Date()` every time.
+        guard nowMs - lastPurgeMs > 300_000 else { return }
+        lastPurgeMs = nowMs
         dbQueue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
             let days = max(1, self.retentionDays)

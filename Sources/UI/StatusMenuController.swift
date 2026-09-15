@@ -40,6 +40,7 @@ final class StatusMenuController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private var cancellables = Set<AnyCancellable>()
+    private var lastIconKey: String?
 
     // Custom status/error rows (updated in place; held strongly here, the menu
     // retains them via `item.view`) plus the plain toggle items we mutate.
@@ -178,11 +179,19 @@ final class StatusMenuController: NSObject {
         case .degraded: symbol = "exclamationmark.triangle.fill"
         case .starting, .stopping: symbol = "hourglass"
         }
+        // `refresh()` runs on every `@Published` change (including each keystroke
+        // in a Settings field via `$config`); only re-rasterize the SF Symbol
+        // when the resulting image would actually differ.
+        let colorize = model.config.system.colorizeMenuIcon
+        let color = colorize ? iconColor() : nil
+        let key = "\(symbol)|\(colorize)|\(color?.description ?? "")"
+        if key == lastIconKey, button.image != nil { return }
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) else { return }
-        if model.config.system.colorizeMenuIcon {
+        lastIconKey = key
+        if let color {
             // Recolor the symbol itself (non-template); `contentTintColor` does
             // not reliably color NSStatusItem template images.
-            let colored = base.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [iconColor()]))
+            let colored = base.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color]))
             colored?.isTemplate = false
             button.image = colored
         } else {

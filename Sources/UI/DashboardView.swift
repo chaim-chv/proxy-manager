@@ -68,6 +68,7 @@ private enum ChartMetric: String, CaseIterable, Identifiable {
 
 struct DashboardView: View {
     @EnvironmentObject var model: AppModel
+    @EnvironmentObject var telemetry: TelemetryStore
 
     @State private var routeFilter: String = "All"
     @State private var hostFilter: String = ""
@@ -108,8 +109,8 @@ struct DashboardView: View {
             if isPaused { pausedSnapshot = computeFeedRows() }
         }
         .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
-        .onChange(of: model.telemetry.liveRequests.count) { _, _ in reconcileSelection() }
-        .onChange(of: model.telemetry.recentRequests.count) { _, _ in reconcileSelection() }
+        .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
+        .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
         .onReceive(seriesTimer) { _ in refreshLongRange() }
     }
 
@@ -137,7 +138,7 @@ struct DashboardView: View {
             Spacer()
 
             Button(role: .destructive) {
-                model.telemetry.purge()
+                telemetry.purge()
             } label: {
                 Label("Clear", systemImage: "trash")
             }
@@ -149,11 +150,11 @@ struct DashboardView: View {
 
     private var statsStrip: some View {
         HStack(spacing: 12) {
-            StatBox(title: "Tunneled", value: "\(model.telemetry.stats.tunneledRequests)", color: .green)
-            StatBox(title: "Direct", value: "\(model.telemetry.stats.directRequests)", color: .gray)
-            StatBox(title: "Blocked", value: "\(model.telemetry.stats.blockedRequests)", color: .red)
-            StatBox(title: "Bytes", value: Format.bytes(model.telemetry.stats.bytesIn + model.telemetry.stats.bytesOut), color: .blue)
-            StatBox(title: "Active", value: "\(model.telemetry.stats.activeConnections)", color: .orange)
+            StatBox(title: "Tunneled", value: "\(telemetry.stats.tunneledRequests)", color: .green)
+            StatBox(title: "Direct", value: "\(telemetry.stats.directRequests)", color: .gray)
+            StatBox(title: "Blocked", value: "\(telemetry.stats.blockedRequests)", color: .red)
+            StatBox(title: "Bytes", value: Format.bytes(telemetry.stats.bytesIn + telemetry.stats.bytesOut), color: .blue)
+            StatBox(title: "Active", value: "\(telemetry.stats.activeConnections)", color: .orange)
         }
     }
 
@@ -201,7 +202,9 @@ struct DashboardView: View {
     }
 
     private struct SeriesPoint: Identifiable {
-        let id = UUID()
+        // Deterministic id (bucket + route) so `Chart` can diff marks instead
+        // of rebuilding every one on each telemetry tick.
+        let id: String
         let bucket: Date
         let route: Route
         let value: Double
@@ -215,8 +218,8 @@ struct DashboardView: View {
             let cutoff = nowMs - Int64(timeRange.seconds) * 1000
             var events: [RequestEvent] = []
             events.reserveCapacity(2100)
-            for e in model.telemetry.liveRequests where e.ts >= cutoff { events.append(e) }
-            for e in model.telemetry.recentRequests.suffix(2000) where e.ts >= cutoff { events.append(e) }
+            for e in telemetry.liveRequests where e.ts >= cutoff { events.append(e) }
+            for e in telemetry.recentRequests.suffix(2000) where e.ts >= cutoff { events.append(e) }
             return TelemetryStore.bucketize(events, bucketMs: timeRange.bucketMs)
         }
         return dbSeries
@@ -231,6 +234,7 @@ struct DashboardView: View {
             case .errors: value = Double(b.errors)
             }
             return SeriesPoint(
+                id: "\(b.bucketMs)-\(b.route.rawValue)",
                 bucket: Date(timeIntervalSince1970: Double(b.bucketMs) / 1000),
                 route: b.route,
                 value: value
@@ -344,13 +348,13 @@ struct DashboardView: View {
         let hourAgo = Int64(Date().timeIntervalSince1970 * 1000) - 3_600_000
         var counts: [String: Int] = [:]
         var scanned = 0
-        for event in model.telemetry.liveRequests {
+        for event in telemetry.liveRequests {
             if event.route == .tunnel { counts[event.host, default: 0] += 1 }
             scanned += 1
             if scanned > 500 { break }
         }
         scanned = 0
-        for event in model.telemetry.recentRequests.reversed() where event.ts >= hourAgo {
+        for event in telemetry.recentRequests.reversed() where event.ts >= hourAgo {
             if event.route == .tunnel { counts[event.host, default: 0] += 1 }
             scanned += 1
             if scanned > 3000 { break }
@@ -386,8 +390,8 @@ struct DashboardView: View {
 
     private var selectedEvent: RequestEvent? {
         guard let id = selectedID else { return nil }
-        if let e = model.telemetry.liveRequests.first(where: { $0.id == id }) { return e }
-        if let e = model.telemetry.recentRequests.first(where: { $0.id == id }) { return e }
+        if let e = telemetry.liveRequests.first(where: { $0.id == id }) { return e }
+        if let e = telemetry.recentRequests.first(where: { $0.id == id }) { return e }
         return nil
     }
 
@@ -405,7 +409,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text("\(model.telemetry.liveRequests.count) live · \(model.telemetry.recentRequests.count) completed")
+            Text("\(telemetry.liveRequests.count) live · \(telemetry.recentRequests.count) completed")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -419,10 +423,10 @@ struct DashboardView: View {
     private func computeFeedRows() -> [FeedRow] {
         var rows: [FeedRow] = []
         rows.reserveCapacity(320)
-        for event in model.telemetry.liveRequests {
+        for event in telemetry.liveRequests {
             rows.append(FeedRow(event: event, isLive: true))
         }
-        for event in model.telemetry.recentRequests.suffix(250).reversed() {
+        for event in telemetry.recentRequests.suffix(250).reversed() {
             rows.append(FeedRow(event: event, isLive: false))
         }
         switch routeFilter {
@@ -453,8 +457,8 @@ struct DashboardView: View {
         guard force || now - lastDBLoad >= 1500 else { return }
         lastDBLoad = now
         let range = timeRange.seconds
-        model.telemetry.chartSeries(rangeSeconds: range, bucketMs: timeRange.bucketMs) { dbSeries = $0 }
-        model.telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
+        telemetry.chartSeries(rangeSeconds: range, bucketMs: timeRange.bucketMs) { dbSeries = $0 }
+        telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
     }
 }
 

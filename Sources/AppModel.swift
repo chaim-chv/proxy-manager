@@ -103,10 +103,13 @@ final class AppModel: ObservableObject {
             .sink { [weak self] error in self?.sshError = error }
             .store(in: &cancellables)
 
-        telemetry.objectWillChange
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.objectWillChange.send() }
-            .store(in: &cancellables)
+        // NOTE: telemetry deliberately does NOT forward its `objectWillChange`
+        // to `AppModel`. `AppModel` is the environment object for every window
+        // (including the retained, offscreen Settings window), so forwarding the
+        // 10 Hz telemetry tick here invalidated the whole view tree — including
+        // views that never display telemetry — and kept an invisible Settings
+        // window re-laying-out forever. The dashboard observes `TelemetryStore`
+        // directly instead; see `DashboardWindowController`.
 
         tunnelSupervisor.start()
         syncManagedTunnel()

@@ -17,7 +17,9 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         if window == nil {
-            let view = DashboardView().environmentObject(AppModel.shared)
+            let view = DashboardView()
+                .environmentObject(AppModel.shared)
+                .environmentObject(AppModel.shared.telemetry)
             let hosting = NSHostingController(rootView: view)
             let w = NSWindow(contentViewController: hosting)
             w.title = "Proxy Manager"

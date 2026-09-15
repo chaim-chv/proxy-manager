@@ -56,7 +56,12 @@ final class TunnelSupervisor: ObservableObject {
             self?.upState = up
             self?.stateLock.unlock()
             DispatchQueue.main.async {
-                self?.tunnelUp = up
+                // Only publish on a real change: `@Published` has no equality
+                // check, so an unconditional write every 10 s invalidated every
+                // AppModel observer (and rebuilt the status icon) even when the
+                // tunnel state was unchanged.
+                guard let self, self.tunnelUp != up else { return }
+                self.tunnelUp = up
             }
         }
     }

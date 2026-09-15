@@ -22,7 +22,13 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
   - drains completions → publishes `recentRequests` + `stats` on main (one batched update), and
   - republishes `liveRequests` rows that changed.
   - accumulates into `dbAccumulator`; every **1000** rows it flushes to SQLite as **one transaction** using a **prepared statement**.
+- `applyToUI` rebuilds each `@Published` collection locally and assigns it **at most once per tick, and only when it actually changed**; a tick with an all-zero delta and an unchanged active count skips the stats block entirely. Combine `@Published` fires `objectWillChange` on every set with no equality check, so the old per-operation writes re-rendered every observer several times per tick.
+- `maybePurge` reuses the `nowMs` `flush` already computed instead of calling `Date()` on every 10 Hz tick.
 - `setActiveConnections(_:)` is an atomic counter (no main-thread dispatch per connection).
+
+## Observation (who re-renders)
+
+`TelemetryStore` is an `ObservableObject` but is **not** bridged into `AppModel.objectWillChange`. `AppModel` is the environment object for every window — including the retained, offscreen `Settings` scene window — so forwarding the 10 Hz tick there invalidated the whole view tree (views that never show telemetry included) and kept an invisible Settings window re-running `NSHostingView.minSize()`/`sizeThatFits` forever (a steady 10–20% CPU). The Dashboard observes `TelemetryStore` directly (`@EnvironmentObject var telemetry: TelemetryStore`, injected in `DashboardWindowController`); no other view observes it (Settings only calls `telemetry.purge()`).
 
 ## Storage
 
@@ -33,7 +39,7 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Threading
 
 - `record`/`setActiveConnections` (relay threads) and `flush` (flusher) coordinate via `lock`.
-- `@Published recentRequests`/`stats` are only mutated on main (in `applyToUI`).
+- `@Published recentRequests`/`stats` are only mutated on main (in `applyToUI`), at most once each per tick and only on change.
 - SQLite runs on a serial `dbQueue`; query completions hop back to main.
 
 ## Memory bounds

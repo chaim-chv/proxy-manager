@@ -62,6 +62,6 @@ Cached static `DateFormatter`/`ByteCountFormatter` (main-thread only) — do **n
 
 ## UI principles
 
-- Telemetry publishes to the UI at 10 Hz (batched), not per request.
+- Telemetry publishes to the UI at 10 Hz (batched), not per request. Only the Dashboard observes `TelemetryStore` directly (`@EnvironmentObject var telemetry`). It is deliberately **not** bridged into `AppModel.objectWillChange`: `AppModel` is the environment object for every window, including the retained offscreen `Settings` scene window, so the bridge re-laid-out the entire view tree on every tick (10–20% CPU while idle). See `docs/telemetry.md` → Observation.
 - `ForEach` identity must be unique — `RequestEvent.id` is a `UUID`.
 - No retain cycles: window `delegate` is weak; controllers release their hosting views on close.
