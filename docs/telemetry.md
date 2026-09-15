@@ -33,7 +33,7 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Storage
 
 - DB at `~/Library/Application Support/ProxyManager/telemetry.sqlite` (WAL, `synchronous=NORMAL`, `cache_size=-8000`).
-- `requests` table (per-request rows, indexed on `ts`/`host`/`route`) + `minute_stats` (per-minute per-route aggregates, upserted from an in-memory aggregate; currently written but never queried — charts read `requests` directly).
+- `requests` table (per-request rows, indexed on `ts`/`host`/`route`). Charts aggregate directly from it (`minute_stats` was removed — it was write-only).
 - Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`).
 
 ## Threading
@@ -49,14 +49,13 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Sharp edges (see `docs/roadmap.md`)
 
 - `recentRequests.removeFirst(...)` is O(n) on main (bounded but worth a ring buffer).
-- `minute_stats` upsert runs *after* `COMMIT` (not atomic with `requests`).
-- `requestSeries`/`topHosts` interpolate `rangeSeconds`/`limit` into SQL (Ints, no real injection, but prefer binds); `chartSeries` binds its parameters.
+- `topHosts` interpolates `rangeSeconds`/`limit` into SQL (Ints, no real injection, but prefer binds); `chartSeries` binds its parameters.
 - `purge()` also drops in-flight sessions (their rows are discarded entirely).
 
 ## Audit changes (2026-09-15)
 
 - **Use-after-free fixed**: `bindText`/`upsertMinuteStats` bound strings with `SQLITE_STATIC` on a temporary `NSString` whose lifetime ended before `sqlite3_step`. They now pass `SQLITE_TRANSIENT` (SQLite copies immediately).
 - `sqlite3_step`/`COMMIT` failures are now logged (no more silent data loss).
-- `minute_stats` is now purged alongside `requests` with the retention cutoff.
+- Retention purges `requests` with the cutoff; a stale `minute_stats` table is dropped on schema open.
 - `flushNow()` drains buffered events synchronously; `AppModel.shutdownForQuit()` calls it so the last sub-second of telemetry survives a quit.
 

@@ -127,7 +127,6 @@ final class TelemetryStore: ObservableObject {
     private let retentionDays: Int
     private var db: OpaquePointer?
     private var insertStmt: OpaquePointer?
-    private var statsStmt: OpaquePointer?
 
     private let dbQueue = DispatchQueue(label: "com.proxymanager.telemetry.db")
     private let lock = NSLock()
@@ -159,7 +158,6 @@ final class TelemetryStore: ObservableObject {
     deinit {
         flusher?.cancel()
         sqlite3_finalize(insertStmt)
-        sqlite3_finalize(statsStmt)
         if let db = db { sqlite3_close(db) }
     }
 
@@ -197,14 +195,9 @@ final class TelemetryStore: ObservableObject {
         CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
         CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
         CREATE INDEX IF NOT EXISTS idx_requests_route ON requests(route);
-        CREATE TABLE IF NOT EXISTS minute_stats (
-            bucket INTEGER NOT NULL,
-            route TEXT NOT NULL,
-            requests INTEGER NOT NULL,
-            bytes_in INTEGER NOT NULL,
-            bytes_out INTEGER NOT NULL,
-            PRIMARY KEY (bucket, route)
-        );
+        -- `minute_stats` was a write-only aggregate (never queried); drop it on
+        -- upgrade. Charts read the `requests` table directly.
+        DROP TABLE IF EXISTS minute_stats;
         """
         sqlite3_exec(db, schema, nil, nil, nil)
     }
@@ -217,16 +210,6 @@ final class TelemetryStore: ObservableObject {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil)
-
-        let statsSQL = """
-        INSERT INTO minute_stats (bucket, route, requests, bytes_in, bytes_out)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(bucket, route) DO UPDATE SET
-            requests = requests + excluded.requests,
-            bytes_in = bytes_in + excluded.bytes_in,
-            bytes_out = bytes_out + excluded.bytes_out;
-        """
-        sqlite3_prepare_v2(db, statsSQL, -1, &statsStmt, nil)
     }
 
     private func startFlusher() {
@@ -433,31 +416,6 @@ final class TelemetryStore: ObservableObject {
         if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
             NSLog("ProxyManager: telemetry commit failed: \(String(cString: sqlite3_errmsg(db)))")
         }
-        upsertMinuteStats(events)
-    }
-
-    private func upsertMinuteStats(_ events: [RequestEvent]) {
-        guard let stmt = statsStmt else { return }
-        // Aggregate per (bucket, route) in memory, then upsert once per key.
-        var agg: [Int64: [String: (Int64, Int64, Int64)]] = [:] // bucket -> route -> (count, in, out)
-        for e in events {
-            let bucket = (e.ts / 60_000) * 60_000
-            let route = e.route.rawValue
-            let cur = agg[bucket]?[route] ?? (0, 0, 0)
-            agg[bucket, default: [:]][route] = (cur.0 + 1, cur.1 + e.bytesIn, cur.2 + e.bytesOut)
-        }
-        for (bucket, routes) in agg {
-            for (route, v) in routes {
-                sqlite3_reset(stmt)
-                sqlite3_clear_bindings(stmt)
-                sqlite3_bind_int64(stmt, 1, bucket)
-                sqlite3_bind_text(stmt, 2, (route as NSString).utf8String, -1, SQLITE_TRANSIENT)
-                sqlite3_bind_int64(stmt, 3, v.0)
-                sqlite3_bind_int64(stmt, 4, v.1)
-                sqlite3_bind_int64(stmt, 5, v.2)
-                sqlite3_step(stmt)
-            }
-        }
     }
 
     private func bindText(_ stmt: OpaquePointer, _ idx: Int32, _ text: String) {
@@ -475,7 +433,6 @@ final class TelemetryStore: ObservableObject {
             let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000
             var sql = "DELETE FROM requests WHERE ts < \(cutoff);"
             sqlite3_exec(db, sql, nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM minute_stats WHERE bucket < \(cutoff);", nil, nil, nil)
             if self.maxRows > 0 {
                 sql = "DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY ts DESC, id DESC LIMIT -1 OFFSET \(self.maxRows));"
                 sqlite3_exec(db, sql, nil, nil, nil)
@@ -517,32 +474,10 @@ final class TelemetryStore: ObservableObject {
         dbQueue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
             sqlite3_exec(db, "DELETE FROM requests;", nil, nil, nil)
-            sqlite3_exec(db, "DELETE FROM minute_stats;", nil, nil, nil)
         }
     }
 
     // MARK: - Queries (charts)
-
-    func requestSeries(rangeSeconds: Int, completion: @escaping ([String: Int]) -> Void) {
-        dbQueue.async { [weak self] in
-            guard let self = self, let db = self.db else {
-                DispatchQueue.main.async { completion([:]) }
-                return
-            }
-            let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
-            let sql = "SELECT route, COUNT(*) FROM requests WHERE ts >= \(cutoff * 1000) GROUP BY route;"
-            var result: [String: Int] = [:]
-            var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
-                while sqlite3_step(s) == SQLITE_ROW {
-                    let route = String(cString: sqlite3_column_text(s, 0))
-                    result[route] = Int(sqlite3_column_int(s, 1))
-                }
-            }
-            sqlite3_finalize(stmt)
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
 
     /// Aggregates raw events into `bucketMs`-wide buckets (in-memory, pure).
     /// Used for the live "5m" chart and as the unit-testable reference for the

@@ -96,7 +96,7 @@ extension ServiceProxyState {
             }
         }
         for s in [webServer, secureServer] {
-            if !s.isEmpty && !NetworksetupCommands.isValidService(s) { return false }
+            if !s.isEmpty && !NetworksetupCommands.isValidProxyServer(s) { return false }
         }
         return true
     }
@@ -166,6 +166,15 @@ enum NetworksetupCommands {
     static func isHTTPURL(_ s: String) -> Bool {
         guard let u = URL(string: s) else { return false }
         return u.scheme == "http" || u.scheme == "https"
+    }
+
+    /// Validates a proxy server host (hostname, IPv4, or IPv6 literal —
+    /// bracketed or not) against a safe charset. Stricter than a hostname
+    /// grammar on purpose; values still reach `networksetup` as argv.
+    static func isValidProxyServer(_ s: String) -> Bool {
+        guard !s.isEmpty, s.count <= 255 else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-:[]_"))
+        return s.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     /// Validates a service name against a safe charset (no shell metacharacters).

@@ -46,8 +46,8 @@ final class UpdaterController: NSObject, ObservableObject {
 
     let controller: SPUStandardUpdaterController
 
-    /// Mirrors `SPUUpdater.canCheckForUpdates` so the menu item and the About
-    /// button can disable themselves while a check is already in flight.
+    /// Mirrors `SPUUpdater.canCheckForUpdates` so the status-menu item and the
+    /// Settings → General button can disable themselves while a check is in flight.
     @Published private(set) var canCheckForUpdates = false
 
     /// Mirrors the user's check-frequency choice (Settings → General).
@@ -86,9 +86,9 @@ final class UpdaterController: NSObject, ObservableObject {
         return updater.updateCheckInterval >= UpdateFrequency.weekly.interval! ? .weekly : .daily
     }
 
-    /// User-initiated check (menu item / About button). The standard user
-    /// driver handles all UI: "up to date", "update available", progress,
-    /// install + relaunch.
+    /// User-initiated check (status-menu item / Settings → General button). The
+    /// standard user driver handles all UI: "up to date", "update available",
+    /// progress, install + relaunch.
     @objc func checkForUpdates(_ sender: Any?) {
         controller.checkForUpdates(sender)
     }

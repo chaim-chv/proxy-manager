@@ -4,10 +4,11 @@
 
 ## Storage
 
-- Config: `~/Library/Application Support/ProxyManager/config.json` (JSON, atomic write).
+- Config: `~/Library/Application Support/ProxyManager/config.json` (JSON, atomic write, `0600`).
 - Telemetry: `telemetry.sqlite` (same dir).
-- System-proxy snapshot: `system-proxy-snapshot.json` (same dir).
+- System-proxy snapshot: `system-proxy-snapshot.json` (same dir, `0600`).
 - Shell env: `~/.config/proxy-manager/env.sh`.
+- Both directories are created `0700` (owner-only).
 
 ## Models (`AppConfig`)
 
@@ -35,6 +36,7 @@ Notes:
 - `tunnel.mode` selects who provides the tunnel: `MANUAL` (user's own SOCKS5) or `MANAGED` (the app runs `ssh -N -D`). `effectiveHost`/`effectivePort` resolve to `managed.socksHost/socksPort` in managed mode, else `host`/`port`.
 - `managed.auth` is `KEY` or `PASSWORD`; the password is **not** stored here — it lives in the Keychain (`SSHKeychain`, service `com.proxymanager.ssh`).
 - `tunnel.launchdLabel` (manual mode) is the optional launchd job label for "Supervised by app"; restart only acts when `supervised` is true **and** the label is non-empty.
+- `lock` is **reserved** (app-lock is not implemented): it is persisted/decoded but nothing reads `enabled` yet.
 - `TunnelSettings`, `SystemSettings`, and **every other config struct** (`AppConfig`, `ProxySettings`, `PolicySettings`, `MonitorSettings`, `LockSettings`, `ManagedTunnelSettings`, `TargetRule`) use custom Codable with `decodeIfPresent(...) ?? default`. This is required: synthesized `Codable` throws `keyNotFound` for a missing key even when the property has a default, so adding a field would fail whole-file decode and wipe the user's config. `Tests/RegressionHarness` asserts a legacy config (missing `policy`/`monitor`/`lock`) and a future config (unknown keys) both decode and preserve targets.
 
 ## `ConfigStore`

@@ -34,6 +34,9 @@ final class ConfigStore {
     private func ensureDirectories() {
         try? fileManager.createDirectory(at: supportDir, withIntermediateDirectories: true)
         try? fileManager.createDirectory(at: envDir, withIntermediateDirectories: true)
+        // Owner-only: these hold config, the proxy snapshot, and env.sh.
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: supportDir.path)
+        try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: envDir.path)
     }
 
     private static func load(from url: URL) -> AppConfig? {
@@ -55,7 +58,14 @@ final class ConfigStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else { return }
-        try? data.write(to: configURL, options: .atomic)
+        writeOwnerOnly(data, to: configURL)
+    }
+
+    /// Atomic write, then restrict to the owner. `.atomic` replaces the inode,
+    /// so the permission fix must run after the write, not before.
+    private func writeOwnerOnly(_ data: Data, to url: URL) {
+        try? data.write(to: url, options: .atomic)
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     // MARK: - System-proxy snapshot (persisted so a crash can't lose the
@@ -64,7 +74,7 @@ final class ConfigStore {
     func saveSnapshot(_ snapshot: SystemProxySnapshot) {
         let encoder = JSONEncoder()
         guard let data = try? encoder.encode(snapshot) else { return }
-        try? data.write(to: snapshotURL, options: .atomic)
+        writeOwnerOnly(data, to: snapshotURL)
     }
 
     func loadSnapshot() -> SystemProxySnapshot? {

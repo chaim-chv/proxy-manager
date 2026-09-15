@@ -6,11 +6,10 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 
 ## 1. Remaining correctness/robustness (medium/low from review)
 
-- **Proxy**: `removeFirst` O(n) buffers → index/ring buffer; `maxConcurrent` is hardcoded (semaphore 256) and the settings field is ignored; `inet_addr` fails for hostname `bindHost`.
-- **Socket**: `setNonBlocking` ignores the `F_SETFL` result.
+- **Proxy**: `removeFirst` O(n) buffers → index/ring buffer.
 - **SOCKS5**: handshake `SO_RCVTIMEO`/`SO_SNDTIMEO` persist into the plain-HTTP first write (reset after handshake).
 - **HTTPParser**: add a header count cap; handle non-UTF8 → deterministic 400; `Host` presence validation.
-- **Telemetry**: `recentRequests.removeFirst` O(n); `minute_stats` is written but never read (charts query `requests`) and its upsert runs outside the transaction; `requestSeries` is dead code; check `BEGIN` rc; parameterize the interpolated query SQL (`requestSeries`/`topHosts`); guard `sqlite3_column_text` NULL.
+- **Telemetry**: `recentRequests.removeFirst` O(n); check `BEGIN` rc; parameterize the interpolated query SQL (`topHosts`); guard `sqlite3_column_text` NULL.
 - **System proxy**: `helperUsable` re-probe after failure; apply `isValidService` on the osascript path.
 - **Routing**: reject port-bearing patterns; lowercase host in `matches` (which requires a pre-normalized host).
 - **Config**: synchronize `config`; timestamped corrupt backups; handle `ensureDirectories` errors.

@@ -240,6 +240,8 @@ struct MonitorSettings: Codable, Equatable {
     }
 }
 
+/// Reserved: app-lock is not implemented yet. Persisted so a future build can
+/// add it without a schema migration; nothing reads `enabled` today.
 struct LockSettings: Codable, Equatable {
     var enabled: Bool = false
 

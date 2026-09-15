@@ -126,7 +126,12 @@ enum Socket {
             let fd = socket(addr.pointee.ai_family, addr.pointee.ai_socktype, addr.pointee.ai_protocol)
             if fd >= 0 {
                 setNoSIGPIPE(fd)
-                setNonBlocking(fd, on: true)
+                if !setNonBlocking(fd, on: true) {
+                    close(fd)
+                    lastError = "could not set non-blocking"
+                    ptr = addr.pointee.ai_next
+                    continue
+                }
                 var res: Int32 = -1
                 repeat {
                     res = Darwin.connect(fd, addr.pointee.ai_addr, addr.pointee.ai_addrlen)
@@ -150,10 +155,10 @@ enum Socket {
                         lastError = String(cString: strerror(errno))
                     }
                 }
-                if res == 0 {
-                    setNonBlocking(fd, on: false)
+                if res == 0, setNonBlocking(fd, on: false) {
                     return fd
                 }
+                if res == 0 { lastError = "could not restore blocking mode" }
                 close(fd)
             }
             ptr = addr.pointee.ai_next
@@ -161,10 +166,11 @@ enum Socket {
         throw SocketError.message("connect(\(host):\(port)) failed: \(lastError)")
     }
 
-    static func setNonBlocking(_ fd: Int32, on: Bool) {
+    @discardableResult
+    static func setNonBlocking(_ fd: Int32, on: Bool) -> Bool {
         let flags = fcntl(fd, F_GETFL, 0)
-        guard flags != -1 else { return }
-        _ = fcntl(fd, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK))
+        guard flags != -1 else { return false }
+        return fcntl(fd, F_SETFL, on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK)) != -1
     }
 
     /// Peer's ephemeral source port (0 if the peer is not an IPv4 TCP socket).

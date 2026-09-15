@@ -48,7 +48,7 @@ Each connection runs its whole life on **one detached thread**:
 ## Concurrency & limits
 
 - `DispatchSemaphore(value: 256)` bounds concurrent connections; the accept loop blocks when full (backpressure into the TCP backlog).
-- `maxConcurrent` is a `ProxyRuntimeSettings` field but the semaphore is fixed at 256 at init — changing the setting at runtime has no effect (known limitation; see `docs/roadmap.md`).
+- Concurrency is capped by a fixed semaphore (`ProxyServer.maxConnections` = 256); it is intentionally not runtime-configurable (a `DispatchSemaphore` cannot be resized safely).
 
 ## Failure paths that must stay covered
 

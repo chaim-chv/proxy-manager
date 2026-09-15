@@ -38,6 +38,12 @@ final class HelperService: NSObject, ProxyManagerHelperProtocol {
         }
         let valid = snapshot.filter { NetworksetupCommands.isValidService($0.key) }
         let snap = SystemProxySnapshot.from(xpcDictionary: valid)
+        // Defense in depth: refuse a snapshot where no service is restorable
+        // (per-field sanitizing still handles partially-invalid services).
+        guard snap.isEmpty || snap.contains(where: { $0.value.isValid }) else {
+            reply(false, "snapshot has no valid services")
+            return
+        }
         let commands = NetworksetupCommands.restore(snapshot: snap)
         guard !commands.isEmpty else {
             reply(false, "no valid network services")

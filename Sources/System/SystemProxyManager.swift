@@ -102,8 +102,26 @@ final class SystemProxyManager {
     }
 
     func restore(snapshot: SystemProxySnapshot) throws {
+        try Self.checkRestorable(snapshot)
         try runMutations(commands: NetworksetupCommands.restore(snapshot: snapshot)) {
             try helper.restoreProxy(snapshot: snapshot)
+        }
+    }
+
+    /// Pre-flight guard: a non-empty snapshot in which **no** service has
+    /// structurally-valid state would make restore a no-op that still reports
+    /// success, so the caller would clear the snapshot and disarm the watchdog
+    /// while the proxy stays dangling. Partially-invalid services are fine:
+    /// `NetworksetupCommands.restore` sanitizes per field (turning a bad field
+    /// off rather than dropping the whole service).
+    private static func checkRestorable(_ snapshot: SystemProxySnapshot) throws {
+        guard !snapshot.isEmpty else { return }
+        let invalid = snapshot.filter { !$0.value.isValid }.keys.sorted()
+        if !invalid.isEmpty {
+            Log.system.error("restore: invalid service state for \(invalid.joined(separator: ", "))")
+        }
+        guard snapshot.contains(where: { $0.value.isValid }) else {
+            throw ProxyHelperError.message("snapshot has no valid services to restore")
         }
     }
 
@@ -112,6 +130,7 @@ final class SystemProxyManager {
     /// the `osascript` fallback must never run): it uses the privileged helper
     /// only if already registered, otherwise `networksetup` directly as the user.
     func restoreWithoutPrompt(snapshot: SystemProxySnapshot) throws {
+        try Self.checkRestorable(snapshot)
         if helper.isRegistered {
             do {
                 try helper.restoreProxy(snapshot: snapshot)

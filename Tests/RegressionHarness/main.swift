@@ -132,6 +132,14 @@ check("port 0 rejected", !badPort.isValid)
 var badPort2 = s
 badPort2.webPort = "70000"
 check("port 70000 rejected", !badPort2.isValid)
+// Proxy servers may be IPv6 literals (the old check wrongly used the
+// service-name charset and would have dropped them from a restore).
+var ipv6Server = s
+ipv6Server.webServer = "2001:db8::1"
+check("IPv6 proxy server valid", ipv6Server.isValid)
+var badServer = s
+badServer.webServer = "evil; rm -rf /"
+check("metachar proxy server rejected", !badServer.isValid)
 
 print("== Snapshot migration ==")
 // A snapshot persisted by a build before `bypassDomains` existed must still

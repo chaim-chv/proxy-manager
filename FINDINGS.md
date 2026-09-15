@@ -116,7 +116,7 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 
 **Status:** Fixed.
 
-**Summary:** `bindText` and the inline `minute_stats` bind now pass `SQLITE_TRANSIENT` (`Sources/Telemetry/TelemetryStore.swift:7`, `:454`, `:463-465`), so SQLite copies the string before the temporary bridged `NSString` is released. The old `nil` destructor was `SQLITE_STATIC`, which stored a raw pointer into that temporary and produced a use-after-free (garbled host/path/route/error values or a crash) on every `insertBatch`/`upsertMinuteStats`.
+**Summary:** `bindText` now passes `SQLITE_TRANSIENT` (`Sources/Telemetry/TelemetryStore.swift:7`, `:463-465`), so SQLite copies the string before the temporary bridged `NSString` is released. The old `nil` destructor was `SQLITE_STATIC`, which stored a raw pointer into that temporary and produced a use-after-free (garbled host/path/route/error values or a crash) on every `insertBatch`.
 
 **Context:** `insertBatch` now also checks the `sqlite3_step` and `COMMIT` return codes (`:429-435`); the `upsertMinuteStats` step (`:458`) is still unchecked.
 

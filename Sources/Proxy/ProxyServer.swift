@@ -9,7 +9,6 @@ struct ProxyRuntimeSettings {
     var failClosed: Bool = false
     var idleTimeout: TimeInterval = 120
     var connectTimeout: TimeInterval = 10
-    var maxConcurrent: Int = 256
     var recordPaths: Bool = true
 }
 
@@ -22,8 +21,12 @@ struct ProxyRuntimeSettings {
 ///    loop with bounded buffers and backpressure.
 ///  - Upstream connections use raw BSD sockets so they bypass the macOS system
 ///    proxy (avoiding a routing loop back into this proxy).
-///  - Concurrency is bounded by `maxConcurrent`.
+///  - Concurrency is bounded by a fixed semaphore (`maxConnections`).
 final class ProxyServer {
+    /// Hard cap on simultaneous connection threads. A `DispatchSemaphore`
+    /// cannot be resized, so this is fixed rather than configurable.
+    private static let maxConnections = 256
+
     let routingEngine = RoutingEngine()
     let telemetry: TelemetryStore
 
@@ -41,7 +44,7 @@ final class ProxyServer {
 
     init(telemetry: TelemetryStore) {
         self.telemetry = telemetry
-        self.semaphore = DispatchSemaphore(value: 256)
+        self.semaphore = DispatchSemaphore(value: Self.maxConnections)
     }
 
     func update(settings: ProxyRuntimeSettings) {
@@ -60,6 +63,19 @@ final class ProxyServer {
         let s = settings
         lock.unlock()
 
+        // The listener is IPv4-only, so the bind host must be an IPv4 literal
+        // (or a wildcard). A hostname makes `inet_addr` return `INADDR_NONE`
+        // and would silently bind to 255.255.255.255; reject it with a clear
+        // message instead.
+        var bindAddress: in_addr_t = INADDR_ANY
+        if !s.bindHost.isEmpty && s.bindHost != "0.0.0.0" {
+            let parsed = inet_addr(s.bindHost)
+            guard parsed != INADDR_NONE else {
+                throw SocketError.message("invalid bind host '\(s.bindHost)' — use an IPv4 address (e.g. 127.0.0.1) or 0.0.0.0")
+            }
+            bindAddress = parsed
+        }
+
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError.message("socket() failed") }
         Socket.setNoSIGPIPE(fd)
@@ -69,11 +85,7 @@ final class ProxyServer {
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = s.port.bigEndian
-        if s.bindHost == "0.0.0.0" || s.bindHost.isEmpty {
-            addr.sin_addr.s_addr = INADDR_ANY
-        } else {
-            addr.sin_addr.s_addr = inet_addr(s.bindHost)
-        }
+        addr.sin_addr.s_addr = bindAddress
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
 
         let bindResult = withUnsafePointer(to: &addr) {
@@ -135,7 +147,7 @@ final class ProxyServer {
             // Use a detached thread (not GCD's global queue) — GCD's global pool
             // caps concurrent blocking tasks at ~64 threads, which starves the
             // proxy under load. A dedicated thread per connection (bounded by
-            // the semaphore) scales to `maxConcurrent`.
+            // the semaphore) scales to the connection cap.
             // Capture `self` strongly for the connection's lifetime: the permit
             // taken above must be returned before the server can deallocate,
             // otherwise libdispatch traps disposing `semaphore` while a permit
@@ -355,8 +367,13 @@ final class ProxyServer {
     /// live feed can tick without any main-thread work per chunk.
     private func relay(_ client: Int32, _ upstream: Int32, initial: [UInt8], idle: TimeInterval,
                        progress: ((Int64, Int64) -> Void)? = nil) -> (Int64, Int64) {
-        Socket.setNonBlocking(client, on: true)
-        Socket.setNonBlocking(upstream, on: true)
+        // The poll loop requires both fds non-blocking; if that fails a
+        // blocking recv/send could stall this thread indefinitely, so abort.
+        guard Socket.setNonBlocking(client, on: true),
+              Socket.setNonBlocking(upstream, on: true) else {
+            Log.proxy.error("relay: could not set non-blocking mode; aborting connection")
+            return (0, 0)
+        }
 
         var c2u = initial
         var u2c = [UInt8]()

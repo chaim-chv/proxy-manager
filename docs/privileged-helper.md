@@ -17,7 +17,7 @@ Runs `networksetup` as **root** so the app can set/clear the system proxy withou
 ## Security model
 
 - **argv only** — `HelperService` runs `networksetup` via `Process.arguments`, never a shell.
-- **Input validation** — service names (`isValidService` charset) and ports (1…65535 in `applyProxy`). On restore, `NetworksetupCommands.restore` sanitizes per field (skips empty/invalid-port proxy fields and non-`http`/`https` PAC URLs) instead of dropping the whole service; all values reach `networksetup` as argv, never a shell.
+- **Input validation** — service names (`isValidService` charset) and ports (1…65535 in `applyProxy`). On restore, structurally-invalid service state (`ServiceProxyState.isValid`) is dropped by the app and re-checked by the helper, and `NetworksetupCommands.restore` sanitizes per field (skips empty/invalid-port proxy fields and non-`http`/`https` PAC URLs); all values reach `networksetup` as argv, never a shell.
 - **Bounded execution** — each `networksetup` invocation is time-boxed (20 s `waitForExit`), so a hung command can't block the daemon forever.
 
 ## Registration requirements
