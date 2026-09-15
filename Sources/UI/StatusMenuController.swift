@@ -51,6 +51,7 @@ final class StatusMenuController: NSObject {
     private var launchAtLoginItem: NSMenuItem?
     private var errorMenuItem: NSMenuItem?
     private var restartMenuItem: NSMenuItem?
+    private var checkForUpdatesItem: NSMenuItem?
 
     private override init() {
         super.init()
@@ -105,6 +106,16 @@ final class StatusMenuController: NSObject {
         menu.addItem(navItem(title: "Open Dashboard…", key: "d", action: #selector(openDashboard)))
         menu.addItem(navItem(title: "Settings…", key: ",", action: #selector(openSettings)))
         menu.addItem(navItem(title: "About Proxy Manager", key: nil, action: #selector(showAbout)))
+
+        // Sparkle's standard updater handles the whole flow; its target/action
+        // also drives the enabled state via `canCheckForUpdates`.
+        let checkForUpdates = NSMenuItem(title: "Check for Updates…",
+                                         action: #selector(UpdaterController.checkForUpdates(_:)),
+                                         keyEquivalent: "")
+        checkForUpdates.target = UpdaterController.shared
+        checkForUpdatesItem = checkForUpdates
+        menu.addItem(checkForUpdates)
+
         menu.addItem(navItem(title: "Quit Proxy Manager", key: "q", action: #selector(quitApp)))
     }
 
@@ -136,6 +147,11 @@ final class StatusMenuController: NSObject {
             .store(in: &cancellables)
         model.$config.receive(on: main)
             .sink { [weak self] _ in self?.refresh() }
+            .store(in: &cancellables)
+        UpdaterController.shared.$canCheckForUpdates.receive(on: main)
+            .sink { [weak self] canCheck in
+                self?.checkForUpdatesItem?.isEnabled = canCheck
+            }
             .store(in: &cancellables)
     }
 

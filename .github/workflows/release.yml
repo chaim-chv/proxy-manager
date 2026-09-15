@@ -40,9 +40,44 @@ jobs:
           chmod +x build.sh
           ./build.sh ${{ steps.version.outputs.version }}
 
-      - name: Create ZIP archive
+      # `ditto` (not `zip -r`) preserves the framework symlinks and resource
+      # forks; a plain zip would follow the symlinks and break the code
+      # signature, which Sparkle then rejects.
+      - name: Package app
         run: |
-          zip -r ProxyManager-${{ steps.version.outputs.version }}.zip ProxyManager.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            ProxyManager.app ProxyManager-${{ steps.version.outputs.version }}.zip
+
+      # Sign the update archive with the EdDSA private key and emit appcast.xml.
+      # The feed URL embedded in the app (SUFeedURL) is:
+      #   https://github.com/<repo>/releases/latest/download/appcast.xml
+      # so the appcast must be attached to every release.
+      - name: Generate appcast
+        id: appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY secret is not set — skipping appcast. This release will not be offered as an update."
+            echo "has_appcast=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p updates
+          cp "ProxyManager-${{ steps.version.outputs.version }}.zip" updates/
+
+          KEY_FILE="$RUNNER_TEMP/sparkle_private_key"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          ./Vendor/Sparkle/bin/generate_appcast \
+            --ed-key-file "$KEY_FILE" \
+            --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/" \
+            -o updates/appcast.xml \
+            updates/
+
+          rm -f "$KEY_FILE"
+          echo "has_appcast=true" >> "$GITHUB_OUTPUT"
 
       - name: Generate release body
         run: |
@@ -64,6 +99,8 @@ jobs:
           > The app is not notarized by Apple, so you may need to bypass Gatekeeper.
           >
           > On first "Enable Routing" the app will prompt for administrator privileges to set the system proxy.
+          >
+          > Once installed, Proxy Manager updates itself via Sparkle — use **Check for Updates…** in the menu bar.
           EOF
 
           if [ -s CHANGELOG.md ]; then
@@ -84,3 +121,11 @@ jobs:
             ProxyManager-${{ steps.version.outputs.version }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach appcast
+        if: steps.appcast.outputs.has_appcast == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "v${{ steps.version.outputs.version }}" \
+            updates/appcast.xml --clobber

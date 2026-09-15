@@ -19,6 +19,7 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 | [tunnel-supervisor.md](tunnel-supervisor.md) | SOCKS5 health probe, tunnel restart |
 | [ui.md](ui.md) | SwiftUI menu bar, dashboard, settings, targets |
 | [build-and-distribution.md](build-and-distribution.md) | build.sh, signing, helper embedding, CI |
+| [updates.md](updates.md) | Sparkle auto-updates, appcast, EdDSA signing keys |
 | [testing.md](testing.md) | How to build/run regression harnesses |
 | [debugging-logging.md](debugging-logging.md) | Unified log, debugging, revert |
 | [performance.md](performance.md) | Performance model, resource footprint, hot path |

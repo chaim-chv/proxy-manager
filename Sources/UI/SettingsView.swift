@@ -277,6 +277,7 @@ func codeAwareText(_ text: String, baseFont: Font = .callout) -> Text {
 
 struct GeneralSettingsView: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject private var updater = UpdaterController.shared
 
     var body: some View {
         SettingsPage(title: SettingsSection.general.title, summary: SettingsSection.general.summary) {
@@ -289,6 +290,37 @@ struct GeneralSettingsView: View {
                             set: { model.setLaunchAtLogin($0) }
                         )
                     )
+                }
+
+                SettingsGroup(title: "Updates") {
+                    VStack(spacing: 0) {
+                        SettingsRow {
+                            Text("Check for updates")
+                            Spacer()
+                            Picker("Check for updates", selection: Binding(
+                                get: { updater.frequency },
+                                set: { updater.setFrequency($0) }
+                            )) {
+                                ForEach(UpdateFrequency.allCases) { frequency in
+                                    Text(frequency.title).tag(frequency)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .fixedSize()
+                        }
+                        Divider()
+                        SettingsRow {
+                            Text("Version \(UpdaterController.displayVersion)")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            CheckForUpdatesButton()
+                        }
+                        Divider()
+                        SettingsCaption(text: "Proxy Manager checks in the background and always asks before installing. Installing restarts the app; your routing settings are restored first and re-applied on relaunch.")
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                    }
                 }
 
                 SettingsGroup {

@@ -22,3 +22,12 @@ DerivedData/
 # IDE
 .vscode/
 .idea/
+
+# Sparkle signing keys (never commit the private key; public key is committed)
+Vendor/Sparkle/private_ed_key*
+Vendor/Sparkle/*.key
+*.sparkle-private
+
+# The vendored framework contains a nested Updater.app; the global *.app/ rule
+# above must not exclude it, or the framework is incomplete.
+!Vendor/Sparkle/Sparkle.framework/**

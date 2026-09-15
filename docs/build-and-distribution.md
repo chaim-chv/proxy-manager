@@ -6,7 +6,8 @@
 
 - No Xcode project — compiles all `Sources/*.swift` (except `Sources/Helper/`) with `xcrun swiftc -swift-version 5 -O -target <arch>-apple-macosx14.0`.
 - **Two binaries**: the app (`Contents/MacOS/ProxyManager`) and the helper daemon (`Contents/Library/LaunchDaemons/com.proxymanager.helper`), plus the daemon's `com.proxymanager.helper.plist`.
-- Generates `Info.plist` (bundle id `com.proxymanager.app`), copies `Resources/*.lproj`, then `codesign --force --deep`.
+- Links and embeds the vendored **Sparkle** framework (`Vendor/Sparkle/Sparkle.framework` → `Contents/Frameworks/`), adds the `@executable_path/../Frameworks` rpath to the app only, and writes the `SUFeedURL` / `SUPublicEDKey` / auto-update keys into `Info.plist`.
+- Generates `Info.plist` (bundle id `com.proxymanager.app`), copies `Resources/*.lproj`, then signs **inside-out** (Sparkle XPC services → `Autoupdate` → `Updater.app` → framework → helper → app). `--deep` is intentionally **not** used — it is deprecated and would smear Sparkle's XPC entitlements. See [updates.md](updates.md).
 
 ### Options
 
@@ -23,8 +24,8 @@
 
 ## CI (`release.yml`)
 
-Builds on `macos-latest` on tag push or `workflow_dispatch` (version input), zips `ProxyManager.app`, and creates a GitHub release with a changelog (`.github/scripts/changelog.sh`, Conventional Commits).
+Builds on `macos-latest` on tag push or `workflow_dispatch` (version input), packages `ProxyManager.app` with `ditto` (preserves framework symlinks), signs the archive and generates `appcast.xml` with Sparkle's `generate_appcast`, and creates a GitHub release with a changelog (`.github/scripts/changelog.sh`, Conventional Commits) plus the zip and the appcast feed. Requires the `SPARKLE_PRIVATE_KEY` secret for the feed; without it the release ships update-less with a warning. See [updates.md](updates.md).
 
 ## Distribution status
 
-Not notarized (documented in release notes). Homebrew cask / DMG not yet set up (see `docs/roadmap.md`).
+Not notarized (documented in release notes). Self-updates via Sparkle from GitHub releases. Homebrew cask / DMG not yet set up (see `docs/roadmap.md`).

@@ -11,6 +11,27 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 DAEMONS_DIR="$APP_BUNDLE/Contents/Library/LaunchDaemons"
+FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
+
+# Sparkle (vendored): linked, embedded, and signed into the bundle. The feed URL
+# can be overridden for testing; the public key is read from the committed file
+# (the private key never leaves the maintainer's Keychain / CI secret).
+SPARKLE_DIR="${SPARKLE_DIR:-Vendor/Sparkle}"
+SPARKLE_FRAMEWORK="$SPARKLE_DIR/Sparkle.framework"
+SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://github.com/chaim-chv/proxy-manager/releases/latest/download/appcast.xml}"
+if [ -z "${SPARKLE_PUBLIC_KEY:-}" ] && [ -f "$SPARKLE_DIR/public_ed_key.txt" ]; then
+    SPARKLE_PUBLIC_KEY="$(tr -d '[:space:]' < "$SPARKLE_DIR/public_ed_key.txt")"
+fi
+
+if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+    echo "❌ Sparkle.framework not found at $SPARKLE_FRAMEWORK" >&2
+    echo "   Run from the repo root, or set SPARKLE_DIR." >&2
+    exit 1
+fi
+if [ -z "${SPARKLE_PUBLIC_KEY:-}" ]; then
+    echo "⚠️  No Sparkle public key (SPARKLE_PUBLIC_KEY / $SPARKLE_DIR/public_ed_key.txt);" >&2
+    echo "    updates will be disabled in this build. Run ./Vendor/Sparkle/bin/generate_keys." >&2
+fi
 
 # App sources: everything except the helper's own target.
 APP_SOURCES=()
@@ -37,7 +58,14 @@ IDENTITY="${IDENTITY:--}"
 echo "🔨 Building $APP_NAME v$VERSION for $ARCH (macOS $MIN_MACOS+)..."
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR" "$FRAMEWORKS_DIR"
+
+if [ -n "${SPARKLE_PUBLIC_KEY:-}" ]; then
+    SPARKLE_KEY_PLIST="    <key>SUPublicEDKey</key>
+    <string>$SPARKLE_PUBLIC_KEY</string>"
+else
+    SPARKLE_KEY_PLIST=""
+fi
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -68,6 +96,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <false/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Proxy Manager</string>
+    <key>SUFeedURL</key>
+    <string>$SPARKLE_FEED_URL</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+$SPARKLE_KEY_PLIST
 </dict>
 </plist>
 EOF
@@ -89,22 +126,35 @@ compile() {
         -framework Network \
         -framework ServiceManagement \
         -framework Security \
+        ${EXTRA_LINK_FLAGS[@]+"${EXTRA_LINK_FLAGS[@]}"} \
         "$@" \
         -o "$out"
 }
 
+# The app links Sparkle and finds it in Contents/Frameworks at runtime. The
+# helper daemon is a separate target and must NOT link Sparkle.
+APP_LINK_FLAGS=(-F "$SPARKLE_DIR" -framework Sparkle
+    -Xlinker -rpath -Xlinker @executable_path/../Frameworks)
+
 if [ "${UNIVERSAL:-0}" = "1" ] && [ "$ARCH" = "arm64" ]; then
     echo "🛠  Building universal (arm64 + x86_64)…"
+    EXTRA_LINK_FLAGS=("${APP_LINK_FLAGS[@]}")
     compile arm64 "$MACOS_DIR/$APP_NAME.arm64" "${APP_SOURCES[@]}"
     compile x86_64 "$MACOS_DIR/$APP_NAME.x86_64" "${APP_SOURCES[@]}"
     lipo -create -output "$MACOS_DIR/$APP_NAME" \
         "$MACOS_DIR/$APP_NAME.arm64" "$MACOS_DIR/$APP_NAME.x86_64"
     rm -f "$MACOS_DIR/$APP_NAME.arm64" "$MACOS_DIR/$APP_NAME.x86_64"
 else
+    EXTRA_LINK_FLAGS=("${APP_LINK_FLAGS[@]}")
     compile "$ARCH" "$MACOS_DIR/$APP_NAME" "${APP_SOURCES[@]}"
 fi
 
-# Compile the privileged helper daemon.
+# Embed Sparkle. `ditto` (not `cp -R`) preserves the framework's symlinks,
+# which are load-bearing for its code signature.
+ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
+
+# Compile the privileged helper daemon (no Sparkle).
+unset EXTRA_LINK_FLAGS
 compile "$ARCH" "$DAEMONS_DIR/$HELPER_NAME" "${HELPER_SOURCES[@]}"
 
 # Embed the launch daemon plist (used by SMAppService.daemon).
@@ -130,6 +180,28 @@ if [ -d "Resources" ] && [ -n "$(ls -A Resources 2>/dev/null)" ]; then
     echo "📦 Copied resource files"
 fi
 
-codesign --force --deep --sign "$IDENTITY" "$APP_BUNDLE"
+# Sign inside-out. `--deep` is deliberately NOT used: Sparkle's XPC services
+# and helpers carry their own entitlements, and --deep would smear the wrong
+# entitlements across them (and is deprecated). The app bundle is signed last,
+# which seals everything nested.
+sign_sparkle() {
+    local fw="$FRAMEWORKS_DIR/Sparkle.framework"
+    local b="$fw/Versions/B"
+    [ -d "$fw" ] || return 0
+    for xpc in Installer Downloader; do
+        [ -d "$b/XPCServices/$xpc.xpc" ] && \
+            codesign --force --options runtime --preserve-metadata=entitlements \
+                --sign "$IDENTITY" "$b/XPCServices/$xpc.xpc"
+    done
+    [ -f "$b/Autoupdate" ] && \
+        codesign --force --options runtime --sign "$IDENTITY" "$b/Autoupdate"
+    [ -d "$b/Updater.app" ] && \
+        codesign --force --options runtime --sign "$IDENTITY" "$b/Updater.app"
+    codesign --force --options runtime --sign "$IDENTITY" "$fw"
+}
+
+sign_sparkle
+codesign --force --sign "$IDENTITY" "$DAEMONS_DIR/$HELPER_NAME"
+codesign --force --sign "$IDENTITY" "$APP_BUNDLE"
 
 echo "✅ Done! $APP_NAME.app v$VERSION is ready in $OUTPUT_DIR"

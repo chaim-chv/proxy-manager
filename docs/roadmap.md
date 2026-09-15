@@ -43,4 +43,5 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 
 ## 6. Release
 
+- ✅ **Auto-updates** — Sparkle 2 (vendored) with a GitHub-releases appcast; see [`updates.md`](updates.md). Works without an Apple Developer account (EdDSA signing + ad-hoc app signing).
 - Developer ID signing (wired via `IDENTITY=`), notarization, Homebrew cask / DMG.
