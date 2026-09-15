@@ -33,7 +33,7 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Storage
 
 - DB at `~/Library/Application Support/ProxyManager/telemetry.sqlite` (WAL, `synchronous=NORMAL`, `cache_size=-8000`).
-- `requests` table (per-request rows, indexed on `ts`/`host`/`route`) + `minute_stats` (per-minute per-route aggregates, upserted from an in-memory aggregate).
+- `requests` table (per-request rows, indexed on `ts`/`host`/`route`) + `minute_stats` (per-minute per-route aggregates, upserted from an in-memory aggregate; currently written but never queried — charts read `requests` directly).
 - Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`).
 
 ## Threading
@@ -44,13 +44,13 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 
 ## Memory bounds
 
-- `pending` drained every 100 ms; `dbAccumulator` capped ~2× batch size; `recentRequests` capped at 5000; `liveRequests` bounded by `maxConcurrent` (~256).
+- `pending` drained every 100 ms; `dbAccumulator` flushed once it reaches the 1000-row batch size; `recentRequests` capped at 5000; `liveRequests` bounded by the proxy's connection cap (256).
 
 ## Sharp edges (see `docs/roadmap.md`)
 
 - `recentRequests.removeFirst(...)` is O(n) on main (bounded but worth a ring buffer).
 - `minute_stats` upsert runs *after* `COMMIT` (not atomic with `requests`).
-- Query SQL uses string interpolation (`rangeSeconds`/`limit` — Ints, no real injection, but prefer binds).
+- `requestSeries`/`topHosts` interpolate `rangeSeconds`/`limit` into SQL (Ints, no real injection, but prefer binds); `chartSeries` binds its parameters.
 - `purge()` also drops in-flight sessions (their rows are discarded entirely).
 
 ## Audit changes (2026-09-15)

@@ -6,17 +6,17 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 
 ## 1. Remaining correctness/robustness (medium/low from review)
 
-- **Proxy**: `removeFirst` O(n) buffers → index/ring buffer; `maxConcurrent` is hardcoded (semaphore 256); `inet_addr` fails for hostname `bindHost`; unguarded `Int32(timeout * 1000)` in the relay.
-- **Socket**: `sendAll` treats `EAGAIN` as fatal (hazard on non-blocking fd); stale `errno` after `poll`/`SO_ERROR`; `setNonBlocking`/`getsockopt` return codes ignored.
+- **Proxy**: `removeFirst` O(n) buffers → index/ring buffer; `maxConcurrent` is hardcoded (semaphore 256) and the settings field is ignored; `inet_addr` fails for hostname `bindHost`; `readHeader`'s 64 KB cap can overshoot by up to one 4 KB chunk.
+- **Socket**: `sendAll` treats `EAGAIN` as fatal (hazard on non-blocking fd); `setNonBlocking` ignores the `F_SETFL` result.
 - **SOCKS5**: handshake `SO_RCVTIMEO`/`SO_SNDTIMEO` persist into the plain-HTTP first write (reset after handshake).
 - **HTTPParser**: add a header count cap; handle non-UTF8 → deterministic 400; `Host` presence validation.
-- **Telemetry**: `recentRequests.removeFirst` O(n); `minute_stats` upsert inside the transaction; check `BEGIN` rc; parameterize query SQL; guard `sqlite3_column_text` NULL.
+- **Telemetry**: `recentRequests.removeFirst` O(n); `minute_stats` is written but never read (charts query `requests`) and its upsert runs outside the transaction; `requestSeries` is dead code; check `BEGIN` rc; parameterize the interpolated query SQL (`requestSeries`/`topHosts`); guard `sqlite3_column_text` NULL.
 - **System proxy**: `helperUsable` re-probe after failure; apply `isValidService` on the osascript path.
 - **Shell env**: escape/sanitize `bindHost` before writing `env.sh`.
 - **Routing**: reject port-bearing patterns; lowercase host in `matches` (which requires a pre-normalized host).
 - **Config**: synchronize `config`; timestamped corrupt backups; handle `ensureDirectories` errors.
 - **UI**: `suffix(N).reversed()` feed; validate `portBinding` instead of silent clamp.
-- **Quit**: `shutdownForQuit()` runs synchronous admin work on the main thread (bounded to 15 s XPC / 180 s osascript); `disable()` is already async.
+- **Quit**: `shutdownForQuit()` does its (bounded) admin work on `workQueue`, but `workQueue.sync` blocks the main thread on quit (up to 15 s XPC / 180 s osascript); `disable()` is already async.
 
 ## 2. Known gaps (from the system-proxy audit)
 
@@ -26,11 +26,10 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 
 ## 3. Feature gaps
 
-- **Dashboard**: request detail panel, time-range buttons (5m/1h/24h/7d), more charts (RPS, bytes/s, per-host, error ratio).
 - **Targets**: import/export JSON, savable presets, drag-to-reorder, pattern validation.
 - **Settings**: timeouts/concurrency/buffer controls, PAC mode, open-config-in-Finder, full config import/export.
 - **App lock** (Keychain passcode).
-- **App icon** + **localization**.
+- **App icon** + **localization** (only `en.lproj` ships).
 
 ## 4. Tests & CI
 
@@ -39,9 +38,8 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 
 ## 5. Hardening
 
-- ✅ **Crash watchdog** — `Sources/Support/Watchdog.swift`: a `KeepAlive` user LaunchAgent (`ProxyManager --watchdog`) restores the system proxy within ms of the app dying (event-driven `kqueue NOTE_EXIT`, ~0 idle CPU), idempotently and only when the proxy is ours. Covered by `Tests/WatchdogHarness`. Remaining: a signed-build `SMAppService.agent` variant (the classic plist already needs no signing).
+- Signed-build `SMAppService.agent` variant of the crash watchdog (the current `KeepAlive` user LaunchAgent plist needs no signing).
 
 ## 6. Release
 
-- ✅ **Auto-updates** — Sparkle 2 (vendored) with a GitHub-releases appcast; see [`updates.md`](updates.md). Works without an Apple Developer account (EdDSA signing + ad-hoc app signing).
 - Developer ID signing (wired via `IDENTITY=`), notarization, Homebrew cask / DMG.

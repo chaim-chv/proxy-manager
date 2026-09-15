@@ -45,8 +45,8 @@ Restore the snapshot (or clear the proxy), remove env, clear snapshot, `wasOnKey
 
 - **Arm/disarm**: `enable()` arms (`WatchdogController.arm(port:)`) *before* `applyProxy`, so any crash past that point is covered. `disable()`/`shutdownForQuit()` disarm *after* restoring. State is the atomic `watchdog.json` (`{armed,pid,port,updatedAt}`).
 - **Detection is event-driven, not polling**: the loop blocks in `kevent` on `EVFILT_PROC`/`NOTE_EXIT` (app death) and `EVFILT_VNODE` on the support dir (arm/disarm), with an adaptive safety tick (15 s armed / 120 s disarmed). Idle CPU is ~0 (verified in the harness).
-- **Restore is idempotent and non-destructive**: it acts only when a snapshot exists *and* some service's HTTP(S) proxy points at `127.0.0.1` (any port). So it never clobbers a proxy the user set themselves, and a crash mid-disable is a no-op.
-- **Privilege**: `SystemProxyManager.restoreWithoutPrompt(snapshot:)` — helper XPC if already registered, else `networksetup` directly as the user. It never runs `osascript` (a background process has no UI). On repeated failure it gives up after 5 attempts and logs; `./revert.sh` remains the manual escape.
+- **Restore is idempotent and non-destructive**: it acts only when a snapshot exists *and* some service's HTTP(S) proxy points at `127.0.0.1` on the armed port. So it never clobbers a proxy the user set themselves, and a crash mid-disable is a no-op.
+- **Privilege**: `SystemProxyManager.restoreWithoutPrompt(snapshot:)` — helper XPC if already registered, else `networksetup` directly as the user. It never runs `osascript` (a background process has no UI). On repeated failure it logs after 5 attempts and keeps retrying on the next safety tick (it never disarms while the proxy is still broken); `./revert.sh` remains the manual escape.
 - **Reaping**: because it's a launchd job (not a child of the app), it survives `kill -9` of the app and is restarted by launchd if it dies. `revert.sh` boots it out first.
 - Toggle: Settings → System → Quit behavior → "Crash watchdog" (`config.system.crashWatchdog`, default on).
 

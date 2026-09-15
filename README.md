@@ -7,12 +7,13 @@ A native macOS menu-bar app that routes **only the hostnames you choose** throug
 
 - **Single on/off switch** in the menu bar (⌘L) or the Dashboard.
 - **Local domain-aware proxy** (`127.0.0.1:8888`) that tunnels allow-listed hosts through your SOCKS5 proxy and passes everything else through directly.
-- **System integration**: sets the macOS system proxy (via a privileged helper) and exports shell/CLI environment variables, so browsers, `curl`, `node`/`bun`, and system apps all honor the routing — nothing else is rerouted.
+- **System integration**: sets the macOS system proxy (prompt-free `networksetup`, or the optional privileged helper when installed) and exports shell/CLI environment variables, so browsers, `curl`, `node`/`bun`, and system apps all honor the routing — nothing else is rerouted.
 - **Crash watchdog**: a tiny always-on helper restores your original proxy settings if the app is force-quit or crashes while routing is on, so your internet never stays pointed at a dead local proxy (~0% idle CPU; disable in Settings → System).
 - **First-run onboarding** that walks you through pointing the app at your tunnel and choosing what to route.
 - **Run the tunnel for you**: the app can start and supervise an SSH SOCKS5 tunnel (key file or password auth, stored in Keychain), keeping it alive automatically.
 - **Live monitoring**: per-request feed with route decision, host, method, bytes, latency, status; per-route and per-host stats.
-- **Presets** (DeepSeek, OpenAI, Anthropic/Claude, Google Gemini, GitHub, NVIDIA) to get started fast, plus full manual control.
+- **Presets** (DeepSeek, OpenAI, Anthropic/Claude, Google Gemini, GitHub, NVIDIA, WhatsApp) to get started fast, plus full manual control.
+- **Self-updating**: Sparkle 2 checks for new versions in the background (Never/Daily/Weekly in Settings → General → Updates) and always asks before installing.
 - **No MITM.** TLS is pass-through; the app never sees plaintext payloads.
 
 ## What it is, in plain words
@@ -77,6 +78,8 @@ Download `ProxyManager-<version>.zip` from the [Releases](https://github.com/cha
 > [!NOTE]
 > The app is not notarized by Apple. On first launch you may need to go to System Settings → Privacy & Security and click "Open Anyway".
 
+Once installed, Proxy Manager updates itself via Sparkle — use **Check for Updates…** in the menu bar or Settings → General → Updates.
+
 ## Usage
 
 1. On first launch, the **onboarding guide** asks for your SOCKS5 tunnel address and which hosts to route, then offers to enable routing. (Re-open it any time from Settings → General → "Run setup again".)
@@ -88,11 +91,11 @@ When enabled, the app also writes `~/.config/proxy-manager/env.sh` and adds a gu
 
 ### Run the tunnel for me (SSH)
 
-In Settings → Tunnel, switch to **"Run the tunnel for me"** and fill in the SSH host, port, username, and either a key file path or a password (stored in the macOS Keychain). The app then runs `ssh -N -D <host:port> user@host` in the background, supervises it, and restarts it automatically if the connection drops (with backoff). Key-file auth is preferred; for password auth the app feeds the Keychain password to `ssh` via a one-shot askpass helper — it's never put on the command line.
+In Settings → Tunnel, switch to **"Run the tunnel for me"** and fill in the SSH host, port, username, and either a key file path or a password (stored in the macOS Keychain). The app then runs `ssh -N -D <socksHost>:<socksPort> <username>@<sshHost>` in the background, supervises it, and restarts it automatically if the connection drops (with backoff). Key-file auth is preferred; for password auth the app feeds the Keychain password to `ssh` via a one-shot askpass helper — it's never put on the command line.
 
 ## Configuration
 
-All settings live in `~/Library/Application Support/ProxyManager/config.json` (they can also be edited in the sidebar-based Settings UI, which is the recommended way):
+The app's configuration lives in `~/Library/Application Support/ProxyManager/config.json` (it can also be edited in the sidebar-based Settings UI, which is the recommended way):
 
 ```jsonc
 {
@@ -105,7 +108,9 @@ All settings live in `~/Library/Application Support/ProxyManager/config.json` (t
                  "keyPath": "", "socksHost": "127.0.0.1", "socksPort": 1080 }
   },
   "policy": { "failClosedWhenTunnelDown": false },   // false = fail-open
-  "system": { "injectShellEnv": true, "launchAtLogin": false, "restoreOnQuit": true, "crashWatchdog": true },
+  "system": { "injectShellEnv": true, "launchAtLogin": false, "restoreOnQuit": true,
+              "crashWatchdog": true, "colorizeMenuIcon": true, "appearanceMode": "SYSTEM",
+              "iconMode": "MENU_BAR_AND_DOCK", "managedShellRcs": ["~/.zshrc"] },
   "targets": [],                                      // empty by default — add your own
   "monitor": { "retentionDays": 7, "maxRows": 500000, "recordPaths": true },
   "lock": { "enabled": false }
@@ -115,6 +120,7 @@ All settings live in `~/Library/Application Support/ProxyManager/config.json` (t
 - **targets** — the allow-list. Empty by default; use onboarding, a preset, or add rules manually. Wildcard `*.example.com` also matches the apex `example.com`.
 - **tunnel.mode** — `MANUAL` (point at your own tunnel) or `MANAGED` (the app runs the SSH tunnel for you).
 - **tunnel.launchdLabel** — in `MANUAL` mode, if your tunnel is a launchd job, set its label (e.g. `com.user.autossh_socks`) and enable "Supervised by app" to unlock the "Restart tunnel" button.
+- **system** — shell-env injection and the rc files it manages (`managedShellRcs`, default `~/.zshrc`), launch-at-login, quit/watchdog behavior, and appearance (`colorizeMenuIcon`, `appearanceMode`, `iconMode`).
 
 Telemetry is stored in `~/Library/Application Support/ProxyManager/telemetry.sqlite` (SQLite/WAL). Metadata only — no request bodies or headers are captured.
 
@@ -132,6 +138,8 @@ find Sources -name '*.swift' -not -path 'Sources/Helper/*' -print0 | sort -z | x
   xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx14.0 \
   -framework AppKit -framework SwiftUI -framework Charts \
   -framework Network -framework ServiceManagement -framework Security \
+  -F Vendor/Sparkle -framework Sparkle \
+  -Xlinker -rpath -Xlinker "$PWD/Vendor/Sparkle" \
   -o /tmp/proxymanager && /tmp/proxymanager
 ```
 
@@ -140,6 +148,7 @@ find Sources -name '*.swift' -not -path 'Sources/Helper/*' -print0 | sort -z | x
 ```
 ProxyManager/
 ├── build.sh                      # build script (version as parameter)
+├── revert.sh                     # emergency: undo all app effects
 ├── Sources/
 │   ├── App.swift                 # @main SwiftUI app + menu bar
 │   ├── AppModel.swift            # app-wide state machine + wiring
@@ -150,8 +159,13 @@ ProxyManager/
 │   ├── System/                   # system proxy (helper/direct/osascript) + XPC + shell env
 │   ├── Tunnel/                   # SOCKS5 health probe + supervisor + SSH runner + Keychain
 │   ├── Telemetry/                # SQLite store + live feed
-│   └── UI/                       # dashboard, settings, targets, onboarding
+│   ├── Helper/                   # privileged helper daemon (separate binary)
+│   ├── Support/                  # unified-log logger + crash watchdog
+│   └── UI/                       # dashboard, settings, targets, onboarding, updater
 ├── Resources/                    # localizations
+├── Vendor/Sparkle/               # vendored Sparkle 2 auto-update framework
+├── Tests/                        # standalone regression harnesses + crash probes
+├── docs/                         # area-specific deep dives
 └── .github/                      # release workflow + changelog script
 ```
 

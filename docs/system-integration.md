@@ -8,7 +8,7 @@ Sets/clears the macOS system proxy (so browsers/system apps route through `127.0
 
 `SystemProxyManager`:
 
-- **Read (no admin)**: `listServices()` (`networksetup -listallnetworkservices`, skipping disabled `*` services), `captureSnapshot(services:)` (`-getwebproxy`/`-getsecurewebproxy`/`-getautoproxyurl`).
+- **Read (no admin)**: `listServices()` (`networksetup -listallnetworkservices`, skipping disabled `*` services), `captureSnapshot(services:)` (`-getwebproxy`/`-getsecurewebproxy`/`-getautoproxyurl`/`-getproxybypassdomains`).
 - **Mutations (admin)**: `applyProxy` (set web+secure proxy to `127.0.0.1:<port>`, disable PAC, set bypass domains), `clearProxy` (web+secure off), `restore(snapshot:)` (re-apply the user's original state).
 
 Command building is centralized in `NetworksetupCommands` (in `HelperProtocol.swift`) as **argv arrays** — never a shell string on the helper path.
@@ -31,7 +31,7 @@ Command building is centralized in `NetworksetupCommands` (in `HelperProtocol.sw
 
 `ShellEnvInjector`:
 
-- Writes `~/.config/proxy-manager/env.sh` (`HTTP_PROXY`/`HTTPS_PROXY` = `http://127.0.0.1:<port>`, `NO_PROXY` (localhost + the tunnel host, so CLI tools never loop back through the tunnel), `PROXY_MANAGER_ACTIVE`).
+- Writes `~/.config/proxy-manager/env.sh` (`HTTP_PROXY`/`HTTPS_PROXY` = `http://<bindHost>:<port>`, default `127.0.0.1`; `NO_PROXY` = `127.0.0.1,localhost,::1` plus the tunnel host, so CLI tools never loop back through the tunnel; `PROXY_MANAGER_ACTIVE`).
 - Inserts a guarded source line into the configured rc files (default `~/.zshrc`) between `# >>> proxy-manager >>>` / `# <<< proxy-manager <<<` markers; removes it cleanly on disable.
 
 ## Snapshot lifecycle (critical)

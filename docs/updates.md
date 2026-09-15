@@ -44,7 +44,9 @@ Installing an update **relaunches the app**, and this app owns the system proxy:
 
 - Sparkle asks the app to terminate → `applicationWillTerminate` →
   `AppModel.shutdownForQuit()` restores the original system proxy and disarms
-  the watchdog. The user keeps working internet during the install.
+  the watchdog (when **Restore original proxy settings on quit** is enabled —
+  the default; if the restore fails, the watchdog stays armed and repairs the
+  proxy after exit). The user keeps working internet during the install.
 - On relaunch, `wasOnKey` auto-re-enables routing if it was on.
 
 Because `shutdownForQuit()` runs bounded synchronous admin work, a slow

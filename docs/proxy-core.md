@@ -8,7 +8,7 @@
 - Parse the client request (`CONNECT host:port` for HTTPS, or absolute-form `GET http://host/...` for plain HTTP).
 - Decide route via `RoutingEngine.decide(host)`.
 - Open upstream: SOCKS5 (tunnel) or direct TCP, then relay bytes bidirectionally.
-- Emit telemetry: the connection appears in the live feed the moment it is established (`beginSession`), ticks bytes/duration while it streams, and is finalized when it closes (`endSession`). One `RequestEvent` per connection; events carry the **start** timestamp and `durationMs` = connection wall time.
+- Emit telemetry: the connection appears in the live feed the moment it is established (`beginSession`), ticks bytes/duration while it streams, and is finalized when it closes (`endSession`). One `RequestEvent` per connection; events carry the **start** timestamp, and a completed relay session sets `durationMs` to the connection wall time (failure events recorded via `record` leave it at `0`).
 
 ## Connection lifecycle
 
@@ -27,7 +27,7 @@ Each connection runs its whole life on **one detached thread**:
 3. Route decision; if tunnel-down + fail-closed → `502`; fail-open → direct (event tagged `tunnel_down`).
 4. `connectUpstream` (SOCKS5 handshake or direct `connect`), on failure → `502`.
 5. CONNECT: send `200 Connection Established`, then `relay`. Absolute-form: rewrite + send, then `relay`.
-6. Successful relay connections call `telemetry.beginSession` (live row) before `relay`, feed `telemetry.updateSession` per poll iteration, and `telemetry.endSession` when `relay` returns. Failures (connect refused, tunnel-down+closed, malformed) record directly via `telemetry.record`.
+6. Successful relay connections call `telemetry.beginSession` (live row) before `relay`, feed `telemetry.updateSession` as bytes move, and `telemetry.endSession` when `relay` returns. Failures (connect refused, tunnel-down+closed, malformed) record directly via `telemetry.record`.
 
 `defer { close(upstream) }` (right after connect) and `defer { close(cfd) }` (at the top) guarantee no fd leaks.
 
@@ -67,7 +67,7 @@ Each connection runs its whole life on **one detached thread**:
 
 ## Audit changes (2026-09-15)
 
-- **SIGPIPE**: `SO_NOSIGPIPE` on all created/accepted sockets + process-wide `signal(SIGPIPE, SIG_IGN)`.
+- **SIGPIPE**: `SO_NOSIGPIPE` on every socket the app creates or accepts (listener, accepted client, `Socket.connect` result). macOS has no `MSG_NOSIGNAL`, so this per-socket option is the whole defense — there is no process-wide `signal(SIGPIPE, SIG_IGN)`.
 - **SSRF guard**: a **non-loopback** client is refused (`403`) for loopback/link-local/RFC1918 destinations; a non-loopback bind logs a warning. Loopback clients (the normal case) are unaffected.
 - **Direct upstream send timeout**: the direct fd gets `SO_SNDTIMEO`/`SO_RCVTIMEO` (the SOCKS path already did), so a forwarded request to a stalled upstream can't block forever.
 - **Bounded DNS/connect**: `Socket.connect` runs `getaddrinfo` on a detached thread with a deadline and uses one overall budget across all addresses.

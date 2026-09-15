@@ -12,17 +12,17 @@ Runs `networksetup` as **root** so the app can set/clear the system proxy withou
 
 ## Authorization (do not weaken)
 
-`HelperServiceDelegate.shouldAcceptNewConnection` rejects any caller whose code-signing **Team ID** doesn't match the helper's own (via `SecCodeCopyGuestWithAttributes` on the process identifier → `SecCodeCopySigningInformation`). This prevents arbitrary local processes from driving root `networksetup` (a MITM vector).
+`HelperServiceDelegate.listener(_:shouldAcceptNewConnection:)` rejects any caller whose code-signing **Team ID** doesn't match the helper's own (via `SecCodeCopyGuestWithAttributes` on the process identifier → `SecCodeCopySigningInformation`). This prevents arbitrary local processes from driving root `networksetup` (a MITM vector).
 
 ## Security model
 
 - **argv only** — `HelperService` runs `networksetup` via `Process.arguments`, never a shell.
-- **Input validation** — service names (`isValidService` charset), ports (1…65535), and snapshot values (`ServiceProxyState.isValid`: ports int 1–65535, server chars, `http`/`https` PAC URL).
-- **Bounded execution** — (see `docs/roadmap.md`: `Process.waitUntilExit` in the daemon is not yet time-boxed).
+- **Input validation** — service names (`isValidService` charset) and ports (1…65535 in `applyProxy`). On restore, `NetworksetupCommands.restore` sanitizes per field (skips empty/invalid-port proxy fields and non-`http`/`https` PAC URLs) instead of dropping the whole service; all values reach `networksetup` as argv, never a shell.
+- **Bounded execution** — each `networksetup` invocation is time-boxed (20 s `waitForExit`), so a hung command can't block the daemon forever.
 
 ## Registration requirements
 
-`SMAppService.daemon` requires a **Developer-ID-signed** app installed in `/Applications`. For ad-hoc/unsigned builds `register()` throws and the app runs `networksetup` directly as the current user (prompt-free), escalating to `osascript` only if the direct path fails (see `docs/system-integration.md`). Build with:
+`SMAppService.daemon` requires a **Developer-ID-signed** app installed in `/Applications`. For ad-hoc/unsigned builds the daemon can't be enabled (`register()` throws or `isRegistered` stays false), so the app runs `networksetup` directly as the current user (prompt-free), escalating to `osascript` only if the direct path fails (see `docs/system-integration.md`). Build with:
 
 ```bash
 IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh 1.0.0

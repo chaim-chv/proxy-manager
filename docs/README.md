@@ -17,7 +17,7 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 | [app-model-lifecycle.md](app-model-lifecycle.md) | State machine, enable/disable, crash recovery |
 | [config.md](config.md) | JSON config store, models, snapshot persistence |
 | [tunnel-supervisor.md](tunnel-supervisor.md) | SOCKS5 health probe, tunnel restart |
-| [ui.md](ui.md) | SwiftUI menu bar, dashboard, settings, targets |
+| [ui.md](ui.md) | App shell, menu bar, dashboard, settings, targets, onboarding |
 | [build-and-distribution.md](build-and-distribution.md) | build.sh, signing, helper embedding, CI |
 | [updates.md](updates.md) | Sparkle auto-updates, appcast, EdDSA signing keys |
 | [testing.md](testing.md) | How to build/run regression harnesses |
@@ -27,9 +27,9 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 
 ## Hard requirements (every change must respect these)
 
-1. **Performant** — the user must not feel any change when the tunnel is working.
-2. **Reliable** — no crashes, no hangs, no bugs; handle malformed input, aborts, half-closes.
-3. **Never break the user's internet** — a crash must never leave the system proxy dangling.
-4. **Debuggable & logged** — lifecycle + errors logged via the unified log.
+1. **Performant** — enabling the tunnel must be imperceptible. Streaming must not buffer whole bodies; telemetry must stay off the hot path.
+2. **Reliable, no crashes/bugs** — handle malformed input, aborts, and half-closes without crashing or hanging.
+3. **Never break the user's internet** — a crash must never leave the system proxy pointed at a dead `127.0.0.1:8888`.
+4. **Debuggable & logged** — log lifecycle/errors via the unified log (`Log` in `Sources/Support/Log.swift`).
 
 See [`AGENTS.md`](../AGENTS.md) for the critical lessons learned and commands.

@@ -6,11 +6,11 @@ Guidance for AI agents (and humans) working on this repository. **Read this file
 
 ProxyManager is a native macOS menu-bar app (Swift, built with `swiftc` — **no Xcode project**) that runs a local HTTP CONNECT/forward proxy on `127.0.0.1:8888`. It routes an allow-list of hostnames (user-defined, empty by default) through an existing SOCKS5 proxy (default `127.0.0.1:1080`, configurable) and passes everything else **directly**. It also sets the macOS system proxy (so browsers/system apps route through it), injects `HTTP_PROXY`/`HTTPS_PROXY` into shell rc files (so CLI tools route through it), and records per-request telemetry to SQLite.
 
-The app is **generic** — no service is assumed. Users configure their tunnel and target list via the **first-run onboarding** wizard (or Settings). A small **preset library** (`Sources/Config/Presets.swift`) seeds common allow-lists (DeepSeek, OpenAI, Anthropic, Gemini, GitHub, NVIDIA), but the shipped default is an empty list.
+The app is **generic** — no service is assumed. Users configure their tunnel and target list via the **first-run onboarding** wizard (or Settings). A small **preset library** (`Sources/Config/Presets.swift`) seeds common allow-lists (DeepSeek, OpenAI, Anthropic, Gemini, GitHub, NVIDIA, WhatsApp), but the shipped default is an empty list.
 
 The tunnel can be provided **two ways** (`TunnelSettings.mode`): **MANUAL** (the user runs their own SOCKS5 proxy; the app just points at it) or **MANAGED** (the app runs `ssh -N -D` itself via `Sources/Tunnel/SSHTunnelRunner.swift`, storing the optional password in the Keychain via `SSHKeychain.swift`).
 
-The proxy is a **policy router, not a MITM** — TLS passes through untouched.
+The proxy is a **policy router, not a MITM** — TLS passes through untouched. The app self-updates via the vendored **Sparkle 2** framework (`Vendor/Sparkle/`, see `docs/updates.md`).
 
 ## Hard requirements (non-negotiable)
 
@@ -26,7 +26,7 @@ ProxyManager/
 ├── AGENTS.md                  ← this file
 ├── PLAN.md                    ← high-level spec + decisions (source of truth)
 ├── revert.sh                  ← EMERGENCY: undo all app effects (restore internet)
-├── build.sh                   ← build script (version param, signs, embeds helper)
+├── build.sh                   ← build script (version param, links/embeds/signs Sparkle, embeds helper)
 ├── Sources/                   ← all Swift (no Xcode project)
 │   ├── App.swift              ← @main, Settings scene, AppDelegate
 │   ├── AppModel.swift         ← state machine, enable/disable lifecycle, crash recovery
@@ -40,9 +40,13 @@ ProxyManager/
 │   ├── Helper/                ← privileged helper daemon (separate binary)
 │   ├── Telemetry/             ← batched SQLite telemetry + live feed
 │   ├── Tunnel/                ← SOCKS5 health probe + supervisor + SSH tunnel runner + keychain
-│   └── UI/                    ← dashboard, settings, targets, onboarding, help popovers, status menu
+│   └── UI/                    ← dashboard, settings, targets, onboarding, updater, help popovers, status menu
+├── Resources/                 ← localizations (copied into the bundle)
+├── Vendor/Sparkle/            ← vendored Sparkle 2 auto-update framework
+├── Tests/                     ← standalone regression harnesses + crash probes
+├── skills/                    ← project skills (e.g. standalone-swift-regression-harness)
 ├── docs/                      ← area-specific deep dives (READ FIRST)
-└── .github/                   ← release workflow
+└── .github/                   ← release workflow + changelog script
 ```
 
 ## Commands
@@ -58,11 +62,14 @@ IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh 1.0.0
 # EMERGENCY revert — run if the app crashed and the internet died
 ./revert.sh
 
+# Run the standalone regression harnesses + crash probes (non-zero on failure)
+./Tests/run-all.sh
+
 # Watch the unified log
 log stream --predicate 'subsystem == "com.proxymanager.app"' --level debug
 ```
 
-There is no `xcodebuild` target or SPM manifest. To compile a subset for a test harness, pass the needed `Sources/*.swift` files to `xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 ...` (see `docs/testing.md`).
+There is no `xcodebuild` target or SPM manifest. The build links the vendored Sparkle framework from `Vendor/Sparkle` (override with `SPARKLE_DIR`). To compile a subset for a test harness, pass the needed `Sources/*.swift` files to `xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 ...` (see `docs/testing.md`).
 
 ## ⚠️ Critical lessons learned (do NOT repeat these mistakes)
 
@@ -99,7 +106,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 
 10. **Don't regress `revert.sh`.** It's the user's lifeline when a bug ships.
 
-11. **Suppress SIGPIPE on every socket.** macOS has no `MSG_NOSIGNAL`; a `send()` to a reset peer raises `SIGPIPE` and kills the process. Call `Socket.setNoSIGPIPE(fd)` on every fd you create or accept (the listener, accepted clients, `Socket.connect` results), and keep `signal(SIGPIPE, SIG_IGN)` at process start. `Tests/ProxyE2E` (RST burst) and `Tests/CrashProbes/sigpipe_send` are the regressions.
+11. **Suppress SIGPIPE on every socket.** macOS has no `MSG_NOSIGNAL`; a `send()` to a reset peer raises `SIGPIPE` and kills the process. Call `Socket.setNoSIGPIPE(fd)` on every fd you create or accept (the listener, accepted clients, `Socket.connect` results). Per-socket `SO_NOSIGPIPE` is the only defense — there is no process-wide `signal(SIGPIPE, SIG_IGN)`. `Tests/ProxyE2E` (RST burst) and `Tests/CrashProbes/sigpipe_send` are the regressions.
 
 12. **Only clear the snapshot / disarm the watchdog after a restore that actually succeeded.** A `try? restore(...)` followed by `clearSnapshot()` + `disarm()` is how a transient `networksetup` failure becomes permanent dead internet. On failure, keep the snapshot on disk, keep the watchdog armed, and keep the listener running; log and surface the error. Never treat an empty restore command list as success (`HelperService.restoreProxy`).
 
@@ -115,10 +122,10 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 - **Swift 5 language mode** (`-swift-version 5`), target `arm64-apple-macosx14.0` (and `x86_64` for universal). Do NOT switch to Swift 6 strict concurrency — the proxy core deliberately uses raw sockets + detached threads.
 - **No comments unless they explain *why*** (non-obvious invariants). The codebase uses brief doc comments on types/functions.
 - **Errors are logged, not swallowed silently** — use `Log.*` (unified log) for lifecycle + errors.
-- **Prefer system frameworks** (`Network`, `Security`, `ServiceManagement`, `Charts`, `SQLite3`); no third-party deps.
+- **Prefer system frameworks** (`Network`, `Security`, `ServiceManagement`, `Charts`, `SQLite3`). The only third-party dependency is the vendored **Sparkle 2** auto-updater (`Vendor/Sparkle/`, see `docs/updates.md`); no SPM/package-manager deps.
 - **Synchronous admin work goes on a background queue**, never the main thread, and must have a bounded timeout (`runAdmin`, XPC `sync`).
 - **When you change behavior, add/extend the regression harness** in `docs/testing.md` and re-run it.
-- **Settings use a sidebar** (`SettingsView.swift`) with a `SettingsSection` enum; order is General / Tunnel / Proxy / Targets / System / Monitoring. New options get a **`HelpPopover`** (inline `?` → popover) so they're self-documenting, never bare labels.
+- **Settings use a sidebar** (`SettingsView.swift`) with a `SettingsSection` enum; order is General / Appearance / Tunnel / Proxy / Targets / System / Monitoring / About. New options get a **`HelpPopover`** (inline `?` → popover) so they're self-documenting, never bare labels.
 - **Onboarding** (`Sources/UI/OnboardingView.swift`) is the first-run walk-through; it's re-openable via Settings → General. It writes config through the same `AppModel` paths as Settings. Presets live in `Sources/Config/Presets.swift` (`TargetPreset`).
 - **Managed SSH tunnel** (`Sources/Tunnel/SSHTunnelRunner.swift`): run `ssh -N -D` as a **foreground** `Process` (never `-f`), drain stderr via `readabilityHandler`, restart with exponential backoff, and classify auth/host-key/key-file errors as fatal. The password is read from the Keychain (`SSHKeychain`) and fed via `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` — **never argv or env**.
 

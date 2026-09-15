@@ -16,12 +16,12 @@
 
 ## Managed SSH tunnel (`SSHTunnelRunner`)
 
-Runs the tunnel itself ("Run the tunnel for me"): spawns a **foreground** `ssh -N -D <host:port> -p <port> -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -q [auth] user@host` (never `-f`), drains stderr via `readabilityHandler` (no deadlock), and supervises it:
+Runs the tunnel itself ("Run the tunnel for me"): spawns a **foreground** `ssh -N -D <host:port> -p <port> -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o LogLevel=ERROR -o ControlMaster=no -o ControlPath=none -o NumberOfPasswordPrompts=1 [auth] user@host` (never `-f`), drains stderr via `readabilityHandler` (no deadlock), and supervises it:
 
 - **Restart with exponential backoff** (1→60 s, resets after 60 s uptime) on non-fatal exits (network flap / connection reset).
-- **Fatal** (no retry): `Permission denied`, `Authentication failed`, `Host key verification failed`, `Could not resolve hostname`, bad/missing key file.
-- **Auth**: key file (`-i <path> -o IdentitiesOnly=yes -o BatchMode=yes`; passphrase-less or ssh-agent) or **password** read from the Keychain and fed via a one-shot `SSH_ASKPASS` helper + `SSH_ASKPASS_REQUIRE=force` (OpenSSH ≥ 8.4). The password is **never** in argv or env.
-- **Stop**: `process.terminate()` (SIGTERM) is sufficient — `ssh -D` (foreground) spawns no children. `stopNow()` (queue.sync) is used on quit.
+- **Fatal** (no retry): `Permission denied`, `Authentication failed`, `Too many authentication failures`, `Host key verification failed`, `Could not resolve hostname`, bad/missing key file, and port binds (`Address already in use`, `cannot listen to port`).
+- **Auth**: key file (`-i <path> -o IdentitiesOnly=yes -o BatchMode=yes`; passphrase-less or ssh-agent) or **password** read from the Keychain and fed via a one-shot `SSH_ASKPASS` helper + `SSH_ASKPASS_REQUIRE=force` (OpenSSH ≥ 8.4); password auth disables pubkey/agent (`PubkeyAuthentication=no`, `PreferredAuthentications=password,keyboard-interactive`). The password is **never** in argv or env — only a 0600 secret file read (then deleted) by the helper.
+- **Stop**: `process.terminate()` (SIGTERM), escalating to SIGKILL if the child does not exit within 2 s, so a stop/quit cannot leave an ssh holding the SOCKS port. `stopNow()` (queue.sync) is used on quit.
 
 ## Sharp edges (see `docs/roadmap.md`)
 

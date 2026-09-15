@@ -5,7 +5,7 @@ There is no XCTest target or SPM manifest. Testing is done with **standalone `ma
 ## Quick start
 
 ```bash
-./Tests/run-all.sh          # pure harness + proxy e2e + crash probes; non-zero on failure
+./Tests/run-all.sh          # regression + proxy e2e + watchdog + crash probes; non-zero on failure
 ```
 
 The driver compiles each harness/probe with `xcrun swiftc -swift-version 5`, runs it, and treats a **signal exit as failure** (`133` = SIGTRAP, a Swift trap; `141` = 128+SIGPIPE). This is how crash classes are caught without killing the driver.
@@ -59,10 +59,8 @@ All of the above pass on the current code. A failing check is a regression — d
    - **concurrency** — 200 parallel connections all succeed;
    - **dead-peer reaping** — a burst of RST peers must not accumulate relay threads/fds and the proxy must still serve (this is the SIGPIPE integration regression);
   - **dead-peer + held-open upstream** — after a client RST with the upstream still open and idle, the relay must not busy-spin, and the server must not deallocate while a relay permit is outstanding (catches the libdispatch "semaphore deallocated while in use" trap).
-   - **live-session telemetry** — while a CONNECT tunnel is still open (origin holds the connection), `TelemetryStore.liveRequests` contains the row (status 200) and its byte count/duration tick as a 1 MiB body streams; the completed feed stays empty until the tunnel closes, then the same row (same `UUID`) appears in `recentRequests` with final bytes. A connect-and-close that finishes inside one flush tick must not leave a ghost live row.
 6. **Crash classes** — every trap/SIGPIPE/force-unwrap regression gets a subprocess probe.
-7. **Real target** — `CONNECT example.com:443` (real DNS + real remote) returns `200 Connection Established`.
-8. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
+7. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
 
 ## Crash watchdog harness
 

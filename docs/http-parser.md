@@ -19,7 +19,7 @@
 
 ## `rewrite(request)` — plain HTTP forwarding
 
-Converts an absolute-form request to origin-form (`path` instead of absolute URL), strips hop-by-hop/proxy headers (`Proxy-Connection`, `Proxy-Authorization`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, and any `Host`), re-adds `Host`, and forces `Connection: close`. This is what keeps CLI tools (which can't speak SOCKS5) working for allow-listed plain HTTP.
+Converts an absolute-form request to origin-form (`path` instead of absolute URL), strips hop-by-hop/proxy headers (`Proxy-Connection`, `Proxy-Authorization`, `Proxy-Authenticate`, `Connection`, `Keep-Alive`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, and any `Host`), re-adds `Host`, and forces `Connection: close`. This is what keeps CLI tools (which can't speak SOCKS5) working for allow-listed plain HTTP.
 
 ## Known limitations (see `docs/roadmap.md`)
 

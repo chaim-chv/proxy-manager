@@ -8,7 +8,8 @@
 
 ## Socket.swift
 
-- `connect(host:port:timeout:)` — `getaddrinfo` (AF_UNSPEC → tries IPv4/IPv6 in order), non-blocking `connect()`, then `poll()` for `POLLOUT` + `SO_ERROR` to complete the connect with a timeout. Closes the fd on every failure path; `defer { freeaddrinfo(result) }`.
+- `setNoSIGPIPE` — sets `SO_NOSIGPIPE` on every fd the app creates or accepts; macOS has no `MSG_NOSIGNAL`, so without it a `send()` to a reset peer raises `SIGPIPE` and kills the process.
+- `connect(host:port:timeout:)` — `resolve` runs `getaddrinfo` (AF_UNSPEC) on a detached thread with a hard deadline (the resolver itself is unbounded), then tries each resolved address: non-blocking `connect()`, `poll()` for `POLLOUT` + `SO_ERROR`. `timeout` is one overall budget across DNS + all attempts. Closes the fd on every failure path; `defer { freeaddrinfo(info) }`.
 - `waitForWritable` — uses `poll()` (not `select`/`fd_set`, which had a `fd≥32` bit-indexing bug).
 - `setNonBlocking`, `setTimeouts` (`SO_RCVTIMEO`/`SO_SNDTIMEO`).
 - `recvExact`, `sendAll` — loop for partial I/O; treat `EINTR` carefully.
@@ -16,8 +17,7 @@
 ### Known sharp edges (see `docs/roadmap.md`)
 
 - `sendAll` treats `EAGAIN` as fatal — fine for blocking sockets, but never call it on a non-blocking fd.
-- `Int32(timeout * 1000)` overflows for very large timeouts.
-- `connect` reports `strerror(errno)` after a `poll`/`SO_ERROR` path, which can show stale `EINPROGRESS` rather than the real error.
+- `resolve` leaks the `addrinfo` list when DNS times out: the detached thread can still complete `getaddrinfo` after the caller has thrown.
 
 ## SOCKS5.swift (RFC 1928 client)
 
@@ -31,7 +31,7 @@
 
 - `connectTimeout` (10 s) bounds the TCP connect.
 - `handshakeTimeout` (5 s) bounds the SOCKS exchange via `SO_RCVTIMEO`/`SO_SNDTIMEO`.
-- After the handshake, the fd's timeouts are irrelevant: the relay sets it non-blocking.
+- The relay sets the fd non-blocking; note the handshake `SO_SNDTIMEO` (5 s) still applies to the first plain-HTTP request write before the relay starts (see `docs/roadmap.md`).
 
 ## Tunnel host
 

@@ -27,7 +27,9 @@ CLI tool (HTTP_PROXY env) ──────────────────
 | Component | File(s) | Role |
 |---|---|---|
 | App shell | `Sources/App.swift`, `Sources/UI/StatusMenuController.swift` | `@main` SwiftUI app (`Settings` scene + `AppCommands`), `AppDelegate` (termination/reopen), native `NSStatusItem`+`NSMenu` menu bar |
+| UI | `Sources/UI/` | Dashboard, Settings, Targets, Onboarding, HelpPopover (observe `AppModel`; only the Dashboard observes `TelemetryStore`) |
 | State machine | `Sources/AppModel.swift` | `ObservableObject`; `off/starting/on/degraded/stopping`; enable/disable lifecycle |
+| Crash watchdog | `Sources/Support/Watchdog.swift` | `--watchdog` user LaunchAgent; restores the system proxy within ms of a crash (`kqueue NOTE_EXIT`) |
 | Proxy core | `Sources/Proxy/ProxyServer.swift` | Listener + connection handler + poll relay (runs in-process, detached threads) |
 | Routing | `Sources/Routing/RoutingEngine.swift` | Allow-list → `TUNNEL`/`DIRECT` |
 | SOCKS5 client | `Sources/Socks/SOCKS5.swift` | RFC 1928 handshake, ATYP=domain (DNS on tunnel side) |
@@ -40,6 +42,7 @@ CLI tool (HTTP_PROXY env) ──────────────────
 | SSH tunnel runner | `Sources/Tunnel/SSHTunnelRunner.swift`, `SSHKeychain.swift` | "Run the tunnel for me" — spawns/supervises `ssh -N -D`, Keychain password |
 | Config | `Sources/Config/` | JSON config + system-proxy snapshot + presets |
 | Logging | `Sources/Support/Log.swift` | Unified log (`os.Logger`) categories |
+| Updater | `Sources/UI/UpdaterController.swift`, `Vendor/Sparkle/` | Sparkle 2 auto-updates (GitHub-releases appcast, EdDSA), `--watchdog` never loads it |
 
 ## Threading model
 

@@ -8,7 +8,7 @@
 Log.app.info("enable(): starting on \(bindHost):\(port)")
 Log.app.error("enable() failed, rolling back: \(error.localizedDescription)")
 Log.proxy.info("listening on \(host):\(port)")
-Log.telemetry.*  Log.system.*
+Log.telemetry.*  Log.system.*  Log.tunnel.*
 ```
 
 Categories map to subsystems in `docs/`. The helper daemon logs via `NSLog` (it's a separate binary).
@@ -53,4 +53,4 @@ Equivalent: boot out the crash watchdog, stop the app, clear the manual HTTP/HTT
 
 ## Crash reports
 
-`~/Library/Logs/DiagnosticReports/ProxyManager-*.ips` (and `ProxyManagerHelper-*.ips`). A `critical`/`high` crash should be reproduced in a harness and fixed with a regression test (see `docs/testing.md`).
+`~/Library/Logs/DiagnosticReports/ProxyManager-*.ips` (and `com.proxymanager.helper-*.ips`). A `critical`/`high` crash should be reproduced in a harness and fixed with a regression test (see `docs/testing.md`).
