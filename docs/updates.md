@@ -38,6 +38,35 @@ static file attached to each GitHub release.
 The manual check controls are disabled while a check is already running, driven
 by `SPUUpdater.canCheckForUpdates`.
 
+### Escape handling
+
+The app installs a local key monitor (`AppDelegate.installEscapeToCloseSettings`)
+so Esc closes Settings/Onboarding even when no control has focus. It is careful
+not to fight Sparkle:
+
+- While **any Sparkle window is visible** (update alert, progress, "You're up to
+  date"), the monitor leaves Esc alone — that window owns it. Otherwise Esc
+  closed the window *underneath* the alert.
+- It only closes a window that the event actually targets (or the key window for
+  window-less posted events).
+- The close is deferred one run-loop pass: closing synchronously from inside the
+  event monitor re-enters AppKit/SwiftUI (window close → onboarding completion →
+  open Settings) mid-event.
+
+## Manual verification (update UI)
+
+No automated harness drives the GUI; verify these by hand after a UI change:
+
+| Scenario | Expected |
+|---|---|
+| Update available → **Esc** | Alert dismisses; app keeps running. |
+| Update available → **Remind Me Later** | Alert dismisses; app keeps running. |
+| Update available → **Skip This Version** | Alert dismisses; version not offered again. |
+| Update available → **Install Update** | App quits, installs, relaunches; proxy restored then re-applied. |
+| Settings open **and** alert up → **Esc** | The alert (not Settings) is dismissed; Settings stays open. |
+| Settings open, no alert → **Esc** | Settings closes. |
+| Onboarding open → **Esc** | Onboarding closes; Settings opens. |
+
 ## Lifecycle interaction (important)
 
 Installing an update **relaunches the app**, and this app owns the system proxy:
