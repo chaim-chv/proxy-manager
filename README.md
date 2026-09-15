@@ -1,6 +1,9 @@
 # Proxy Manager
 
-[![Build](https://img.shields.io/github/actions/workflow/status/chaim-chv/proxy-manager/release.yml?label=build)](https://github.com/chaim-chv/proxy-manager/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/chaim-chv/proxy-manager/release.yml?label=build)](https://github.com/chaim-chv/proxy-manager/actions/workflows/release.yml)
+[![Release](https://img.shields.io/github/v/release/chaim-chv/proxy-manager?label=release)](https://github.com/chaim-chv/proxy-manager/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)](https://github.com/chaim-chv/proxy-manager)
+[![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)](https://github.com/chaim-chv/proxy-manager)
 [![License](https://img.shields.io/github/license/chaim-chv/proxy-manager)](./LICENSE)
 
 A native macOS menu-bar app that routes **only the hostnames you choose** through an existing SOCKS5 proxy/tunnel — while leaving all other traffic untouched.
