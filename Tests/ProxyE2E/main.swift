@@ -23,6 +23,16 @@ func check(_ name: String, _ condition: Bool) {
     else { failures += 1; print("  FAIL \(name)") }
 }
 
+/// Process CPU time (user + sys) in seconds. Used to prove the relay does not
+/// busy-spin: a spinning relay burns ~1s of CPU per wall second.
+func cpuSeconds() -> Double {
+    var ru = rusage()
+    getrusage(RUSAGE_SELF, &ru)
+    let u = Double(ru.ru_utime.tv_sec) + Double(ru.ru_utime.tv_usec) / 1_000_000
+    let s = Double(ru.ru_stime.tv_sec) + Double(ru.ru_stime.tv_usec) / 1_000_000
+    return u + s
+}
+
 // MARK: - Socket helpers
 
 /// The mock servers must not die from SIGPIPE either; the proxy's own sockets
@@ -124,6 +134,44 @@ final class MockOrigin {
                 close(c)
             }
         }
+    }
+}
+
+// MARK: - Holding origin
+
+/// Accepts a connection and holds it open, reading nothing and never closing.
+/// This is the upstream half of the dead-peer spin regression: after the client
+/// is reset, the relay still has a live, idle upstream fd, so a relay that keeps
+/// the closed client fd in its poll set spins at 100% CPU until the origin
+/// closes.
+final class MockOriginHolding {
+    let fd: Int32
+    let port: UInt16
+    private var clients: [Int32] = []
+    private let lock = NSLock()
+
+    init() {
+        let l = tcpListen()
+        self.fd = l.fd
+        self.port = l.port
+        Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    private func acceptLoop() {
+        while true {
+            let c = accept(fd, nil, nil)
+            if c < 0 { break }
+            noSIGPIPE(c)
+            lock.lock(); clients.append(c); lock.unlock()
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        for c in clients { close(c) }
+        clients.removeAll()
+        lock.unlock()
+        close(fd)
     }
 }
 
@@ -334,6 +382,41 @@ do {
     let head = String(decoding: buf[0..<max(0, n)], as: UTF8.self)
     check("proxy still serves after RST burst", head.contains("200"))
     close(c)
+}
+
+print("== E2E: dead-peer poll spin + teardown (client RST, upstream held open) ==")
+do {
+    let origin = MockOriginHolding()
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    sendAll(c, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\n\r\n".utf8))
+    var buf = [UInt8](repeating: 0, count: 1024)
+    let n = recv(c, &buf, buf.count, 0)
+    check("spin-test CONNECT returns 200", String(decoding: buf[0..<max(0, n)], as: UTF8.self).contains("200"))
+    // Reset the client while the upstream stays open and idle. This is the shape
+    // that would spin if a finished fd were kept in the poll set: the relay must
+    // not busy-poll, and it must not tear down while a relay permit is
+    // outstanding. (On macOS poll() skips events==0 fds entirely, so the
+    // events-mask spin does not currently manifest; the assertion guards the
+    // invariant and the held-open upstream exercises the permit/teardown path.)
+    var l = linger(l_onoff: 1, l_linger: 0)
+    setsockopt(c, SOL_SOCKET, SO_LINGER, &l, socklen_t(MemoryLayout<linger>.size))
+    close(c) // RST
+
+    let before = cpuSeconds()
+    Thread.sleep(forTimeInterval: 2)
+    let spent = cpuSeconds() - before
+    check("relay does not spin on a dead peer (\(String(format: "%.3f", spent))s CPU / 2s)",
+          spent < 0.5)
+
+    // A fresh request must still work.
+    guard let c2 = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("proxy died after dead-peer test") }
+    sendAll(c2, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\n\r\n".utf8))
+    let n2 = recv(c2, &buf, buf.count, 0)
+    check("proxy still serves after dead-peer test", String(decoding: buf[0..<max(0, n2)], as: UTF8.self).contains("200"))
+    close(c2)
+    origin.stop()
 }
 
 print("")

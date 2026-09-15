@@ -136,12 +136,16 @@ final class ProxyServer {
             // caps concurrent blocking tasks at ~64 threads, which starves the
             // proxy under load. A dedicated thread per connection (bounded by
             // the semaphore) scales to `maxConcurrent`.
-            Thread.detachNewThread { [weak self] in
+            // Capture `self` strongly for the connection's lifetime: the permit
+            // taken above must be returned before the server can deallocate,
+            // otherwise libdispatch traps disposing `semaphore` while a permit
+            // is still outstanding ("Semaphore object deallocated while in use").
+            Thread.detachNewThread { [self] in
                 defer {
-                    self?.semaphore.signal()
-                    self?.telemetry.setActiveConnections(self?.active.dec() ?? 0)
+                    self.semaphore.signal()
+                    self.telemetry.setActiveConnections(self.active.dec())
                 }
-                self?.handleConnection(cfd, clientIsLoopback: clientIsLoopback)
+                self.handleConnection(cfd, clientIsLoopback: clientIsLoopback)
             }
         }
     }
@@ -403,19 +407,42 @@ final class ProxyServer {
                 break
             }
 
-            var fds = [
-                pollfd(fd: client, events: 0, revents: 0),
-                pollfd(fd: upstream, events: 0, revents: 0)
-            ]
-            if !clientReadDone && c2u.count < maxBuf { fds[0].events |= Int16(POLLIN) }
-            if !u2c.isEmpty { fds[0].events |= Int16(POLLOUT) }
-            if !upstreamReadDone && u2c.count < maxBuf { fds[1].events |= Int16(POLLIN) }
-            if !c2u.isEmpty { fds[1].events |= Int16(POLLOUT) }
+            // Poll only descriptors that still have work: a finished direction
+            // (events == 0) is left out of the set entirely. POSIX says
+            // POLLHUP/POLLERR/POLLNVAL are reported regardless of the requested
+            // mask (macOS in fact skips events==0 fds — verified), so this is the
+            // portable-correct form and avoids a per-iteration heap array.
+            var clientEvents: Int16 = 0
+            var upstreamEvents: Int16 = 0
+            if !clientReadDone && c2u.count < maxBuf { clientEvents |= Int16(POLLIN) }
+            if !u2c.isEmpty { clientEvents |= Int16(POLLOUT) }
+            if !upstreamReadDone && u2c.count < maxBuf { upstreamEvents |= Int16(POLLIN) }
+            if !c2u.isEmpty { upstreamEvents |= Int16(POLLOUT) }
 
-            if fds[0].events == 0 && fds[1].events == 0 { break }
+            if clientEvents == 0 && upstreamEvents == 0 { break }
 
             let timeout = halfClosed ? grace : idle
-            let rc = poll(&fds, 2, Int32(timeout * 1000))
+            var clientRevents: Int16 = 0
+            var upstreamRevents: Int16 = 0
+            let rc: Int32 = withUnsafeTemporaryAllocation(of: pollfd.self, capacity: 2) { buf in
+                var nfds: nfds_t = 0
+                var clientIdx = -1
+                var upstreamIdx = -1
+                if clientEvents != 0 {
+                    buf[Int(nfds)] = pollfd(fd: client, events: clientEvents, revents: 0)
+                    clientIdx = Int(nfds); nfds += 1
+                }
+                if upstreamEvents != 0 {
+                    buf[Int(nfds)] = pollfd(fd: upstream, events: upstreamEvents, revents: 0)
+                    upstreamIdx = Int(nfds); nfds += 1
+                }
+                let r = poll(buf.baseAddress!, nfds, Int32(timeout * 1000))
+                if r > 0 {
+                    if clientIdx >= 0 { clientRevents = buf[clientIdx].revents }
+                    if upstreamIdx >= 0 { upstreamRevents = buf[upstreamIdx].revents }
+                }
+                return r
+            }
             if rc < 0 {
                 if errno == EINTR { continue }
                 break
@@ -426,14 +453,14 @@ final class ProxyServer {
             let iterU2c = u2cTotal
 
             // Client socket: hard error → client gone (drop undeliverable u2c).
-            if fds[0].revents & Int16(POLLERR | POLLNVAL) != 0 {
+            if clientRevents & Int16(POLLERR | POLLNVAL) != 0 {
                 clientReadDone = true
                 u2c.removeAll()
             }
             // client → upstream. Only recv while we haven't seen the client's
             // EOF; after that POLLHUP just re-fires the level-triggered hangup
             // and recv returns 0/EAGAIN forever (a busy-spin) if we keep asking.
-            if !clientReadDone && (fds[0].revents & Int16(POLLIN | POLLHUP) != 0) {
+            if !clientReadDone && (clientRevents & Int16(POLLIN | POLLHUP) != 0) {
                 let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
                     Darwin.recv(client, b.baseAddress!, chunk, 0)
                 }
@@ -447,7 +474,7 @@ final class ProxyServer {
                 }
             }
             if !u2c.isEmpty {
-                if fds[0].revents & Int16(POLLOUT) != 0 {
+                if clientRevents & Int16(POLLOUT) != 0 {
                     let n = u2c.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
                         Darwin.send(client, b.baseAddress!, u2c.count, 0)
                     }
@@ -457,7 +484,7 @@ final class ProxyServer {
                         clientReadDone = true
                         u2c.removeAll()
                     }
-                } else if fds[0].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                } else if clientRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
                     // Client hung up and is not writable (POLLHUP is mutually
                     // exclusive with POLLOUT once the peer is gone): buffered
                     // data is undeliverable. Leaving it would make poll() return
@@ -467,12 +494,12 @@ final class ProxyServer {
             }
 
             // Upstream socket: hard error → upstream gone (drop undeliverable c2u).
-            if fds[1].revents & Int16(POLLERR | POLLNVAL) != 0 {
+            if upstreamRevents & Int16(POLLERR | POLLNVAL) != 0 {
                 upstreamReadDone = true
                 c2u.removeAll()
             }
             // upstream → client (POLLHUP means peer closed; recv returns 0).
-            if !upstreamReadDone && (fds[1].revents & Int16(POLLIN | POLLHUP) != 0) {
+            if !upstreamReadDone && (upstreamRevents & Int16(POLLIN | POLLHUP) != 0) {
                 let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
                     Darwin.recv(upstream, b.baseAddress!, chunk, 0)
                 }
@@ -486,7 +513,7 @@ final class ProxyServer {
                 }
             }
             if !c2u.isEmpty {
-                if fds[1].revents & Int16(POLLOUT) != 0 {
+                if upstreamRevents & Int16(POLLOUT) != 0 {
                     let n = c2u.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
                         Darwin.send(upstream, b.baseAddress!, c2u.count, 0)
                     }
@@ -496,7 +523,7 @@ final class ProxyServer {
                         upstreamReadDone = true
                         c2u.removeAll()
                     }
-                } else if fds[1].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                } else if upstreamRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
                     // Symmetric to the client: undeliverable → drop to avoid spin.
                     c2u.removeAll()
                 }

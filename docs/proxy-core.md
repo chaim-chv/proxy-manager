@@ -18,6 +18,8 @@
 accept() → semaphore.wait() → active.inc() → Thread.detachNewThread { handleConnection(cfd) }
 ```
 
+The detached thread captures `self` **strongly** for the connection's lifetime, so the server cannot deallocate (and dispose `semaphore`) while a permit is still outstanding. A weak capture let the last release happen just before the deferred `semaphore.signal()`, so libdispatch trapped disposing a semaphore with an outstanding permit ("Semaphore object deallocated while in use"). The accept loop itself already retains `self` for the duration of `acceptLoop()`.
+
 Each connection runs its whole life on **one detached thread**:
 
 1. `readHeader` — blocking `recv` until `\r\n\r\n` (bounded at 64 KB and a **total 15 s deadline**; `SO_RCVTIMEO` is per-call, so the deadline defeats slowloris).
@@ -39,6 +41,7 @@ Each connection runs its whole life on **one detached thread**:
 - **Termination**: only when both directions are done *and* both buffers empty.
 - **`POLLERR`/`POLLNVAL`** mark that direction done (avoids a 100%-CPU busy-spin); `POLLHUP` is folded into the read path (recv returns 0) **only while that direction's EOF has not been read yet**.
 - **Never recv after EOF is consumed.** Once `recv()` has returned 0 (peer's EOF read), the peer's `POLLHUP` stays level-triggered and *always* reported; a read handler that keeps calling `recv()` on it gets 0/EAGAIN forever → a 100%-CPU busy-spin that never reaches the poll timeout. Guard every read with `!readDone`.
+- **Only fds with a non-zero event mask are polled.** A finished direction (nothing left to read or write) is left out of the `pollfd` set entirely, so a dead descriptor can never wake `poll()` in a tight loop. (POSIX says `POLLHUP`/`POLLERR`/`POLLNVAL` are reported regardless of the requested mask; macOS in fact skips `events==0` fds — verified with a standalone probe — but excluding them is the portable-correct form.) The set is built in a stack allocation, not a per-iteration heap array.
 - **A hung-up, non-writable peer means its outgoing buffer is undeliverable.** `POLLHUP`/`POLLERR`/`POLLNVAL` are mutually exclusive with `POLLOUT` once a peer is gone (verified: a *live* half-closed peer keeps returning `POLLOUT`; a truly closed/reset peer returns hangup flags without `POLLOUT`). If a buffer is non-empty and poll reports the peer hung up without `POLLOUT`, the buffered data can never be delivered — drop it (`removeAll`). Otherwise the level-triggered hangup makes `poll()` return instantly forever (the original 100%-CPU relay spin, fixed).
 - **Grace timeout**: once either side half-closes, the poll timeout drops from `idle` (120 s) to `grace` (3 s), so a peer that never closes after FIN is reaped in ~3 s instead of 120 s.
 
