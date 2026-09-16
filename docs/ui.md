@@ -31,7 +31,7 @@
 
 A sidebar layout — a fixed-width `List` (left) + `Divider` + detail pane (right) — driven by `SettingsSection` (order: **General / Appearance / Tunnel / Proxy / Targets / System / Monitoring / About**). Every page opens with a `SettingsPage` header (title + one-line description) so each tab is self-explanatory (Targets renders its own equivalent header). Help is a **`HelpPopover`** (`Sources/UI/HelpPopover.swift`, inline `?` → popover with explanation + optional `example`), used **sparingly** — only on genuinely non-obvious options (icon placement, tunnel host/port, SSH auth, fail-open/closed, terminal-app env, quit behavior, bulk target entry, wildcard matching); everything else uses short captions.
 
-- **General** — launch at login, "Run setup again", reset all.
+- **General** — launch at login, updates (frequency + version with build date + "Check for Updates…"), **Restart** (quits and reopens the app; routing is restored on quit and re-applied on relaunch), "Run setup again", reset all.
 - **Appearance** — **icon placement** (three large selectable cards — Menu bar only / Menu bar + Dock / Dock only — each with a mini screen mock showing the icon's location), color mode (System / Light / Dark), and **menu bar icon style** (Classic / Colorized, with an inline color sample in each option; disabled while the menu bar icon is hidden).
 - **Tunnel** — a mode `Picker` ("I manage the tunnel" / "Run the tunnel for me"):
   - *Manual*: SOCKS5 host/port, live "Test connection", supervised toggle + launchd job label, restart.

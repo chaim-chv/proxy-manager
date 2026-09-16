@@ -324,13 +324,13 @@ struct GeneralSettingsView: View {
                 }
 
                 SettingsGroup {
-                    VStack(spacing: 0) {
-                        SettingsRow {
-                            Button("Run setup again") { model.replayOnboarding() }
-                            Spacer()
-                            Button("Reset all settings and data") { model.resetAll() }
-                                .foregroundStyle(.red)
-                        }
+                    SettingsRow {
+                        Button("Restart") { model.restartApp() }
+                        HelpPopover(text: "Quits and reopens the app. Your routing settings are restored on quit and re-applied on relaunch.")
+                        Spacer()
+                        Button("Run setup again") { model.replayOnboarding() }
+                        Button("Reset all settings and data") { model.resetAll() }
+                            .foregroundStyle(.red)
                     }
                 }
             }

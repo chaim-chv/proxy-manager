@@ -484,6 +484,27 @@ final class AppModel: ObservableObject {
         telemetry.purge()
     }
 
+    /// Relaunches the app. A detached shell waits for this process to exit (so
+    /// the system proxy is restored and port 8888 is released) before reopening
+    /// the bundle as a fresh instance.
+    func restartApp() {
+        let bundlePath = Bundle.main.bundlePath
+        let pid = ProcessInfo.processInfo.processIdentifier
+        Log.app.notice("restartApp(): relaunching in place")
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = ["-c",
+            "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"\(bundlePath)\""]
+        do {
+            try helper.run()
+        } catch {
+            Log.app.error("restartApp(): could not schedule relaunch: \(error.localizedDescription)")
+            setLastError("Couldn't restart: \(error.localizedDescription)")
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
     // MARK: - Onboarding
 
     func completeOnboarding() {
