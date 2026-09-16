@@ -41,9 +41,19 @@ function emit(title, key) {
         print ""
     }
 }
+function strip(s,  prefix, rest) {
+    if (match(s, /^[A-Za-z]+(\([^)]*\))?!?:[ ]*/)) {
+        prefix = substr(s, 1, RLENGTH)
+        rest = substr(s, RLENGTH + 1)
+        if (match(prefix, /\([^)]*\)/))
+            return substr(prefix, RSTART + 1, RLENGTH - 2) ": " rest
+        return rest
+    }
+    return s
+}
 {
     key = section($0)
-    items[key] = items[key] "- " $0 "\n"
+    items[key] = items[key] "- " strip($0) "\n"
 }
 END {
     emit("Features", "features")

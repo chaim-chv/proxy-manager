@@ -106,10 +106,20 @@ only supports key rotation, not key loss, without Developer ID). Back it up.
 1. `./build.sh <version>` — links, embeds, and signs Sparkle.
 2. Package with `ditto -c -k --sequesterRsrc --keepParent` (**not** `zip -r`:
    a plain zip follows the framework symlinks and breaks the code signature).
-3. `Vendor/Sparkle/bin/generate_appcast --ed-key-file <key>` signs the archive
-   and writes `updates/appcast.xml` with an `enclosure` URL pointing at the
-   release asset.
-4. Attach `appcast.xml` to the release. The app's `SUFeedURL` is
+3. `Vendor/Sparkle/bin/generate_appcast --ed-key-file <key> --embed-release-notes`
+   signs the archive and writes `updates/appcast.xml` with an `enclosure` URL
+   pointing at the release asset.
+4. The generated changelog is copied next to the archive as
+   `updates/ProxyManager-<version>.md`. `generate_appcast` picks up any
+   `.md`/`.html`/`.txt` file whose base name matches the archive. Because a
+   Markdown file is only embedded when asked, `--embed-release-notes` inlines it
+   as `<description sparkle:format="markdown">` — so **Sparkle's update alert
+   shows the same changelog** as the GitHub release, with no extra hosted asset.
+   Only the changelog is embedded; the Installation / Requirements /
+   notarization note that the GitHub release body appends is not shown in the
+   appcast. (Embedded markdown needs Sparkle 2.9+ / macOS 12+; the vendored
+   2.10.0 is fine.)
+5. Attach `appcast.xml` to the release. The app's `SUFeedURL` is
    `https://github.com/chaim-chv/proxy-manager/releases/latest/download/appcast.xml`,
    so `latest/download/appcast.xml` always resolves to the newest feed.
 

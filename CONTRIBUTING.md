@@ -17,6 +17,11 @@ Rules:
 - Scope is optional but recommended
 - `!` after the type/scope marks a breaking change (e.g. `feat(api)!: ...`)
 
+The type/verb is dropped from the release notes (the section already says it). A
+scope is kept as a prefix:
+- `feat(ui): add dark mode` → `- ui: add dark mode`
+- `fix: stop a crash` → `- stop a crash`
+
 Examples:
 - feat(proxy): support keep-alive for plain HTTP forwarding
 - fix(socks): handle SOCKS5 REP errors during handshake

@@ -48,6 +48,11 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             ProxyManager.app ProxyManager-${{ steps.version.outputs.version }}.zip
 
+      - name: Generate changelog
+        run: |
+          chmod +x .github/scripts/changelog.sh
+          .github/scripts/changelog.sh > CHANGELOG.md || true
+
       # Sign the update archive with the EdDSA private key and emit appcast.xml.
       # The feed URL embedded in the app (SUFeedURL) is:
       #   https://github.com/<repo>/releases/latest/download/appcast.xml
@@ -66,12 +71,23 @@ jobs:
           mkdir -p updates
           cp "ProxyManager-${{ steps.version.outputs.version }}.zip" updates/
 
+          # A release-notes file whose base name matches the archive is picked up
+          # by generate_appcast. --embed-release-notes inlines it into the
+          # appcast's <description> (markdown format) so Sparkle's update alert
+          # shows the changelog without needing an extra hosted asset. Only the
+          # changelog is embedded — the Installation/Requirements/notarization
+          # note that the GitHub release body adds is not part of the appcast.
+          if [ -s CHANGELOG.md ]; then
+            cp CHANGELOG.md "updates/ProxyManager-${{ steps.version.outputs.version }}.md"
+          fi
+
           KEY_FILE="$RUNNER_TEMP/sparkle_private_key"
           printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
           chmod 600 "$KEY_FILE"
 
           ./Vendor/Sparkle/bin/generate_appcast \
             --ed-key-file "$KEY_FILE" \
+            --embed-release-notes \
             --download-url-prefix "https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/" \
             -o updates/appcast.xml \
             updates/
@@ -81,9 +97,6 @@ jobs:
 
       - name: Generate release body
         run: |
-          chmod +x .github/scripts/changelog.sh
-          .github/scripts/changelog.sh > CHANGELOG.md || true
-
           cat <<'EOF' > INSTALL.md
           ### Installation
           1. Download `ProxyManager-${{ steps.version.outputs.version }}.zip`
