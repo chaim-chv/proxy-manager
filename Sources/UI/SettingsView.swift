@@ -85,11 +85,28 @@ struct SettingsView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            List(SettingsSection.allCases, selection: $selection) { section in
-                Label(section.rawValue, systemImage: section.icon)
-                    .tag(section)
+            VStack(spacing: 0) {
+                List(SettingsSection.allCases, selection: $selection) { section in
+                    Label(section.rawValue, systemImage: section.icon)
+                        .tag(section)
+                }
+                .listStyle(.sidebar)
+
+                Divider()
+
+                HStack {
+                    Button {
+                        DashboardWindowController.shared.show()
+                    } label: {
+                        Image(systemName: "chart.line.uptrend.xyaxis")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Open Dashboard")
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
             }
-            .listStyle(.sidebar)
             .frame(width: 200)
 
             Divider()

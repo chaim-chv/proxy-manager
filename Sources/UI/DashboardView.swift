@@ -137,6 +137,14 @@ struct DashboardView: View {
 
             Spacer()
 
+            Button {
+                model.openSettings()
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.borderless)
+            .help("Open Settings")
+
             Button(role: .destructive) {
                 telemetry.purge()
             } label: {
