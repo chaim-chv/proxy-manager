@@ -2,6 +2,9 @@
 set -euo pipefail
 
 VERSION="${1:-1.0.0}"
+# Build date stamped into Info.plist (BuildDate) and shown next to the version.
+# Override with BUILD_DATE for reproducible builds.
+BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%d)}"
 APP_NAME="ProxyManager"
 BUNDLE_ID="com.proxymanager.app"
 HELPER_NAME="com.proxymanager.helper"
@@ -82,6 +85,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
     <string>$VERSION</string>
+    <key>BuildDate</key>
+    <string>$BUILD_DATE</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>

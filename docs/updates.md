@@ -32,7 +32,7 @@ static file attached to each GitHub release.
 
 | Where | What |
 |---|---|
-| Settings → General → Updates | "Check for updates" frequency popup (Never / Daily / Weekly, default Daily), current version, and a "Check for Updates…" button. |
+| Settings → General → Updates | "Check for updates" frequency popup (Never / Daily / Weekly, default Daily), current version with its build date, and a "Check for Updates…" button. |
 | Status menu | "Check for Updates…" (between About and Quit). |
 
 The manual check controls are disabled while a check is already running, driven
@@ -124,6 +124,9 @@ without a feed (that version will not be offered as an update).
 - Copies `Sparkle.framework` into `Contents/Frameworks/` with `ditto`.
 - Adds `SUFeedURL`, `SUPublicEDKey`, `SUEnableAutomaticChecks`,
   `SUAutomaticallyUpdate`, `SUScheduledCheckInterval` to `Info.plist`.
+- Stamps `BuildDate` (UTC `YYYY-MM-DD`, overridable via `BUILD_DATE`) into
+  `Info.plist`; `UpdaterController.displayVersionWithDate` shows it next to the
+  version in Settings → General → Updates and About.
 - Signs **inside-out** (Sparkle XPC services → `Autoupdate` → `Updater.app` →
   framework → helper → app). `--deep` is deliberately not used: it is deprecated
   and would smear the XPC services' entitlements across the framework.

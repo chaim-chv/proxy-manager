@@ -293,7 +293,13 @@ final class StatusMenuController: NSObject {
 
     @objc private func showAbout() {
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.orderFrontStandardAboutPanel(options: [:])
+        // The standard panel renders "Version <ApplicationVersion> (<Version>)".
+        // Put the marketing version in `.applicationVersion` and the build date
+        // in `.version` so the date appears once, in parentheses.
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: UpdaterController.displayVersion,
+            .version: UpdaterController.buildDate ?? ""
+        ])
     }
 
     @objc private func quitApp() {

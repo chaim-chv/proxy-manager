@@ -102,6 +102,20 @@ final class UpdaterController: NSObject, ObservableObject {
         return short
     }
 
+    /// The build date stamped into `Info.plist` by `build.sh` (`BuildDate`).
+    static var buildDate: String? {
+        guard let date = Bundle.main.object(forInfoDictionaryKey: "BuildDate") as? String,
+              !date.isEmpty else { return nil }
+        return date
+    }
+
+    /// The version with its build date appended when the bundle carries one,
+    /// e.g. `1.0.0 · 2026-09-16`.
+    static var displayVersionWithDate: String {
+        guard let buildDate else { return displayVersion }
+        return "\(displayVersion) · \(buildDate)"
+    }
+
     private static var feedURL: String {
         Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? "unset"
     }

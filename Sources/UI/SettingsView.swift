@@ -311,7 +311,7 @@ struct GeneralSettingsView: View {
                         }
                         Divider()
                         SettingsRow {
-                            Text("Version \(UpdaterController.displayVersion)")
+                            Text("Version \(UpdaterController.displayVersionWithDate)")
                                 .foregroundStyle(.secondary)
                             Spacer()
                             CheckForUpdatesButton()
@@ -878,6 +878,8 @@ struct AboutSettingsView: View {
     var body: some View {
         SettingsPage(title: SettingsSection.about.title, summary: SettingsSection.about.summary) {
             VStack(alignment: .leading, spacing: 20) {
+                versionSection
+                Divider()
                 flowSection
                 Divider()
                 conceptsSection
@@ -888,6 +890,19 @@ struct AboutSettingsView: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
+        }
+    }
+
+    // MARK: Version
+
+    private var versionSection: some View {
+        HStack(spacing: 6) {
+            Text("Version")
+                .font(.callout.weight(.semibold))
+            Text(UpdaterController.displayVersionWithDate)
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Spacer()
         }
     }
 

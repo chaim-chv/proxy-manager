@@ -7,13 +7,14 @@
 - No Xcode project — compiles all `Sources/**/*.swift` (except `Sources/Helper/`) with `xcrun swiftc -swift-version 5 -O -target <arch>-apple-macosx14.0`.
 - **Two binaries**: the app (`Contents/MacOS/ProxyManager`) and the helper daemon (`Contents/Library/LaunchDaemons/com.proxymanager.helper`), plus the daemon's `com.proxymanager.helper.plist`.
 - Links and embeds the vendored **Sparkle** framework (`Vendor/Sparkle/Sparkle.framework` → `Contents/Frameworks/`), adds the `@executable_path/../Frameworks` rpath to the app only, and writes the `SUFeedURL` / `SUPublicEDKey` / auto-update keys into `Info.plist`.
-- Generates `Info.plist` (bundle id `com.proxymanager.app`), copies `Resources/*.lproj`, then signs **inside-out** (Sparkle XPC services → `Autoupdate` → `Updater.app` → framework → helper → app). `--deep` is intentionally **not** used — it is deprecated and would smear Sparkle's XPC entitlements. See [updates.md](updates.md).
+- Generates `Info.plist` (bundle id `com.proxymanager.app`) with `CFBundleShortVersionString` / `CFBundleVersion` = `<version>` and `BuildDate` = the UTC build date (`YYYY-MM-DD`, override with `BUILD_DATE`), copies `Resources/*.lproj`, then signs **inside-out** (Sparkle XPC services → `Autoupdate` → `Updater.app` → framework → helper → app). `--deep` is intentionally **not** used — it is deprecated and would smear Sparkle's XPC entitlements. See [updates.md](updates.md).
 
 ### Options
 
 | Env | Effect |
 |---|---|
 | `ARCH` | Override target arch (default `uname -m`) |
+| `BUILD_DATE` | Override the `BuildDate` stamped into `Info.plist` (default UTC today, `YYYY-MM-DD`) |
 | `SPARKLE_DIR` | Path to the vendored Sparkle framework (default `Vendor/Sparkle`) |
 | `UNIVERSAL=1` | Build arm64 + x86_64 and `lipo` them |
 | `IDENTITY="Developer ID Application: …"` | Sign with a Developer ID (required for the helper daemon to register) |

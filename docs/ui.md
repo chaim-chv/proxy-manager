@@ -40,7 +40,7 @@ A sidebar layout — a fixed-width `List` (left) + `Divider` + detail pane (righ
 - **Targets** — allow-list editor with a **bulk textarea** (enter many hosts at once, separated by line breaks, commas, or semicolons), **inline edit** (double-click a rule or click the pencil next to its toggle; Return saves, Esc cancels, clicking outside discards, ✓/✕ buttons), remove/toggle, a **Presets menu** (appends, skipping duplicates) with clear-all, and a live match preview.
 - **System** — shell env injection, editable managed rc-file list, restore-on-quit, crash watchdog.
 - **Monitoring** — retention days, record paths, purge history.
-- **About** — a plain-language explainer with a flow diagram (apps → local proxy → allow-list decision → tunnel/direct), the key concepts, privacy notes, and credits.
+- **About** — the version and its build date, then a plain-language explainer with a flow diagram (apps → local proxy → allow-list decision → tunnel/direct), the key concepts, privacy notes, and credits.
 
 ## Onboarding (`OnboardingView.swift` + `OnboardingWindowController`)
 
