@@ -238,11 +238,15 @@ private struct SettingsCaption: View {
 /// the macOS preferences look for a boolean option.
 private struct SettingsToggleRow: View {
     let title: String
+    var help: String? = nil
     let isOn: Binding<Bool>
 
     var body: some View {
         SettingsRow {
             Text(title)
+            if let help {
+                HelpPopover(text: help)
+            }
             Spacer()
             Toggle("", isOn: isOn)
                 .toggleStyle(.switch)
@@ -369,50 +373,41 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                SettingsGroup(title: "Color mode") {
-                    VStack(spacing: 0) {
-                        SettingsRow {
-                            Picker("Color mode", selection: model.binding(\.system.appearanceMode)) {
-                                ForEach(AppearanceMode.allCases) { mode in
-                                    Text(mode.label).tag(mode)
-                                }
+                SettingsGroup(title: "Color mode",
+                              help: "System follows the macOS setting. Light and dark force the whole app — windows, menu bar icon, dashboard — to that look.") {
+                    SettingsRow {
+                        Picker("Color mode", selection: model.binding(\.system.appearanceMode)) {
+                            ForEach(AppearanceMode.allCases) { mode in
+                                Text(mode.label).tag(mode)
                             }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(maxWidth: .infinity)
                         }
-                        Divider()
-                        SettingsCaption(text: "System follows the macOS setting. Light and dark force the whole app — windows, menu bar icon, dashboard — to that look.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
                     }
                 }
 
                 SettingsGroup(title: "Menu bar icon") {
                     VStack(spacing: 0) {
-                        SettingsRow {
-                            Picker("Menu bar icon style", selection: model.binding(\.system.colorizeMenuIcon)) {
-                                HStack(spacing: 8) {
-                                    MenuIconSample(colorized: false)
-                                    Text("Classic")
-                                }
-                                .tag(false)
-
-                                HStack(spacing: 8) {
-                                    MenuIconSample(colorized: true)
-                                    Text("Colorized")
-                                }
-                                .tag(true)
-                            }
-                            .pickerStyle(.radioGroup)
-                            .labelsHidden()
+                        MenuIconStyleRow(
+                            title: "Classic",
+                            help: "A monochrome icon that matches the rest of your menu bar.",
+                            sampleColorized: false,
+                            isSelected: !model.config.system.colorizeMenuIcon
+                        ) {
+                            model.config.system.colorizeMenuIcon = false
+                            model.commitConfig()
                         }
                         Divider()
-                        SettingsCaption(text: model.config.system.colorizeMenuIcon
-                             ? "Colored by state: green = on, amber = starting/stopping, orange = degraded, red = error."
-                             : "A monochrome icon that matches the rest of your menu bar.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
+                        MenuIconStyleRow(
+                            title: "Colorized",
+                            help: "Colored by state: green = on, amber = starting/stopping, orange = degraded, red = error.",
+                            sampleColorized: true,
+                            isSelected: model.config.system.colorizeMenuIcon
+                        ) {
+                            model.config.system.colorizeMenuIcon = true
+                            model.commitConfig()
+                        }
                     }
                 }
                 .disabled(!model.config.system.iconMode.showsMenuBarIcon)
@@ -629,14 +624,8 @@ struct ProxySettingsView: View {
                 }
 
                 SettingsGroup(title: "When the tunnel is down",
-                              help: "Fail open (off) lets traffic go direct so nothing breaks. Fail closed (on) blocks routed hosts until the tunnel returns.") {
-                    VStack(spacing: 0) {
-                        SettingsToggleRow(title: "Fail closed (block allow-listed hosts)", isOn: model.binding(\.policy.failClosedWhenTunnelDown))
-                        Divider()
-                        SettingsCaption(text: "On = block routed hosts while the tunnel is down. Off = fall back to a direct connection.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                    }
+                              help: "Fail closed (on) blocks your routed hosts when the tunnel drops. Fail open (off) lets them fall back to a direct connection so nothing breaks.") {
+                    SettingsToggleRow(title: "Fail closed (block allow-listed hosts)", isOn: model.binding(\.policy.failClosedWhenTunnelDown))
                 }
             }
         }
@@ -654,14 +643,8 @@ struct SystemSettingsView: View {
         SettingsPage(title: SettingsSection.system.title, summary: SettingsSection.system.summary) {
             SettingsContent {
                 SettingsGroup(title: "Terminal apps",
-                              help: "CLI tools read HTTP_PROXY/HTTPS_PROXY. Browsers don't need this — they use the macOS system proxy, which the app always sets while routing is on.") {
-                    VStack(spacing: 0) {
-                        SettingsToggleRow(title: "Inject proxy env vars into shell rc files", isOn: model.binding(\.system.injectShellEnv))
-                        Divider()
-                        SettingsCaption(text: "Writes ~/.config/proxy-manager/env.sh and adds a guarded source line to each file below, so new terminal sessions pick up HTTP_PROXY/HTTPS_PROXY.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                    }
+                              help: "CLI tools read HTTP_PROXY/HTTPS_PROXY; browsers use the macOS system proxy instead. When on, the app writes ~/.config/proxy-manager/env.sh and adds a guarded source line to each file below, so new terminal sessions pick up the variables.") {
+                    SettingsToggleRow(title: "Inject proxy env vars into shell rc files", isOn: model.binding(\.system.injectShellEnv))
                 }
 
                 SettingsGroup(title: "Shell rc files") {
@@ -705,21 +688,18 @@ struct SystemSettingsView: View {
                 }
 
                 SettingsGroup(title: "Quit behavior",
-                              help: "The crash watchdog is a tiny always-on helper that restores your original proxy settings if Proxy Manager is force-quit or crashes while routing is on — so your internet never stays pointed at a dead local proxy.") {
+                              help: "Restoring on quit puts your original macOS proxy settings back when you quit the app normally.") {
                     VStack(spacing: 0) {
                         SettingsToggleRow(title: "Restore original proxy settings on quit", isOn: model.binding(\.system.restoreOnQuit))
                         Divider()
                         SettingsToggleRow(
                             title: "Crash watchdog (restore internet if the app dies)",
+                            help: "A tiny always-on helper that restores your original proxy settings within milliseconds if the app crashes or is force-quit, so your internet never stays pointed at a dead local proxy. It stays idle at ~0% CPU.",
                             isOn: Binding(
                                 get: { model.config.system.crashWatchdog },
                                 set: { model.setCrashWatchdog($0) }
                             )
                         )
-                        Divider()
-                        SettingsCaption(text: "Installs a user LaunchAgent that stays idle at ~0% CPU and restores the system proxy within milliseconds if the app is force-quit.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
                     }
                 }
             }
@@ -818,8 +798,9 @@ private struct AppIconModeCard: View {
     }
 }
 
-/// A tiny "screen" mock: a menu bar strip on top and a Dock strip on the
-/// bottom, with the app icon shown in whichever location `mode` enables.
+/// A tiny "screen" mock: a menu bar strip on top (with a live clock at the
+/// right, where macOS puts it) and a Dock strip on the bottom, with the app
+/// icon shown in whichever location `mode` enables.
 private struct IconPlacementSample: View {
     let mode: AppIconMode
 
@@ -827,12 +808,15 @@ private struct IconPlacementSample: View {
         VStack(spacing: 0) {
             ZStack {
                 Rectangle().fill(Color(nsColor: .windowBackgroundColor))
-                HStack {
+                HStack(spacing: 4) {
                     Spacer()
                     Image(systemName: "circle.fill")
                         .font(.system(size: 9))
                         .foregroundStyle(.green)
                         .opacity(mode.showsMenuBarIcon ? 1 : 0)
+                    Text(Date(), style: .time)
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
                 }
                 .padding(.trailing, 7)
             }
@@ -859,6 +843,33 @@ private struct IconPlacementSample: View {
             RoundedRectangle(cornerRadius: 6)
                 .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+}
+
+/// A single radio-style option for the menu bar icon style, with an adjacent
+/// help popover explaining what that style looks like.
+private struct MenuIconStyleRow: View {
+    let title: String
+    let help: String
+    let sampleColorized: Bool
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        SettingsRow {
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    MenuIconSample(colorized: sampleColorized)
+                    Text(title)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            HelpPopover(text: help)
+            Spacer()
+        }
     }
 }
 
