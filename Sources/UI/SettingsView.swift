@@ -292,7 +292,10 @@ struct GeneralSettingsView: View {
                     )
                 }
 
-                SettingsGroup(title: "Updates") {
+                SettingsGroup(
+                    title: "Updates",
+                    help: "Proxy Manager checks in the background and always asks before installing. Installing restarts the app; your routing settings are restored first and re-applied on relaunch."
+                ) {
                     VStack(spacing: 0) {
                         SettingsRow {
                             Text("Check for updates")
@@ -316,10 +319,6 @@ struct GeneralSettingsView: View {
                             Spacer()
                             CheckForUpdatesButton()
                         }
-                        Divider()
-                        SettingsCaption(text: "Proxy Manager checks in the background and always asks before installing. Installing restarts the app; your routing settings are restored first and re-applied on relaunch.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
                     }
                 }
 
