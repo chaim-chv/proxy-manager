@@ -39,6 +39,14 @@ Restore the snapshot (or clear the proxy), remove env, clear snapshot, `wasOnKey
 - **Auto-re-enable on launch**: if `wasOnKey` was true, `enable()` runs ~0.5 s after launch, *loading* the persisted snapshot (never re-capturing the dangling proxy).
 - **`shutdownForQuit()`** (from `applicationWillTerminate`): runs its whole body on `workQueue.sync`, so it cannot race an in-flight `enable()`/`disable()` (which could otherwise apply the proxy *after* the restore). It restores from the **persisted** snapshot and only clears the snapshot / disarms the watchdog when the restore succeeded. It deliberately leaves `wasOnKey` untouched so the next launch re-enables routing if it was on when we quit (only an explicit `disable()` clears `wasOnKey`). If `restoreOnQuit` is off (and the crash watchdog is enabled), or the restore fails, the snapshot and the armed watchdog are **left in place** so the watchdog restores within ms of process exit. If the watchdog is disabled, the quit path always restores regardless of `restoreOnQuit` — otherwise the machine would be left pointing at a dead `127.0.0.1`. It also flushes telemetry (`telemetry.flushNow()`).
 
+### Only deliberate quits terminate
+
+Because this is a menu-bar app whose whole job is to keep the tunnel up, an incidental quit request must **not** kill it. `AppDelegate.applicationShouldTerminate` returns `.terminateNow` only when `AppModel.isTerminationAllowed` is set or the quit came from the system; otherwise it logs, calls `closeFrontWindow()`, and returns `.terminateCancel`.
+
+- **Deliberate (set `isTerminationAllowed`, then terminate)** — the menu-bar status menu's *Quit Proxy Manager*, a **mouse click** on the app-menu *Quit Proxy Manager*, the Settings → General **Quit** button, **Restart** (`restartApp()`), and Sparkle's `willInstallUpdate` (which fires before the installer asks the app to quit).
+- **Incidental (cancel, close front window)** — the Dock icon's right-click *Quit*, a stray Apple event, and the **⌘Q** key equivalent. `CommandGroup(replacing: .appTermination)` owns the app-menu Quit item so `AppDelegate.handleQuitCommand()` can tell a click (quit) from ⌘Q (close window) via `NSApp.currentEvent`.
+- **System quit (always allowed)** — logout / restart / shutdown, detected from `NSWorkspace.willPowerOffNotification` and the `kAEQuitReason` attribute of the quit Apple Event, so the app never blocks a shutdown.
+
 ## Crash watchdog (SIGKILL / force-quit safety net)
 
 `Sources/Support/Watchdog.swift`. The app binary has a second role: `ProxyManager --watchdog` (dispatched in `App.swift` before SwiftUI starts). It runs as a **user LaunchAgent** (`com.proxymanager.watchdog`, `KeepAlive`) installed on first enable — no admin, no signing required.

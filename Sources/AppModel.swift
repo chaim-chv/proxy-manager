@@ -484,6 +484,27 @@ final class AppModel: ObservableObject {
         telemetry.purge()
     }
 
+    /// Set only by the app's own deliberate quit affordances: the menu-bar
+    /// status menu, the app-menu "Quit Proxy Manager" item (a click, not ⌘Q),
+    /// Settings → General, Restart, and Sparkle just before it installs an
+    /// update. `AppDelegate.applicationShouldTerminate` reads it so an
+    /// incidental quit request (the Dock menu's Quit, a stray Apple event)
+    /// closes the front window instead of killing the tunnel.
+    private(set) var isTerminationAllowed = false
+
+    /// Marks the next termination as deliberate. Everything that means "the
+    /// user asked to quit" must go through here (or `quitApp()`).
+    func allowTermination() {
+        isTerminationAllowed = true
+    }
+
+    /// Deliberately quits the app. The status menu, the app-menu Quit item, and
+    /// the Settings button all route through here so the terminate is honored.
+    func quitApp() {
+        allowTermination()
+        NSApp.terminate(nil)
+    }
+
     /// Relaunches the app. A detached shell waits for this process to exit (so
     /// the system proxy is restored and port 8888 is released) before reopening
     /// the bundle as a fresh instance.
@@ -502,6 +523,7 @@ final class AppModel: ObservableObject {
             setLastError("Couldn't restart: \(error.localizedDescription)")
             return
         }
+        allowTermination()
         NSApp.terminate(nil)
     }
 

@@ -1,18 +1,34 @@
 import SwiftUI
 import AppKit
+import CoreServices
 import Darwin
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuController: StatusMenuController?
     private var escapeMonitor: Any?
+    private var powerOffObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Native menu-bar status item + menu (custom-view NSMenu). See
         // StatusMenuController.swift for why this is AppKit, not SwiftUI.
         statusMenuController = StatusMenuController.shared
         installEscapeToCloseSettings()
+        observeSystemPowerOff()
         if AppModel.shared.showOnboarding {
             OnboardingWindowController.shared.show()
+        }
+    }
+
+    /// A logout/restart/shutdown must never be blocked, so remember it. macOS
+    /// usually stamps the quit Apple Event with `kAEQuitReason` too; this covers
+    /// the paths where it does not.
+    private func observeSystemPowerOff() {
+        powerOffObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            AppModel.shared.allowTermination()
         }
     }
 
@@ -73,6 +89,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         false
     }
 
+    /// Only a deliberate quit (the menu-bar status menu, a click on the app-menu
+    /// Quit item, the Settings → General button, Restart, or Sparkle installing
+    /// an update) may terminate. Everything else — the Dock menu's Quit, a
+    /// stray Apple event — just closes the front window and keeps the tunnel
+    /// alive. A system logout/restart/shutdown is always allowed through.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if AppModel.shared.isTerminationAllowed || Self.isSystemQuitEvent() {
+            return .terminateNow
+        }
+        Log.app.notice("applicationShouldTerminate(): ignoring incidental quit request")
+        Self.closeFrontWindow()
+        return .terminateCancel
+    }
+
+    /// True when the quit Apple Event came from the system (logout, restart,
+    /// shutdown) rather than a user or the Dock.
+    private static func isSystemQuitEvent() -> Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventClass == kCoreEventClass,
+              event.eventID == kAEQuitApplication,
+              let reason = event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason))
+        else { return false }
+        switch reason.typeCodeValue {
+        case kAEShutDown, kAERestart, kAEReallyLogOut: return true
+        default: return false
+        }
+    }
+
+    /// Handles the app-menu "Quit Proxy Manager" item. A mouse click is a
+    /// deliberate quit; the ⌘Q key equivalent is not — it closes the front
+    /// window and leaves the app (and the tunnel) running.
+    static func handleQuitCommand() {
+        if let event = NSApp.currentEvent,
+           event.type == .keyDown,
+           event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "q" {
+            closeFrontWindow()
+            return
+        }
+        AppModel.shared.quitApp()
+    }
+
+    /// Closes the frontmost app window, if any. Sparkle's own windows are left
+    /// alone so an in-flight update is never interrupted.
+    static func closeFrontWindow() {
+        let front = [NSApp.keyWindow, NSApp.mainWindow].compactMap { $0 } + NSApp.windows
+        guard let window = front.first(where: {
+            $0.isVisible && $0.canBecomeKey && !isSparkleWindow($0)
+        }) else { return }
+        // Close on the next run-loop pass: closing synchronously from a quit
+        // request re-enters AppKit while the event is still being handled.
+        DispatchQueue.main.async { window.performClose(nil) }
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         DashboardWindowController.shared.show()
         return true
@@ -96,6 +166,16 @@ struct AppCommands: Commands {
                 AppModel.shared.toggle()
             }
             .keyboardShortcut("l")
+        }
+
+        // Replace the standard Quit item so only a click quits: a mouse click
+        // is deliberate, while the ⌘Q key equivalent closes the front window
+        // instead. See `AppDelegate.handleQuitCommand()`.
+        CommandGroup(replacing: .appTermination) {
+            Button("Quit Proxy Manager") {
+                AppDelegate.handleQuitCommand()
+            }
+            .keyboardShortcut("q")
         }
     }
 }

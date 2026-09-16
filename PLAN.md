@@ -362,6 +362,7 @@ State-tinted icon; click → menu:
 - **Routing** toggle (native checkmark, grayed while starting/stopping) and **Launch at Login**.
 - `Restart Tunnel` (supervised only).
 - `Open Dashboard…` (`⌘D`), `Settings…` (`⌘,`), `About Proxy Manager`, `Check for Updates…`, `Quit Proxy Manager` (`⌘Q`).
+- Only **deliberate** quits terminate: the status-menu Quit item, a click on the app-menu Quit item, the Settings → General **Quit** button, Restart, and Sparkle installing an update. ⌘Q and the Dock menu's Quit just close the front window; logout/restart/shutdown is always allowed. See `docs/app-model-lifecycle.md`.
 
 ### 8.3 Dashboard
 - Single window (`NSWindow`, frame autosaved) with a stats strip, a chart + "top tunneled hosts" row, and a feed/detail `HSplitView`:

@@ -57,7 +57,7 @@ final class UpdaterController: NSObject, ObservableObject {
 
     private override init() {
         controller = SPUStandardUpdaterController(startingUpdater: true,
-                                                  updaterDelegate: nil,
+                                                  updaterDelegate: UpdaterTerminationDelegate.shared,
                                                   userDriverDelegate: nil)
         super.init()
         cancellable = controller.updater.publisher(for: \.canCheckForUpdates)
@@ -118,6 +118,19 @@ final class UpdaterController: NSObject, ObservableObject {
 
     private static var feedURL: String {
         Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String ?? "unset"
+    }
+}
+
+/// Sparkle delegate that lets an update install. `willInstallUpdate` fires
+/// before Sparkle asks the app to quit (the installer only resumes afterwards),
+/// so flagging the termination here keeps `applicationShouldTerminate` from
+/// treating the update's quit as an incidental one and blocking it.
+final class UpdaterTerminationDelegate: NSObject, SPUUpdaterDelegate {
+    static let shared = UpdaterTerminationDelegate()
+
+    func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        Log.app.notice("Sparkle will install \(item.displayVersionString, privacy: .public); allowing termination")
+        AppModel.shared.allowTermination()
     }
 }
 

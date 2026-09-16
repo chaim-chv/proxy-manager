@@ -32,7 +32,8 @@ private let statusMenuWidth: CGFloat = 250
 /// starting/stopping, tunnel flaps, errors — shows up even while the menu is
 /// open. Key equivalents on the status menu are display hints; the actual ⌘Q /
 /// ⌘, / ⌘D handling while the app is active comes from the SwiftUI main menu
-/// (the `Settings` scene + `AppCommands`).
+/// (the `Settings` scene + `AppCommands`). Only a *click* on this menu's "Quit
+/// Proxy Manager" row quits; ⌘Q closes the front window instead.
 final class StatusMenuController: NSObject {
     static let shared = StatusMenuController()
 
@@ -303,7 +304,7 @@ final class StatusMenuController: NSObject {
     }
 
     @objc private func quitApp() {
-        NSApp.terminate(nil)
+        model.quitApp()
     }
 
     @objc private func restartTunnel() {

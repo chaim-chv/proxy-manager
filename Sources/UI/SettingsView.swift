@@ -345,6 +345,7 @@ struct GeneralSettingsView: View {
 
                 SettingsGroup {
                     SettingsRow {
+                        Button("Quit") { model.quitApp() }
                         Button("Restart") { model.restartApp() }
                         HelpPopover(text: "Quits and reopens the app. Your routing settings are restored on quit and re-applied on relaunch.")
                         Spacer()
