@@ -30,6 +30,7 @@ SCREENS=(
   "dashboard:dashboard"
   "dashboard-detail:dashboard-detail"
   "tunnel:settings-tunnel"
+  "tunnel-managed:settings-tunnel-managed"
   "targets:settings-targets"
   "onboarding:onboarding"
 )

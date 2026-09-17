@@ -19,8 +19,8 @@ import AppKit
 /// Environment variables (all optional):
 ///   PROXYMANAGER_DEMO=1            enable the demo (required)
 ///   PROXYMANAGER_SCREEN            dashboard | dashboard-detail |
-///                                  settings-tunnel | settings-targets |
-///                                  onboarding                     (default dashboard)
+///                                  settings-tunnel | settings-tunnel-managed |
+///                                  settings-targets | onboarding   (default dashboard)
 ///   PROXYMANAGER_APPEARANCE        dark | light                    (default dark)
 ///   PROXYMANAGER_ONBOARDING_STEP   0..3                            (default 2)
 enum DemoMode {
@@ -119,9 +119,12 @@ enum DemoMode {
         guard isEnabled else { return }
         seedTelemetry(model.telemetry)
 
+        let managed = (screen == "settings-tunnel-managed")
+        if managed { configureManagedTunnel(model) }
+
         model.showOnboarding = (screen == "onboarding")
         switch screen {
-        case "settings-tunnel": model.settingsSelection = .tunnel
+        case "settings-tunnel", "settings-tunnel-managed": model.settingsSelection = .tunnel
         case "settings-targets": model.settingsSelection = .targets
         default: break
         }
@@ -133,9 +136,23 @@ enum DemoMode {
             model.state = .on
             model.tunnelUp = true
             model.lastError = nil
+            if managed { model.sshRunning = true }
         }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { present(model) }
+    }
+
+    /// Seeds a realistic managed ("run the tunnel for me") configuration. No SSH
+    /// process is spawned — `syncManagedTunnel` is skipped in demo mode.
+    private static func configureManagedTunnel(_ model: AppModel) {
+        model.config.tunnel.mode = .managed
+        model.config.tunnel.managed.sshHost = "bastion.example.com"
+        model.config.tunnel.managed.sshPort = 22
+        model.config.tunnel.managed.username = "deploy"
+        model.config.tunnel.managed.auth = .key
+        model.config.tunnel.managed.keyPath = "~/.ssh/id_ed25519"
+        model.config.tunnel.managed.socksHost = "127.0.0.1"
+        model.config.tunnel.managed.socksPort = 1080
     }
 
     private static func present(_ model: AppModel) {
@@ -143,7 +160,7 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-tunnel", "settings-targets":
+        case "settings-tunnel", "settings-tunnel-managed", "settings-targets":
             model.openSettings()
         default:
             DashboardWindowController.shared.show()
