@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proxy Manager — route only the traffic you choose on macOS</title>
+<meta name="description" content="A native macOS menu-bar app that sends only the hostnames you choose through your SOCKS5 proxy or SSH tunnel. Everything else stays direct.">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)">
+<meta property="og:title" content="Proxy Manager">
+<meta property="og:description" content="Send only the sites you choose through your SOCKS5 tunnel. Everything else stays direct.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/dashboard-dark.png">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top">
+      <img class="brand-mark" src="assets/mark.svg" alt="" width="26" height="26">
+      <span>Proxy Manager</span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#screenshots">Screenshots</a>
+      <a href="#features">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#privacy">Privacy</a>
+    </nav>
+    <div class="header-actions">
+      <a class="btn btn-ghost" href="https://github.com/chaim-chv/proxy-manager" rel="noopener">GitHub</a>
+      <a class="btn btn-primary" href="https://github.com/chaim-chv/proxy-manager/releases/latest" rel="noopener">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">macOS menu-bar app · macOS 14+</p>
+      <h1>Send only the sites you choose<br>through your tunnel.</h1>
+      <p class="lede">
+        Proxy Manager runs a small local HTTP proxy. The hostnames you allow go through
+        your existing SOCKS5 proxy or SSH tunnel; everything else stays direct.
+        Browsers, terminals, and system apps all honor it — nothing else is rerouted.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="https://github.com/chaim-chv/proxy-manager/releases/latest" rel="noopener">Download for macOS</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/chaim-chv/proxy-manager" rel="noopener">View source</a>
+      </div>
+      <p class="meta">Free &amp; open source (MIT) · Not notarized — first launch needs “Open Anyway”</p>
+
+      <figure class="hero-shot">
+        <picture>
+          <source srcset="assets/dashboard-dark.png" media="(prefers-color-scheme: dark)">
+          <img src="assets/dashboard-light.png" alt="Proxy Manager dashboard: live request feed, request-rate chart, and per-route stats." width="2240" height="1496">
+        </picture>
+      </figure>
+    </div>
+  </section>
+
+  <!-- Screenshots -->
+  <section id="screenshots" class="section">
+    <div class="wrap">
+      <h2 class="section-title">A clear view of every request</h2>
+      <p class="section-lede">Live decisions, byte counts, and timings — on your machine, not in the cloud.</p>
+
+      <div class="shots">
+        <article class="shot">
+          <div class="shot-media">
+            <picture>
+              <source srcset="assets/dashboard-detail-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/dashboard-detail-light.png" alt="A request selected in the dashboard, showing its method, host, route, status, and byte counts." loading="lazy" width="2240" height="1496">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Per-request detail</h3>
+            <p>Select any request to inspect its method, host, route decision, status, source port, and byte counts. Metadata only — request bodies and headers are never captured.</p>
+          </div>
+        </article>
+
+        <article class="shot reverse">
+          <div class="shot-media">
+            <picture>
+              <source srcset="assets/targets-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/targets-light.png" alt="The Targets editor listing hostname rules, with a wildcard rule disabled." loading="lazy" width="2240" height="1496">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Your allow-list, editable live</h3>
+            <p>Add exact hosts or wildcards like <code>*.deepseek.com</code>, toggle rules on and off, and preview what a hostname would match. Changes apply without restarting the proxy.</p>
+          </div>
+        </article>
+
+        <article class="shot">
+          <div class="shot-media">
+            <picture>
+              <source srcset="assets/tunnel-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/tunnel-light.png" alt="Tunnel settings for a manual SOCKS5 proxy, showing a healthy tunnel and supervision options." loading="lazy" width="2240" height="1496">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Bring your own tunnel — or let it run one</h3>
+            <p>Point at any SOCKS5 proxy, or switch to “Run the tunnel for me” and let the app start and supervise an SSH tunnel. Passwords live in the Keychain, never in the config.</p>
+          </div>
+        </article>
+
+        <article class="shot reverse">
+          <div class="shot-media">
+            <picture>
+              <source srcset="assets/onboarding-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/onboarding-light.png" alt="The first-run onboarding wizard, choosing a starting allow-list from presets." loading="lazy" width="2240" height="1496">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Set up in about a minute</h3>
+            <p>A short first-run wizard asks for your tunnel address and which hosts to route. Start from a preset — DeepSeek, OpenAI, Anthropic, Gemini, GitHub, NVIDIA, WhatsApp — or start empty.</p>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="section alt">
+    <div class="wrap">
+      <h2 class="section-title">Everything it does</h2>
+      <p class="section-lede">A focused tool: route an allow-list, watch it work, and never break the rest of your connection.</p>
+
+      <ul class="features">
+        <li>
+          <h3>Allow-list routing</h3>
+          <p>Only the hostnames you list go through the tunnel. No match means direct — the local proxy is a policy router, not a MITM.</p>
+        </li>
+        <li>
+          <h3>Works for every app</h3>
+          <p>Sets the macOS system proxy for browsers and apps, and injects <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> for CLI tools that can’t speak SOCKS5 directly.</p>
+        </li>
+        <li>
+          <h3>Bring your own tunnel</h3>
+          <p>Use any SOCKS5 proxy you already run, or have the app run and supervise <code>ssh -N -D</code> for you, with key-file or password auth.</p>
+        </li>
+        <li>
+          <h3>Live monitoring</h3>
+          <p>A live feed of route decisions, hosts, methods, bytes, latency, and status — plus request-rate charts and per-host breakdowns.</p>
+        </li>
+        <li>
+          <h3>Never breaks your internet</h3>
+          <p>A tiny crash watchdog restores your original proxy settings within milliseconds if the app is force-quit or crashes, so your connection is never left pointing at a dead local port.</p>
+        </li>
+        <li>
+          <h3>No MITM, no certificates</h3>
+          <p>TLS passes through untouched. The app records metadata only and stores it locally in SQLite — no request bodies, no headers, no cloud.</p>
+        </li>
+        <li>
+          <h3>Presets and wildcards</h3>
+          <p>Start from curated allow-lists for common services, then add exact hosts or <code>*.example.com</code> wildcards of your own.</p>
+        </li>
+        <li>
+          <h3>Self-updating</h3>
+          <p>Sparkle 2 checks for new versions in the background and always asks before installing. Update checks are Never / Daily / Weekly.</p>
+        </li>
+        <li>
+          <h3>Prompt-free toggling</h3>
+          <p>Proxy settings for your network services are per-user, so enabling and disabling routing needs no password prompt on a normal setup.</p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="how" class="section">
+    <div class="wrap">
+      <h2 class="section-title">How it works</h2>
+      <p class="section-lede">One local hop decides where each connection goes.</p>
+
+      <div class="flow" role="img" aria-label="Apps connect to the local proxy on 127.0.0.1:8888, which sends allow-listed hosts to the SOCKS5 tunnel and everything else direct.">
+        <div class="flow-node">
+          <span class="flow-title">Apps &amp; CLI</span>
+          <span class="flow-sub">browser · curl · node</span>
+        </div>
+        <div class="flow-arrow" aria-hidden="true">→</div>
+        <div class="flow-node flow-accent">
+          <span class="flow-title">Local proxy</span>
+          <span class="flow-sub">127.0.0.1:8888</span>
+        </div>
+        <div class="flow-arrow" aria-hidden="true">→</div>
+        <div class="flow-branch">
+          <div class="flow-node flow-ok">
+            <span class="flow-title">Allow-listed</span>
+            <span class="flow-sub">→ SOCKS5 tunnel</span>
+          </div>
+          <div class="flow-node">
+            <span class="flow-title">Everything else</span>
+            <span class="flow-sub">→ direct</span>
+          </div>
+        </div>
+      </div>
+
+      <ol class="steps">
+        <li><strong>Turn it on.</strong> One switch in the menu bar or the dashboard starts the local proxy, applies the system proxy, and exports the shell environment.</li>
+        <li><strong>Traffic is classified.</strong> Each connection is matched against your allow-list and routed to the tunnel or straight out — streaming is passed through with backpressure, so long-lived responses aren’t buffered.</li>
+        <li><strong>Watch it work.</strong> Every request appears in the live feed with its decision, size, and timing. Turn it off and your original proxy settings are restored.</li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- Privacy -->
+  <section id="privacy" class="section alt">
+    <div class="wrap narrow">
+      <h2 class="section-title">Private by design</h2>
+      <ul class="checks">
+        <li><strong>No TLS interception.</strong> The app never sees plaintext — <code>CONNECT</code> streams are relayed byte-for-byte.</li>
+        <li><strong>Local-only.</strong> The proxy binds to <code>127.0.0.1</code>. A non-loopback client is blocked from loopback, link-local, and private destinations.</li>
+        <li><strong>Metadata only, on your disk.</strong> Host, size, timing, and status are stored in a local SQLite file; request bodies and headers are never recorded.</li>
+        <li><strong>Secrets stay in the Keychain.</strong> An SSH password is fed to <code>ssh</code> through a one-shot askpass helper — never in the config file or on a command line.</li>
+        <li><strong>Open source.</strong> MIT licensed; read every line on <a href="https://github.com/chaim-chv/proxy-manager" rel="noopener">GitHub</a>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section class="cta">
+    <div class="wrap">
+      <h2>Route what you choose. Leave the rest alone.</h2>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="https://github.com/chaim-chv/proxy-manager/releases/latest" rel="noopener">Download for macOS</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/chaim-chv/proxy-manager#installation" rel="noopener">Build from source</a>
+      </div>
+      <p class="meta">Requires macOS 14.0 or later. Not notarized — on first launch, allow it in System Settings → Privacy &amp; Security.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <div class="footer-brand">
+      <img src="assets/mark.svg" alt="" width="22" height="22">
+      <span>Proxy Manager</span>
+    </div>
+    <nav class="footer-links" aria-label="Links">
+      <a href="https://github.com/chaim-chv/proxy-manager" rel="noopener">GitHub</a>
+      <a href="https://github.com/chaim-chv/proxy-manager/releases" rel="noopener">Releases</a>
+      <a href="https://github.com/chaim-chv/proxy-manager/issues" rel="noopener">Issues</a>
+      <a href="https://github.com/chaim-chv/proxy-manager/blob/main/LICENSE" rel="noopener">MIT License</a>
+    </nav>
+    <p class="footer-note">
+      100% vibe-coded by <a href="https://github.com/chaim-chv/" rel="noopener">@chaim-chv</a> © 2026 ·
+      built with <a href="https://opencode.ai/" rel="noopener">OpenCode</a> and DeepSeek · MIT
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>
