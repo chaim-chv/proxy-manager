@@ -41,7 +41,8 @@ ProxyManager/
 │   ├── Telemetry/             ← batched SQLite telemetry + live feed
 │   ├── Tunnel/                ← SOCKS5 health probe + supervisor + SSH tunnel runner + keychain
 │   └── UI/                    ← dashboard, settings, targets, onboarding, updater, help popovers, status menu
-├── Resources/                 ← localizations (copied into the bundle)
+├── Resources/                 ← app icon + localizations (copied into the bundle)
+├── Tools/                     ← dev tools (app-icon generator, no runtime code)
 ├── Vendor/Sparkle/            ← vendored Sparkle 2 auto-update framework
 ├── Tests/                     ← standalone regression harnesses + crash probes
 ├── skills/                    ← project skills (e.g. standalone-swift-regression-harness)

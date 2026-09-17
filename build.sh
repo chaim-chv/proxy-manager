@@ -84,6 +84,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
     <string>$APP_NAME</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>$VERSION</string>
     <key>CFBundleVersion</key>
@@ -183,9 +185,10 @@ cat > "$DAEMONS_DIR/$HELPER_NAME.plist" <<EOF
 </plist>
 EOF
 
-# Copy localizations if present.
+# Copy localizations and the app icon if present.
 if [ -d "Resources" ] && [ -n "$(ls -A Resources 2>/dev/null)" ]; then
     cp -R Resources/*.lproj "$RESOURCES_DIR/" 2>/dev/null || true
+    [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$RESOURCES_DIR/AppIcon.icns"
     echo "📦 Copied resource files"
 fi
 

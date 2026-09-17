@@ -165,7 +165,8 @@ ProxyManager/
 │   ├── Helper/                   # privileged helper daemon (separate binary)
 │   ├── Support/                  # unified-log logger + crash watchdog
 │   └── UI/                       # dashboard, settings, targets, onboarding, updater
-├── Resources/                    # localizations
+├── Resources/                    # app icon + localizations
+├── Tools/                        # dev tools (app-icon generator)
 ├── Vendor/Sparkle/               # vendored Sparkle 2 auto-update framework
 ├── Tests/                        # standalone regression harnesses + crash probes
 ├── docs/                         # area-specific deep dives
