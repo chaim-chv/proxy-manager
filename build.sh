@@ -105,7 +105,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <key>LSUIElement</key>
     <false/>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2026 Proxy Manager</string>
+    <string>Copyright © 2026 chaim-chv · MIT License</string>
     <key>SUFeedURL</key>
     <string>$SPARKLE_FEED_URL</string>
     <key>SUEnableAutomaticChecks</key>

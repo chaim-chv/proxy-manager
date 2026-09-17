@@ -20,7 +20,8 @@ import AppKit
 ///   PROXYMANAGER_DEMO=1            enable the demo (required)
 ///   PROXYMANAGER_SCREEN            dashboard | dashboard-detail |
 ///                                  settings-tunnel | settings-tunnel-managed |
-///                                  settings-targets | onboarding   (default dashboard)
+///                                  settings-targets | settings-about |
+///                                  about-panel | onboarding      (default dashboard)
 ///   PROXYMANAGER_APPEARANCE        dark | light                    (default dark)
 ///   PROXYMANAGER_ONBOARDING_STEP   0..3                            (default 2)
 enum DemoMode {
@@ -126,6 +127,7 @@ enum DemoMode {
         switch screen {
         case "settings-tunnel", "settings-tunnel-managed": model.settingsSelection = .tunnel
         case "settings-targets": model.settingsSelection = .targets
+        case "settings-about": model.settingsSelection = .about
         default: break
         }
 
@@ -160,8 +162,10 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-tunnel", "settings-tunnel-managed", "settings-targets":
+        case "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-about":
             model.openSettings()
+        case "about-panel":
+            StatusMenuController.shared.presentAboutPanel()
         default:
             DashboardWindowController.shared.show()
         }

@@ -293,14 +293,39 @@ final class StatusMenuController: NSObject {
     }
 
     @objc private func showAbout() {
+        presentAboutPanel()
+    }
+
+    /// Presents the standard About panel (also invoked by screenshot/demo builds).
+    func presentAboutPanel() {
         NSApp.activate(ignoringOtherApps: true)
         // The standard panel renders "Version <ApplicationVersion> (<Version>)".
         // Put the marketing version in `.applicationVersion` and the build date
         // in `.version` so the date appears once, in parentheses.
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationVersion: UpdaterController.displayVersion,
-            .version: UpdaterController.buildDate ?? ""
+            .version: UpdaterController.buildDate ?? "",
+            .credits: Self.aboutCredits
         ])
+    }
+
+    /// The standard About panel has no homepage field, so the homepage and
+    /// source links live in the credits text as clickable links.
+    private static var aboutCredits: NSAttributedString {
+        let small = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        let label: [NSAttributedString.Key: Any] = [
+            .font: small,
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        let result = NSMutableAttributedString()
+        func append(_ prefix: String, _ title: String, _ url: URL) {
+            result.append(NSAttributedString(string: prefix, attributes: label))
+            result.append(NSAttributedString(string: title, attributes: [.font: small, .link: url]))
+        }
+        append("Homepage  ", "chaim-chv.github.io/proxy-manager", AppLinks.homepage)
+        result.append(NSAttributedString(string: "\n", attributes: label))
+        append("Source  ", "github.com/chaim-chv/proxy-manager", AppLinks.source)
+        return result
     }
 
     @objc private func quitApp() {

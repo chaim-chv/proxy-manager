@@ -924,13 +924,28 @@ struct AboutSettingsView: View {
     // MARK: Version
 
     private var versionSection: some View {
-        HStack(spacing: 6) {
-            Text("Version")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text("Version")
+                    .font(.callout.weight(.semibold))
+                    .frame(width: 96, alignment: .leading)
+                Text(UpdaterController.displayVersionWithDate)
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            linkRow("Homepage", "chaim-chv.github.io/proxy-manager", AppLinks.homepage)
+            linkRow("Source code", "github.com/chaim-chv/proxy-manager", AppLinks.source)
+        }
+    }
+
+    private func linkRow(_ title: String, _ display: String, _ url: URL) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(title)
                 .font(.callout.weight(.semibold))
-            Text(UpdaterController.displayVersionWithDate)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-            Spacer()
+                .frame(width: 96, alignment: .leading)
+            Link(display, destination: url)
+                .font(.callout)
         }
     }
 
@@ -1053,8 +1068,9 @@ struct AboutSettingsView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Link("github.com/chaim-chv/proxy-manager", destination: URL(string: "https://github.com/chaim-chv/proxy-manager")!)
+                    Text("© 2026 chaim-chv · Released under the MIT License")
                         .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

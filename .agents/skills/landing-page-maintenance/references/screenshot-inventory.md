@@ -15,6 +15,10 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 
 Appearances: `dark`, `light` → 6 screens × 2 = **12 files**.
 
+Two more demo screens exist for ad-hoc capture (not part of the site set, so not
+in `SCREENS`): `settings-about` (Settings → About) and `about-panel` (the
+standard About panel).
+
 ## Fake data used
 
 Seeded by `Sources/Support/DemoMode.swift` (deterministic RNG, fixed seed):
