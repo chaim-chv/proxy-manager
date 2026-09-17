@@ -56,6 +56,27 @@ python3 -m http.server 8765 --directory /tmp/pm-pages
 # open http://localhost:8765/ , toggle System Settings → Appearance
 ```
 
+## Page implementation notes (gh-pages)
+
+- `index.html` — all markup. Screenshots use `<picture>` + `prefers-color-scheme`
+  for the no-JS case; each `<img>` also carries `data-dark`/`data-light` so
+  `app.js` can honor a manual theme.
+- `styles.css` — all styling. Theme is driven by `data-theme` on `<html>` with
+  `prefers-color-scheme` as the default. Keep the single accent (green).
+- `app.js` — three small, dependency-free behaviors:
+  1. **Theme switch** (`system → light → dark`, persisted in `localStorage`
+     under `pm-theme`).
+  2. **Download** — fetches `releases/latest` (cached 1h in `sessionStorage`),
+     sets every `[data-dl-main]` to the `.zip` asset, fills `[data-dl-version]`
+     with the tag, and points `[data-dl-notes]` at the release page. Falls back
+     to `/releases/latest` if the API fails.
+  3. **Cursor tilt** — a max-1° 3D tilt on `[data-tilt]` elements, disabled
+     under `prefers-reduced-motion`.
+- The **GitHub corner ribbon** is the `.github-corner` block at the top of the
+  hero (hidden below 720px).
+- The **managed-tunnel spotlight** (`#managed`) is the prominent “Run the tunnel
+  for me” section — keep its screenshot current; it is a headline feature.
+
 ## Workflow B — update the copy after a feature change
 
 The page copy must match the shipped app. Read the change, then update the
@@ -106,7 +127,7 @@ Environment variables (set by `capture-screenshots.sh`):
 | Variable | Values | Meaning |
 |---|---|---|
 | `PROXYMANAGER_DEMO` | `1` | enable demo mode (required) |
-| `PROXYMANAGER_SCREEN` | `dashboard`, `dashboard-detail`, `settings-tunnel`, `settings-targets`, `onboarding` | which window to show |
+| `PROXYMANAGER_SCREEN` | `dashboard`, `dashboard-detail`, `settings-tunnel`, `settings-tunnel-managed`, `settings-targets`, `onboarding` | which window to show |
 | `PROXYMANAGER_APPEARANCE` | `dark`, `light` | forced app appearance |
 | `PROXYMANAGER_ONBOARDING_STEP` | `0`–`3` | onboarding step to show (default `2`) |
 | `PROXYMANAGER_SUPPORT_DIR` | path | sandbox for `WatchdogPaths` (set by the script) |
@@ -126,6 +147,9 @@ to `SCREENS` in `capture-screenshots.sh`, then add a row to
       data (no empty feed, no "No data yet", tunnel status is "Tunnel is up").
 - [ ] All images load on the page in both light and dark (`document.images`
       all have `naturalWidth > 0`).
+- [ ] Theme switch cycles system → light → dark and swaps the screenshots.
+- [ ] The download button shows the current version and links to the `.zip`
+      asset (not just `/releases/latest`); the dropdown opens and closes.
 - [ ] No broken links: GitHub, Releases, Issues, License.
 - [ ] `git status` on `main` shows only intended files; `gh-pages` has only site
       files (no `Sources/`, no `README.md`).
