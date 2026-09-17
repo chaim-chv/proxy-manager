@@ -155,6 +155,18 @@ code {
 .theme-toggle[data-mode="light"] .i-light,
 .theme-toggle[data-mode="dark"] .i-dark { display: block; }
 
+/* Navbar GitHub icon — only shown where the corner ribbon is hidden. */
+.github-icon {
+  width: 38px; height: 38px;
+  display: none;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  color: var(--fg);
+}
+.github-icon:hover { background: var(--bg-alt); text-decoration: none; }
+.github-icon svg { width: 18px; height: 18px; fill: currentColor; }
+
 /* ---------- Download button + menu ---------- */
 
 .download { position: relative; display: inline-flex; }
@@ -213,7 +225,10 @@ code {
 
 /* ---------- GitHub corner ---------- */
 
-.github-corner { position: absolute; top: 0; right: 0; width: 78px; height: 78px; z-index: 5; }
+/* Fixed and in front of the sticky header; the header reserves space on the
+   right (see the 721px media query) so the two never collide. Hidden on small
+   screens, where the navbar `.github-icon` takes over. */
+.github-corner { position: fixed; top: 0; right: 0; width: 78px; height: 78px; z-index: 50; }
 .github-corner:hover { text-decoration: none; }
 .github-corner svg { width: 100%; height: 100%; display: block; }
 .github-corner .ribbon { fill: var(--fg); }
@@ -369,6 +384,17 @@ code {
 
 @media (max-width: 720px) {
   .github-corner { display: none; }
+  .github-icon { display: inline-grid; }
+}
+
+/* Reserve the top-right corner for the fixed ribbon so header controls clear it. */
+@media (min-width: 721px) {
+  .header-inner { padding-right: 96px; }
+}
+
+/* Touch devices have no hover, so let the octocat wave on its own. */
+@media (hover: none) {
+  .github-corner .octo-arm { animation: octo-wave 560ms ease-in-out; }
 }
 
 @media (max-width: 560px) {
