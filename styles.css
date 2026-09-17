@@ -373,6 +373,9 @@ code {
 
 @media (max-width: 860px) {
   .nav { display: none; }
+  /* The nav is what pushes the actions right on desktop; without it, do it here
+     so the Download button stays against the right wall on phones and iPad. */
+  .header-actions { margin-left: auto; }
   .section { padding: 72px 0; }
   .hero { padding-top: 64px; }
   .shot, .shot.reverse { grid-template-columns: 1fr; gap: 22px; }
@@ -389,7 +392,7 @@ code {
 
 /* Reserve the top-right corner for the fixed ribbon so header controls clear it. */
 @media (min-width: 721px) {
-  .header-inner { padding-right: 96px; }
+  .header-inner { padding-right: 86px; }
 }
 
 /* Touch devices have no hover, so let the octocat wave on its own. */

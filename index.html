@@ -246,6 +246,10 @@
       <h2 class="section-title">Questions</h2>
       <div class="faq">
         <details>
+          <summary>macOS won’t open the app — is it safe?</summary>
+          <p>Proxy Manager isn’t notarized by Apple, so macOS may block the first launch. Open <strong>System Settings → Privacy &amp; Security</strong> and click <strong>Open Anyway</strong> for Proxy Manager. You only need to do this once; the app updates itself normally afterwards.</p>
+        </details>
+        <details>
           <summary>Do I need my own server or tunnel?</summary>
           <p>Yes — Proxy Manager routes to a SOCKS5 proxy that you provide. Make one with <code>ssh -D 1080 user@host</code>, or switch on “Run the tunnel for me” and let the app create and supervise the SSH tunnel.</p>
         </details>
