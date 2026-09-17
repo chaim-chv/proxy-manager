@@ -72,8 +72,11 @@ python3 -m http.server 8765 --directory /tmp/pm-pages
      to `/releases/latest` if the API fails.
   3. **Cursor tilt** — a max-1° 3D tilt on `[data-tilt]` elements, disabled
      under `prefers-reduced-motion`.
-- The **GitHub corner ribbon** is the `.github-corner` block at the top of the
-  hero (hidden below 720px).
+- The **GitHub corner ribbon** is `.github-corner`: `position: fixed` at the
+  top-right, above the sticky header (`z-index: 50`), with the octocat waving on
+  hover. The header reserves space via a `min-width: 721px` rule so its controls
+  never collide. Below 720px the ribbon is hidden and the navbar `.github-icon`
+  is shown instead — keep the two in sync if you change the repo URL.
 - The **managed-tunnel spotlight** (`#managed`) is the prominent “Run the tunnel
   for me” section — keep its screenshot current; it is a headline feature.
 
