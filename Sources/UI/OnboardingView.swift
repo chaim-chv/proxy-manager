@@ -43,9 +43,12 @@ struct OnboardingView: View {
         _sshUser = State(initialValue: cfg.tunnel.managed.username)
         _auth = State(initialValue: cfg.tunnel.managed.auth)
         _keyPath = State(initialValue: cfg.tunnel.managed.keyPath)
-        _sshPassword = State(initialValue: AppModel.shared.loadManagedPassword())
+        _sshPassword = State(initialValue: DemoMode.isEnabled ? "" : AppModel.shared.loadManagedPassword())
         _socksHost = State(initialValue: cfg.tunnel.managed.socksHost)
         _socksPortText = State(initialValue: String(cfg.tunnel.managed.socksPort))
+        #if SCREENSHOT_MODE
+        if DemoMode.isEnabled { _step = State(initialValue: DemoMode.onboardingStep) }
+        #endif
     }
 
     private enum TestState {

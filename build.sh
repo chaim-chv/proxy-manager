@@ -10,6 +10,9 @@ BUNDLE_ID="com.proxymanager.app"
 HELPER_NAME="com.proxymanager.helper"
 MIN_MACOS="14.0"
 OUTPUT_DIR="${OUTPUT_DIR:-.}"
+# Extra swiftc flags (e.g. SWIFT_FLAGS="-D SCREENSHOT_MODE" for the screenshot
+# demo build; see .agents/skills/landing-page-maintenance).
+SWIFT_FLAGS="${SWIFT_FLAGS:-}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
@@ -125,6 +128,7 @@ compile() {
         -swift-version 5 \
         -O \
         -target "${target}-apple-macosx${MIN_MACOS}" \
+        $SWIFT_FLAGS \
         -framework AppKit \
         -framework SwiftUI \
         -framework Charts \

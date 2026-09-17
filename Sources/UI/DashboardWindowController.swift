@@ -12,7 +12,9 @@ import SwiftUI
 final class DashboardWindowController: NSObject, NSWindowDelegate {
     static let shared = DashboardWindowController()
 
-    private let frameAutosaveName = "ProxyManagerDashboard"
+    // Demo/screenshot builds use a separate autosave name so capturing a window
+    // never overwrites the user's real saved frame.
+    private let frameAutosaveName = DemoMode.isEnabled ? "ProxyManagerDemoDashboard" : "ProxyManagerDashboard"
     private var window: NSWindow?
 
     func show() {

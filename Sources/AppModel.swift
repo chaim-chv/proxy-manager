@@ -111,19 +111,24 @@ final class AppModel: ObservableObject {
         // window re-laying-out forever. The dashboard observes `TelemetryStore`
         // directly instead; see `DashboardWindowController`.
 
-        tunnelSupervisor.start()
-        syncManagedTunnel()
-        observeSystemEvents()
+        // Demo mode (screenshot builds only) must not probe the tunnel, touch
+        // the Keychain, observe network changes, or auto-enable routing.
+        if !DemoMode.isEnabled {
+            tunnelSupervisor.start()
+            syncManagedTunnel()
+            observeSystemEvents()
 
-        if UserDefaults.standard.bool(forKey: wasOnKey) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.enable()
+            if UserDefaults.standard.bool(forKey: wasOnKey) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.enable()
+                }
             }
         }
 
         Log.app.notice("ProxyManager initialized (config v\(self.config.version))")
         applyAppearance()
         applyIconMode()
+        DemoMode.apply(to: self)
     }
 
     /// Applies the configured light/dark appearance (nil = follow the system).
@@ -365,6 +370,7 @@ final class AppModel: ObservableObject {
     // MARK: - Config
 
     func commitConfig() {
+        if DemoMode.isEnabled { return }
         syncProxySettings()
         syncManagedTunnel()
         scheduleSave()
@@ -409,6 +415,7 @@ final class AppModel: ObservableObject {
 
     /// Starts/stops the app-managed SSH tunnel to match the configured mode.
     private func syncManagedTunnel() {
+        if DemoMode.isEnabled { return }
         let mode = config.tunnel.mode
         let auth = config.tunnel.managed.auth
         keychainStateLock.lock()
@@ -671,6 +678,10 @@ final class AppModel: ObservableObject {
     /// are only cleared once a restore has actually succeeded; otherwise they
     /// stay so the watchdog repairs the proxy moments after the process exits.
     func shutdownForQuit() {
+        // Demo/screenshot builds never touched the system proxy, the watchdog,
+        // or the SSH runner, so quit must not either (disarming here would
+        // clear the real app's watchdog marker).
+        if DemoMode.isEnabled { return }
         workQueue.sync {
             let snap = configStore.loadSnapshot()
             guard snap != nil || proxyServer.isRunning else {

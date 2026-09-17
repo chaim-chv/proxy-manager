@@ -187,6 +187,9 @@ enum Main {
         // (Socket.setNoSIGPIPE), but ignoring it process-wide means a future fd
         // that forgets can never kill the app on a peer reset.
         signal(SIGPIPE, SIG_IGN)
+        // Screenshot builds only: prepare the isolated demo sandbox before
+        // anything reads config/telemetry. No-op in normal builds.
+        DemoMode.bootstrap()
         // Same binary, two roles. The watchdog mode must never touch SwiftUI /
         // AppModel so its idle footprint stays negligible.
         if CommandLine.arguments.contains("--watchdog") {

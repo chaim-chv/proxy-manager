@@ -10,13 +10,21 @@ final class ConfigStore {
     }
 
     var supportDir: URL {
+        #if SCREENSHOT_MODE
+        if let override = DemoMode.supportDirOverride { return override }
+        #endif
         let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("ProxyManager", isDirectory: true)
     }
 
     var configURL: URL { supportDir.appendingPathComponent("config.json") }
-    var envDir: URL { fileManager.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/proxy-manager", isDirectory: true) }
+    var envDir: URL {
+        #if SCREENSHOT_MODE
+        if let override = DemoMode.envDirOverride { return override }
+        #endif
+        return fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/proxy-manager", isDirectory: true)
+    }
     var envFileURL: URL { envDir.appendingPathComponent("env.sh") }
     var telemetryURL: URL { supportDir.appendingPathComponent("telemetry.sqlite") }
     var snapshotURL: URL { supportDir.appendingPathComponent("system-proxy-snapshot.json") }

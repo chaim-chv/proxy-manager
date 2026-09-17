@@ -279,6 +279,14 @@ final class TelemetryStore: ObservableObject {
         lock.lock(); activeCount = count; lock.unlock()
     }
 
+    #if SCREENSHOT_MODE
+    /// Screenshot-only: seed in-progress rows so the live feed and "Active" stat
+    /// render. Compiled out of the shipping app.
+    func seedDemoLive(_ events: [RequestEvent]) {
+        liveRequests = events
+    }
+    #endif
+
     // MARK: - Flush (10 Hz, single background thread)
 
     private func flush() {

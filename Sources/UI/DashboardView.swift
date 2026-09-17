@@ -112,6 +112,14 @@ struct DashboardView: View {
         .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
         .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
         .onReceive(seriesTimer) { _ in refreshLongRange() }
+        #if SCREENSHOT_MODE
+        .onAppear {
+            guard DemoMode.isEnabled, DemoMode.showsDetailPanel, selectedID == nil else { return }
+            let event = telemetry.recentRequests.last { $0.route == .tunnel && !$0.path.isEmpty }
+                ?? telemetry.recentRequests.last { $0.route == .tunnel }
+            selectedID = event?.id
+        }
+        #endif
     }
 
     private func reconcileSelection() {
