@@ -1,10 +1,16 @@
 <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Proxy Manager">
-  <rect width="32" height="32" rx="8" fill="#1f9d5b"/>
-  <g stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" fill="none">
-    <path d="M11.8 14.4 L20 9.4"/>
-    <path d="M11.8 17.6 L20 22.6"/>
+  <defs>
+    <linearGradient id="pm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#36C77D"/>
+      <stop offset="1" stop-color="#0E7C45"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7.2" fill="url(#pm)"/>
+  <g stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" fill="none">
+    <path d="M11.6 14.4 L20 9.4"/>
+    <path d="M11.6 17.6 L20 22.6"/>
   </g>
-  <circle cx="9.2" cy="16" r="3" fill="#ffffff"/>
-  <circle cx="22.8" cy="9.2" r="2.6" fill="#ffffff"/>
-  <circle cx="22.8" cy="22.8" r="2.6" fill="#ffffff"/>
+  <circle cx="9" cy="16" r="3" fill="#ffffff"/>
+  <circle cx="23" cy="9" r="2.6" fill="#ffffff"/>
+  <circle cx="23" cy="23" r="2.6" fill="#ffffff"/>
 </svg>
