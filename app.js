@@ -65,6 +65,7 @@
    * and downloads the .zip directly. Falls back to /releases/latest.
    * ------------------------------------------------------------------ */
   const API = 'https://api.github.com/repos/chaim-chv/proxy-manager/releases/latest';
+  const REPO_API = 'https://api.github.com/repos/chaim-chv/proxy-manager';
   const REPO = 'https://github.com/chaim-chv/proxy-manager';
   const CACHE_KEY = 'pm-release';
   const CACHE_TTL = 60 * 60 * 1000;
@@ -99,12 +100,43 @@
           el.textContent = rel.tag_name;
           el.hidden = false;
         });
+        document.querySelectorAll('[data-version-pill]').forEach((el) => { el.hidden = false; });
       }
       if (rel.html_url) {
         document.querySelectorAll('[data-dl-notes]').forEach((a) => { a.href = rel.html_url; });
       }
     })
     .catch(() => { /* keep the /releases/latest fallback */ });
+
+  /* ------------------------------------------------------------------ *
+   * Star count: cached, best-effort. Fills [data-star-count] so the
+   * support band can show social proof without blocking the page.
+   * ------------------------------------------------------------------ */
+  const STAR_KEY = 'pm-stars';
+
+  async function starCount() {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem(STAR_KEY) || 'null');
+      if (cached && Date.now() - cached.at < CACHE_TTL) return cached.data;
+    } catch (_) { /* ignore */ }
+    const res = await fetch(REPO_API, { headers: { Accept: 'application/vnd.github+json' } });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    try { sessionStorage.setItem(STAR_KEY, JSON.stringify({ at: Date.now(), data })); } catch (_) { /* ignore */ }
+    return data;
+  }
+
+  starCount()
+    .then((repo) => {
+      const n = repo && typeof repo.stargazers_count === 'number' ? repo.stargazers_count : null;
+      if (n === null || n < 1) return;
+      const label = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n);
+      document.querySelectorAll('[data-star-count]').forEach((el) => {
+        el.textContent = label;
+        el.hidden = false;
+      });
+    })
+    .catch(() => { /* leave the count hidden */ });
 
   /* Download dropdown menu */
   const downloads = [...document.querySelectorAll('[data-download]')];
