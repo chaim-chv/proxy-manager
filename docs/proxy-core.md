@@ -26,7 +26,7 @@ Each connection runs its whole life on **one detached thread**:
 2. `HTTPParser.parse`.
 3. Route decision; if tunnel-down + fail-closed → `502`; fail-open → direct (event tagged `tunnel_down`).
 4. `connectUpstream` (SOCKS5 handshake or direct `connect`), on failure → `502`.
-5. CONNECT: send `200 Connection Established`, then `relay`. Absolute-form: rewrite + send, then `relay`.
+5. CONNECT: send `200 Connection Established`, then `relay`. Absolute-form: rewrite + send, then `relay`. For a protocol upgrade (`ws://`) the rewrite preserves `Connection: Upgrade`/`Upgrade` so the origin replies `101` and the same `relay` carries the upgraded stream full-duplex (`docs/http-parser.md`).
 6. Successful relay connections call `telemetry.beginSession` (live row) before `relay`, feed `telemetry.updateSession` as bytes move, and `telemetry.endSession` when `relay` returns. Failures (connect refused, tunnel-down+closed, malformed) record directly via `telemetry.record`.
 
 `defer { close(upstream) }` (right after connect) and `defer { close(cfd) }` (at the top) guarantee no fd leaks.

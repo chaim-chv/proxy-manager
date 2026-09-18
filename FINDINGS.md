@@ -11,6 +11,7 @@
 - [Dock icon presence is a runtime activation policy, not `Info.plist`](#dock-icon-presence-is-a-runtime-activation-policy-not-infoplist)
 - [Suppress SIGPIPE on every socket](#suppress-sigpipe-on-every-socket)
 - [Parse ports with the failable `UInt16(exactly:)`](#parse-ports-with-the-failable-uint16exactly)
+- [Forward-proxy `ws://` upgrades need `Upgrade`/`Connection` preserved](#forward-proxy-ws-upgrades-need-upgradeconnection-preserved)
 - [`networksetup -getautoproxyurl` prints `URL: (null)`](#networksetup-getautoproxyurl-prints-url-null)
 - [Decode config tolerantly so upgrades don't wipe it](#decode-config-tolerantly-so-upgrades-dont-wipe-it)
 - [Bind telemetry text with `SQLITE_TRANSIENT`](#bind-telemetry-text-with-sqlite_transient)
@@ -91,6 +92,16 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 **Context:** A single `GET http://host:99999/ HTTP/1.1` used to trigger the trap. Regression: `Tests/CrashProbes/oversized_port`. This is the same class as the already-fixed `Dictionary(uniqueKeysWithValues:)` header trap.
 
 **Related:** `Sources/Proxy/HTTPParser.swift`, `Tests/CrashProbes/oversized_port/main.swift`.
+
+## Forward-proxy `ws://` upgrades need `Upgrade`/`Connection` preserved
+
+**Status:** Fixed.
+
+**Summary:** The plain-HTTP forward path rewrites the request via `HTTPParser.rewrite`, which used to strip `Upgrade` and `Connection` and force `Connection: close` — so an origin never saw the WebSocket handshake and `ws://` could not upgrade. `HTTPRequest.isUpgrade` (`Sources/Proxy/HTTPParser.swift`) is true when an `Upgrade` header is present **and** `Connection` contains the `upgrade` token (comma-list, case-insensitive, RFC 7230 §6.7). For such a request `rewrite` re-emits `Connection: Upgrade` + `Upgrade: <protocol>` and never `Connection: close`; ordinary requests still strip both. No `ProxyServer` change was needed: the existing `poll()` relay is payload-agnostic and already full-duplex, so once the origin replies `101` the upgraded stream flows both ways. `wss://` was already fine (opaque `CONNECT` tunnel).
+
+**Context:** Routing is unchanged — the allow-list decision is made on `request.host` before the rewrite, so an allow-listed `ws://` host is tunneled via SOCKS5 exactly like any other forward request. Caveat: an upgraded connection that is completely silent in both directions longer than `idleTimeout` (120 s) is reaped by the relay, same as a `CONNECT` tunnel; WebSocket ping/pong keeps it alive. Regression: `Tests/RegressionHarness` (rewrite/isUpgrade unit checks) and `Tests/ProxyE2E` (mock WebSocket origin: `101` + echoed frames, direct and through a mock SOCKS5).
+
+**Related:** `Sources/Proxy/HTTPParser.swift` (`isUpgrade`, `rewrite`), `Tests/ProxyE2E/main.swift` (`MockWebSocketOrigin`), `Tests/RegressionHarness/main.swift`, `docs/http-parser.md`.
 
 ## `networksetup -getautoproxyurl` prints `URL: (null)`
 

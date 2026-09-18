@@ -13,6 +13,7 @@ setbuf(stdout, nil)
 //   - half-close: client sends FIN, still receives the full response
 //   - concurrency: 200 parallel CONNECTs
 //   - dead-peer reaping: RST peers must not leak relay threads/fds
+//   - ws:// upgrade: 101 + full-duplex frames, direct and through mock SOCKS5
 //
 // All helpers use Thread.detachNewThread (never DispatchQueue.global) so the
 // mock itself is not throttled by GCD's ~64-thread blocking cap.
@@ -101,6 +102,30 @@ func sendAll(_ fd: Int32, _ bytes: [UInt8]) {
         if n <= 0 { break }
         sent += n
     }
+}
+
+/// Bounds every test-client `recv` so a broken proxy reports a failure instead
+/// of hanging the harness forever.
+func setRecvTimeout(_ fd: Int32, _ seconds: Int) {
+    var tv = timeval(tv_sec: seconds, tv_usec: 0)
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+}
+
+func readSome(_ fd: Int32) -> String {
+    var buf = [UInt8](repeating: 0, count: 4096)
+    let n = recv(fd, &buf, buf.count, 0)
+    return String(decoding: buf[0..<max(0, n)], as: UTF8.self)
+}
+
+func readExactly(_ fd: Int32, _ count: Int) -> String {
+    var out: [UInt8] = []
+    var buf = [UInt8](repeating: 0, count: count)
+    while out.count < count {
+        let n = recv(fd, &buf, count - out.count, 0)
+        if n <= 0 { break }
+        out.append(contentsOf: buf[0..<n])
+    }
+    return String(decoding: out, as: UTF8.self)
 }
 
 // MARK: - Mock origin
@@ -263,6 +288,74 @@ final class MockSOCKS5 {
     }
 }
 
+// MARK: - Mock WebSocket origin
+
+/// Minimal WebSocket origin for the `ws://` upgrade regression. It reads the
+/// request headers, asserts the proxy forwarded the upgrade intent, replies
+/// `101 Switching Protocols`, then echoes every subsequent byte. Echoing raw
+/// bytes (no framing) is enough to prove the relay is full-duplex after the
+/// protocol switch.
+final class MockWebSocketOrigin {
+    let fd: Int32
+    let port: UInt16
+    private let lock = NSLock()
+    private var lastRequest = ""
+
+    init() {
+        let l = tcpListen()
+        self.fd = l.fd
+        self.port = l.port
+        Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    func lastRequestHeaders() -> String {
+        lock.lock(); defer { lock.unlock() }
+        return lastRequest
+    }
+
+    private func acceptLoop() {
+        while true {
+            let c = accept(fd, nil, nil)
+            if c < 0 { break }
+            noSIGPIPE(c)
+            Thread.detachNewThread { [weak self] in self?.handle(c) }
+        }
+    }
+
+    private func handle(_ c: Int32) {
+        defer { close(c) }
+        guard let header = readUntilDoubleCRLF(c) else { return }
+        let text = String(decoding: header, as: UTF8.self)
+        lock.lock(); lastRequest = text; lock.unlock()
+        // Only complete the upgrade when the proxy actually forwarded the
+        // upgrade headers; otherwise answer like a plain HTTP origin would.
+        let lower = text.lowercased()
+        guard lower.contains("upgrade: websocket"), lower.contains("connection: upgrade") else {
+            sendAll(c, Array("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        sendAll(c, Array("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n".utf8))
+        var buf = [UInt8](repeating: 0, count: 16_384)
+        while true {
+            let n = recv(c, &buf, buf.count, 0)
+            if n <= 0 { break }
+            sendAll(c, Array(buf[0..<n]))
+        }
+    }
+
+    private func readUntilDoubleCRLF(_ c: Int32) -> [UInt8]? {
+        var out: [UInt8] = []
+        var one = [UInt8](repeating: 0, count: 1)
+        while out.count < 65_536 {
+            let n = recv(c, &one, 1, 0)
+            if n <= 0 { return nil }
+            out.append(one[0])
+            if out.count >= 4, out.suffix(4) == [13, 10, 13, 10] { return out }
+        }
+        return nil
+    }
+}
+
 // MARK: - Proxy setup
 
 func makeProxy(tunnelPort: UInt16, tunnelHost: String = "127.0.0.1") -> (ProxyServer, UInt16) {
@@ -288,6 +381,7 @@ func makeProxy(tunnelPort: UInt16, tunnelHost: String = "127.0.0.1") -> (ProxySe
     proxy.routingEngine.update(rules: [
         TargetRule(pattern: "example.test"),
         TargetRule(pattern: "*.tunnel.test"),
+        TargetRule(pattern: "ws.example.test"),
     ])
     do { try proxy.start() } catch { fatalError("proxy start failed: \(error)") }
     return (proxy, port)
@@ -417,6 +511,55 @@ do {
     check("proxy still serves after dead-peer test", String(decoding: buf[0..<max(0, n2)], as: UTF8.self).contains("200"))
     close(c2)
     origin.stop()
+}
+
+print("== E2E: ws:// WebSocket upgrade (direct) ==")
+do {
+    let ws = MockWebSocketOrigin()
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    // Absolute-form ws:// handshake, exactly as a browser sends it to an HTTP
+    // forward proxy. 127.0.0.1 is not allow-listed -> direct to the origin.
+    let req = "GET http://127.0.0.1:\(ws.port)/chat HTTP/1.1\r\n" +
+        "Host: 127.0.0.1:\(ws.port)\r\n" +
+        "Connection: keep-alive, Upgrade\r\nUpgrade: websocket\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    sendAll(c, Array(req.utf8))
+    check("ws direct upgrade returns 101", readSome(c).contains("101"))
+    check("ws direct origin saw upgrade headers",
+          ws.lastRequestHeaders().lowercased().contains("upgrade: websocket"))
+    check("ws direct origin saw Connection: Upgrade",
+          ws.lastRequestHeaders().lowercased().contains("connection: upgrade"))
+    // Post-upgrade full-duplex: client -> origin -> client.
+    sendAll(c, Array("PING-1".utf8))
+    check("ws direct echoes first frame", readExactly(c, 6) == "PING-1")
+    sendAll(c, Array("PING-2".utf8))
+    check("ws direct echoes second frame", readExactly(c, 6) == "PING-2")
+}
+
+print("== E2E: ws:// WebSocket upgrade through tunnel (mock SOCKS5) ==")
+do {
+    let ws = MockWebSocketOrigin()
+    let socks = MockSOCKS5(originPort: ws.port)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: socks.port)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    // `ws.example.test` is allow-listed, so the upstream is opened through the
+    // mock SOCKS5 (which always reaches the mock origin). Direct DNS for that
+    // name would fail, so a 101 here proves the tunnel route was used.
+    let req = "GET http://ws.example.test/chat HTTP/1.1\r\n" +
+        "Host: ws.example.test\r\n" +
+        "Connection: Upgrade\r\nUpgrade: websocket\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    sendAll(c, Array(req.utf8))
+    check("ws tunneled upgrade returns 101", readSome(c).contains("101"))
+    sendAll(c, Array("TUN-1".utf8))
+    check("ws tunneled echoes frame", readExactly(c, 5) == "TUN-1")
 }
 
 print("")

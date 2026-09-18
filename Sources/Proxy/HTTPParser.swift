@@ -19,6 +19,18 @@ struct HTTPRequest {
 
     var isConnect: Bool { method.uppercased() == "CONNECT" }
 
+    /// True when the client requests a protocol upgrade (e.g. a WebSocket
+    /// handshake): an `Upgrade` header is present **and** `Connection` lists the
+    /// `upgrade` token, per RFC 7230 §6.7. The token list is comma-separated and
+    /// case-insensitive (`Connection: keep-alive, Upgrade`).
+    var isUpgrade: Bool {
+        guard let upgrade = headerNamed("upgrade"), !upgrade.isEmpty else { return false }
+        guard let connection = headerNamed("connection") else { return false }
+        return connection
+            .split(separator: ",")
+            .contains { $0.trimmingCharacters(in: .whitespaces).lowercased() == "upgrade" }
+    }
+
     /// Splits `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` into host + optional port.
     /// Handles bracketed IPv6 literals; strips the port only when it is numeric.
     static func splitHostPort(_ value: String) -> (host: String, port: UInt16?) {
@@ -127,20 +139,35 @@ enum HTTPParser {
 
     /// Rewrites a proxied absolute-form request to origin-form, stripping
     /// hop-by-hop / proxy headers.
+    ///
+    /// A protocol upgrade (plaintext WebSocket, `ws://`) is the one case where
+    /// `Connection` and `Upgrade` are **not** stripped: forwarding them is what
+    /// lets the origin answer `101 Switching Protocols` and switch the socket to
+    /// full-duplex framing. Dropping them (the old behavior) made the origin see
+    /// an ordinary HTTP request, so `ws://` never upgraded. `Connection: Upgrade`
+    /// is re-emitted (never `close`) for upgrades; the relay then carries the
+    /// upgraded byte stream in both directions. `wss://` never reaches this path
+    /// (it is an opaque `CONNECT` tunnel).
     static func rewrite(_ request: HTTPRequest) -> String {
+        let isUpgrade = request.isUpgrade
         var lines: [String] = []
         lines.append("\(request.method) \(request.path) \(request.version)")
         for (key, value) in request.headers {
             let lk = key.lowercased()
-            if ["proxy-connection", "proxy-authorization", "connection", "keep-alive",
-                "proxy-authenticate", "te", "trailer", "transfer-encoding", "upgrade"].contains(lk) {
+            if ["proxy-connection", "proxy-authorization", "proxy-authenticate", "connection",
+                "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"].contains(lk) {
                 continue
             }
             if lk == "host" { continue }
             lines.append("\(key): \(value)")
         }
         lines.append("Host: \(request.host)")
-        lines.append("Connection: close")
+        if isUpgrade {
+            lines.append("Connection: Upgrade")
+            lines.append("Upgrade: \(request.headerNamed("upgrade") ?? "websocket")")
+        } else {
+            lines.append("Connection: close")
+        }
         lines.append("")
         return lines.joined(separator: "\r\n") + "\r\n"
     }

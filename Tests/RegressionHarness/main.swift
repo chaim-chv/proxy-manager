@@ -86,6 +86,49 @@ if let r = HTTPParser.parse(Array("CONNECT example.com:443 HTTP/1.1\r\n\r\n".utf
 }
 check("header block detection", HTTPParser.findHeaderEnd(in: Array("A: 1\r\n\r\n".utf8)) != nil)
 
+print("== HTTP rewrite / WebSocket upgrade ==")
+func rewrite(_ raw: String) -> String {
+    guard let req = HTTPParser.parse(Array(raw.utf8)) else { return "" }
+    return HTTPParser.rewrite(req)
+}
+func parsed(_ raw: String) -> HTTPRequest? { HTTPParser.parse(Array(raw.utf8)) }
+
+// A browser/app sends an absolute-form ws:// request to an HTTP forward proxy
+// with `Connection: Upgrade` (possibly inside a token list) + `Upgrade: websocket`.
+let wsReq = "GET http://ws.example.com/chat HTTP/1.1\r\nHost: ws.example.com\r\n" +
+    "Connection: keep-alive, Upgrade\r\nUpgrade: websocket\r\n" +
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n" +
+    "Proxy-Connection: keep-alive\r\n\r\n"
+let wsOut = rewrite(wsReq)
+check("ws upgrade keeps Upgrade header", wsOut.lowercased().contains("upgrade: websocket"))
+check("ws upgrade sets Connection: Upgrade", wsOut.contains("Connection: Upgrade"))
+check("ws upgrade never forces close", !wsOut.lowercased().contains("connection: close"))
+check("ws upgrade keeps Sec-WebSocket-Key", wsOut.contains("Sec-WebSocket-Key:"))
+check("ws upgrade keeps Sec-WebSocket-Version", wsOut.contains("Sec-WebSocket-Version: 13"))
+check("ws upgrade strips Proxy-Connection", !wsOut.lowercased().contains("proxy-connection"))
+check("ws upgrade rewrites to origin-form", wsOut.hasPrefix("GET /chat HTTP/1.1\r\n"))
+check("ws upgrade re-adds Host", wsOut.contains("Host: ws.example.com\r\n"))
+
+// Without the Connection: Upgrade token the same headers stay hop-by-hop and
+// must still be stripped (no behavior change for ordinary HTTP).
+let plainReq = "GET http://plain.example.com/a HTTP/1.1\r\nHost: plain.example.com\r\n" +
+    "Connection: keep-alive\r\nUpgrade: websocket\r\n\r\n"
+let plainOut = rewrite(plainReq)
+check("plain request still strips Upgrade", !plainOut.lowercased().contains("upgrade:"))
+check("plain request still forces Connection: close", plainOut.lowercased().contains("connection: close"))
+
+check("isUpgrade true for Connection: Upgrade", parsed(wsReq)?.isUpgrade == true)
+check("isUpgrade true when Upgrade token leads the list",
+      parsed("GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, keep-alive\r\nUpgrade: websocket\r\n\r\n")?.isUpgrade == true)
+check("isUpgrade token is case-insensitive",
+      parsed("GET / HTTP/1.1\r\nHost: h\r\nConnection: UPGRADE\r\nUpgrade: WebSocket\r\n\r\n")?.isUpgrade == true)
+check("isUpgrade false without Upgrade header",
+      parsed("GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\n\r\n")?.isUpgrade == false)
+check("isUpgrade false without Connection token",
+      parsed("GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n")?.isUpgrade == false)
+check("isUpgrade false for a normal request",
+      parsed("GET http://h/ HTTP/1.1\r\nHost: h\r\nConnection: keep-alive\r\n\r\n")?.isUpgrade == false)
+
 print("== Config schema migration ==")
 // A config.json from an older build that lacks `policy`/`monitor`/`lock` must
 // still decode (otherwise the user's whole config is silently wiped).
