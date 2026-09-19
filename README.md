@@ -1,10 +1,16 @@
-# Proxy Manager
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="Proxy Manager app icon" width="160" height="160">
+</p>
 
-[![Build](https://img.shields.io/github/actions/workflow/status/chaim-chv/proxy-manager/release.yml?label=build)](https://github.com/chaim-chv/proxy-manager/actions/workflows/release.yml)
-[![Release](https://img.shields.io/github/v/release/chaim-chv/proxy-manager?label=release)](https://github.com/chaim-chv/proxy-manager/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-blue)](https://github.com/chaim-chv/proxy-manager)
-[![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)](https://github.com/chaim-chv/proxy-manager)
-[![License](https://img.shields.io/github/license/chaim-chv/proxy-manager)](./LICENSE)
+<h1 align="center">Proxy Manager</h1>
+
+<p align="center">
+  <a href="https://github.com/chaim-chv/proxy-manager/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/chaim-chv/proxy-manager/release.yml?label=build" alt="Build"></a>
+  <a href="https://github.com/chaim-chv/proxy-manager/releases/latest"><img src="https://img.shields.io/github/v/release/chaim-chv/proxy-manager?label=release" alt="Release"></a>
+  <a href="https://github.com/chaim-chv/proxy-manager"><img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue" alt="Platform"></a>
+  <a href="https://github.com/chaim-chv/proxy-manager"><img src="https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white" alt="Swift"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/github/license/chaim-chv/proxy-manager" alt="License"></a>
+</p>
 
 A native macOS menu-bar app that routes **only the hostnames you choose** through an existing SOCKS5 proxy/tunnel — while leaving all other traffic untouched.
 
@@ -33,7 +39,7 @@ Browser / CLI ──▶ Local HTTP CONNECT proxy (127.0.0.1:8888)
                        └──────────────────────── NO ──▶ direct connection
 ```
 
-The local proxy is a *policy router*, not a MITM: `CONNECT` requests are relayed byte-for-byte through the SOCKS5 tunnel, and plain-HTTP proxied requests are rewritten to origin form and streamed with backpressure (preserving SSE streaming from LLM APIs).
+The local proxy is a *policy router*, not a MITM: `CONNECT` requests are relayed byte-for-byte through the SOCKS5 tunnel, and plain-HTTP proxied requests are rewritten to origin form and streamed with backpressure (preserving SSE streaming from LLM APIs). WebSocket sessions work too: `wss://` rides the opaque `CONNECT` tunnel, and `ws://` upgrades are forwarded — the `Upgrade`/`Connection` headers are preserved so the origin answers `101` and frames relay full-duplex in both directions.
 
 ## Requirements
 
