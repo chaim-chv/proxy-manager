@@ -47,6 +47,14 @@ done
 rm -f "$HOME/.config/proxy-manager/env.sh"
 echo "  • shell env injection removed"
 
+# 3b. Clear the GUI-session proxy env published via `launchctl setenv`, so apps
+#     launched from Finder/Dock stop pointing at the dead proxy.
+for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY WSS_PROXY NO_PROXY PROXY_MANAGER_ACTIVE; do
+    launchctl unsetenv "$v" 2>/dev/null
+done
+rm -f "$HOME/Library/Application Support/ProxyManager/gui-env-snapshot.json"
+echo "  • GUI session proxy env cleared"
+
 # 4. Clear the persisted "was enabled" flag so a later relaunch does not
 #    auto-re-enable routing.
 defaults delete com.proxymanager.app routingWasOn 2>/dev/null && \

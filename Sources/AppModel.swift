@@ -44,6 +44,7 @@ final class AppModel: ObservableObject {
     let sshTunnel: SSHTunnelRunner
     let systemProxyManager: SystemProxyManager
     let shellEnvInjector: ShellEnvInjector
+    let guiEnvInjector: GuiEnvInjector
 
     // The system-proxy snapshot of the user's ORIGINAL settings. Only ever
     // touched on `workQueue` (also persisted to disk via ConfigStore).
@@ -55,6 +56,8 @@ final class AppModel: ObservableObject {
     // WorkQueue-only: the bind host/port currently applied to the system proxy.
     private var appliedPort: UInt16 = 0
     private var appliedBindHost: String = ""
+    // WorkQueue-only: whether we have published proxy env to the GUI session.
+    private var appliedGuiEnv = false
 
     private var saveDebounce: DispatchWorkItem?
     private let onboardingKey = "hasCompletedOnboarding"
@@ -79,6 +82,7 @@ final class AppModel: ObservableObject {
         self.sshTunnel = SSHTunnelRunner()
         self.systemProxyManager = SystemProxyManager()
         self.shellEnvInjector = ShellEnvInjector(configStore: store)
+        self.guiEnvInjector = GuiEnvInjector(snapshotURL: store.guiEnvSnapshotURL)
 
         showOnboarding = !UserDefaults.standard.bool(forKey: onboardingKey)
 
@@ -273,6 +277,7 @@ final class AppModel: ObservableObject {
                 UserDefaults.standard.set(true, forKey: self.wasOnKey)
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
+                self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
                 self.setState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded)
                 Log.app.notice("enable(): routing enabled (tunnelUp=\(self.tunnelSupervisor.isTunnelUp))")
             } catch {
@@ -296,6 +301,10 @@ final class AppModel: ObservableObject {
                     if cfg.system.injectShellEnv {
                         self.shellEnvInjector.remove(rcFiles: cfg.system.managedShellRcs)
                         self.shellEnvInjector.removeEnvFile()
+                    }
+                    if self.appliedGuiEnv {
+                        self.guiEnvInjector.remove()
+                        self.appliedGuiEnv = false
                     }
                 }
                 if rolledBack {
@@ -352,6 +361,7 @@ final class AppModel: ObservableObject {
                     self.shellEnvInjector.remove(rcFiles: cfg.system.managedShellRcs)
                     self.shellEnvInjector.removeEnvFile()
                 }
+                self.syncGuiEnv(enabled: false, tunnelHost: "")
                 UserDefaults.standard.set(false, forKey: self.wasOnKey)
                 self.proxyServer.stop()
                 self.endProxyActivity()
@@ -384,9 +394,16 @@ final class AppModel: ObservableObject {
             let port = config.proxy.port
             let bindHost = config.proxy.bindHost
             let watchdog = config.system.crashWatchdog
+            let guiEnabled = config.system.injectGuiEnv
+            let tunnelHost = config.tunnel.effectiveHost
             workQueue.async { [weak self] in
-                self?.reapplyIfPortChanged(port: port, bindHost: bindHost, watchdog: watchdog)
+                guard let self = self else { return }
+                self.reapplyIfPortChanged(port: port, bindHost: bindHost, watchdog: watchdog)
+                self.syncGuiEnv(enabled: guiEnabled, tunnelHost: tunnelHost)
             }
+        } else {
+            // Retract any GUI env left behind by a degraded stop.
+            workQueue.async { [weak self] in self?.syncGuiEnv(enabled: false, tunnelHost: "") }
         }
     }
 
@@ -481,6 +498,20 @@ final class AppModel: ObservableObject {
                 return
             }
             setLastError("Failed to apply proxy change: \(error.localizedDescription)")
+        }
+    }
+
+    /// Publishes or retracts the GUI-session proxy env to match the current
+    /// config. Runs on `workQueue`; idempotent (the injector skips an unchanged
+    /// value set). `appliedPort == 0` means routing is not applied, so only a
+    /// retraction is possible.
+    private func syncGuiEnv(enabled: Bool, tunnelHost: String) {
+        if enabled && appliedPort != 0 {
+            appliedGuiEnv = guiEnvInjector.apply(port: appliedPort, bindHost: appliedBindHost,
+                                                 tunnelHost: tunnelHost)
+        } else if appliedGuiEnv {
+            guiEnvInjector.remove()
+            appliedGuiEnv = false
         }
     }
 
@@ -713,6 +744,10 @@ final class AppModel: ObservableObject {
                 shellEnvInjector.remove(rcFiles: config.system.managedShellRcs)
                 shellEnvInjector.removeEnvFile()
             }
+            // `remove()` is a no-op unless a snapshot exists, so it can never
+            // clobber a proxy env we did not publish.
+            guiEnvInjector.remove()
+            appliedGuiEnv = false
             if restored {
                 configStore.clearSnapshot()
                 WatchdogController.disarm()

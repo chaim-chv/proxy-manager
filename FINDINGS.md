@@ -18,6 +18,7 @@
 - [Keep ssh errors visible in `SSHTunnelRunner`](#keep-ssh-errors-visible-in-sshtunnelrunner)
 - [Re-apply the proxy after sleep/wake and network changes](#re-apply-the-proxy-after-sleepwake-and-network-changes)
 - [Hold a `ProcessInfo.beginActivity` assertion while routing](#hold-a-processinfobeginactivity-assertion-while-routing)
+- [GUI apps may ignore the system proxy — publish env via `launchctl`](#gui-apps-may-ignore-the-system-proxy--publish-env-via-launchctl)
 - [Standalone Swift harness gotchas](#standalone-swift-harness-gotchas)
 
 ## SwiftUI `.popover` is unusable for hover tooltips
@@ -164,6 +165,16 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 **Testing note:** App Nap cannot be forced via a public API. Verify manually: enable routing, hide the app and leave it idle a few minutes, then confirm with Activity Monitor's "App Nap" column / `powermetrics --samplers tasks` that the process is not napping, and that `log stream --predicate 'subsystem == "com.proxymanager.app"'` still shows flusher/probe activity.
 
 **Related:** `Sources/Telemetry/TelemetryStore.swift`, `Sources/Tunnel/TunnelSupervisor.swift`, `Sources/AppModel.swift`.
+
+## GUI apps may ignore the system proxy — publish env via `launchctl`
+
+**Status:** Implemented.
+
+**Summary:** Setting the macOS system proxy is not enough for native/GUI apps. Apps launched from Finder/Dock don't read shell rc files, and some Rust/GUI apps ignore the macOS system proxy entirely and only honor env vars. A concrete case: Codex's app-server remote-control WebSocket (`wss://chatgpt.com/...`) went direct, hit the network's NetFree TLS MITM, and failed with `invalid peer certificate: UnknownIssuer` — while its HTTPS calls (system-trust roots) succeeded. `GuiEnvInjector` (`Sources/System/GuiEnvInjector.swift`, setting `system.injectGuiEnv`, default on) publishes `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`WSS_PROXY`/`NO_PROXY` to the GUI session with `launchctl setenv`.
+
+**Context:** `launchctl setenv` only affects apps launched *after* it runs and doesn't survive logout/reboot, so a relaunch of the target app is required. Safety mirrors the system-proxy snapshot: the user's existing values are captured to `gui-env-snapshot.json` before anything is set, and `remove()` is a no-op without a snapshot, so a cleanup can never clobber a proxy the app didn't set. Cleanup runs on disable/quit/rollback and from the crash watchdog (`Watchdog.defaultHooks.removeEnv`); `revert.sh` unsets the vars too. A probe that confirms a CONNECT actually tunneled: watch the app's upstream sockets while opening a raw `CONNECT` — `127.0.0.1:1080` means the SOCKS tunnel, a remote `:443` means direct. Regression: `Tests/GuiEnvHarness`.
+
+**Related:** `Sources/System/GuiEnvInjector.swift`, `Sources/AppModel.swift` (`syncGuiEnv`), `Sources/Support/Watchdog.swift`, `revert.sh`, `docs/system-integration.md`.
 
 ## Standalone Swift harness gotchas
 

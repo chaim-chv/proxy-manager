@@ -36,7 +36,7 @@ ProxyManager/
 │   ├── Routing/               ← allow-list matching engine
 │   ├── Socks/                 ← raw BSD sockets + RFC 1928 SOCKS5 client
 │   ├── Proxy/                 ← HTTP CONNECT/forward proxy core + relay + parser
-│   ├── System/                ← system proxy mgr, XPC client, shell env injector, helper protocol
+│   ├── System/                ← system proxy mgr, XPC client, shell + GUI env injectors, helper protocol
 │   ├── Helper/                ← privileged helper daemon (separate binary)
 │   ├── Telemetry/             ← batched SQLite telemetry + live feed
 │   ├── Tunnel/                ← SOCKS5 health probe + supervisor + SSH tunnel runner + keychain

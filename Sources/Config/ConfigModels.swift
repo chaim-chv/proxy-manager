@@ -183,6 +183,7 @@ enum AppIconMode: String, Codable, CaseIterable, Identifiable {
 
 struct SystemSettings: Codable, Equatable {
     var injectShellEnv: Bool = true
+    var injectGuiEnv: Bool = true
     var launchAtLogin: Bool = false
     var restoreOnQuit: Bool = true
     var colorizeMenuIcon: Bool = true
@@ -192,10 +193,10 @@ struct SystemSettings: Codable, Equatable {
     var crashWatchdog: Bool = true
 
     // Decoded with defaults so older config.json files (which lack
-    // `colorizeMenuIcon` / `appearanceMode` / `iconMode` / `crashWatchdog`)
-    // still load instead of failing whole-file decode.
+    // `colorizeMenuIcon` / `appearanceMode` / `iconMode` / `crashWatchdog` /
+    // `injectGuiEnv`) still load instead of failing whole-file decode.
     enum CodingKeys: String, CodingKey {
-        case injectShellEnv, launchAtLogin, restoreOnQuit, colorizeMenuIcon, appearanceMode, iconMode, managedShellRcs, crashWatchdog
+        case injectShellEnv, injectGuiEnv, launchAtLogin, restoreOnQuit, colorizeMenuIcon, appearanceMode, iconMode, managedShellRcs, crashWatchdog
     }
 
     init() {}
@@ -203,6 +204,7 @@ struct SystemSettings: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         injectShellEnv = try c.decodeIfPresent(Bool.self, forKey: .injectShellEnv) ?? true
+        injectGuiEnv = try c.decodeIfPresent(Bool.self, forKey: .injectGuiEnv) ?? true
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
         restoreOnQuit = try c.decodeIfPresent(Bool.self, forKey: .restoreOnQuit) ?? true
         colorizeMenuIcon = try c.decodeIfPresent(Bool.self, forKey: .colorizeMenuIcon) ?? true
@@ -215,6 +217,7 @@ struct SystemSettings: Codable, Equatable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(injectShellEnv, forKey: .injectShellEnv)
+        try c.encode(injectGuiEnv, forKey: .injectGuiEnv)
         try c.encode(launchAtLogin, forKey: .launchAtLogin)
         try c.encode(restoreOnQuit, forKey: .restoreOnQuit)
         try c.encode(colorizeMenuIcon, forKey: .colorizeMenuIcon)

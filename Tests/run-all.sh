@@ -90,12 +90,20 @@ run_probe CrashProbe_dns_timeout \
   Sources/Socks/Socket.swift \
   Tests/CrashProbes/dns_timeout/main.swift
 
+run_harness GuiEnvHarness \
+  Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
+  Sources/System/HelperProtocol.swift \
+  Sources/Support/Log.swift \
+  Sources/System/ShellEnvInjector.swift Sources/System/GuiEnvInjector.swift \
+  Tests/GuiEnvHarness/main.swift
+
 run_harness WatchdogHarness \
   -framework AppKit -framework ServiceManagement \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/Support/Log.swift Sources/Support/Watchdog.swift \
   Sources/System/HelperProtocol.swift Sources/System/HelperXPCClient.swift \
   Sources/System/SystemProxyManager.swift Sources/System/ShellEnvInjector.swift \
+  Sources/System/GuiEnvInjector.swift \
   Sources/Socks/Socket.swift \
   Tests/WatchdogHarness/main.swift
 

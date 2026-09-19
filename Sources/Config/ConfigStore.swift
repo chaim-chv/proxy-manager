@@ -28,6 +28,7 @@ final class ConfigStore {
     var envFileURL: URL { envDir.appendingPathComponent("env.sh") }
     var telemetryURL: URL { supportDir.appendingPathComponent("telemetry.sqlite") }
     var snapshotURL: URL { supportDir.appendingPathComponent("system-proxy-snapshot.json") }
+    var guiEnvSnapshotURL: URL { supportDir.appendingPathComponent("gui-env-snapshot.json") }
 
     private init() {
         ensureDirectories()

@@ -45,6 +45,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 | `Tests/CrashProbes/sigpipe_send` | Send to an RST peer must not raise SIGPIPE |
 | `Tests/CrashProbes/dns_timeout` | A timed-out `getaddrinfo` must not leak the `addrinfo` list (the `delay` seam forces the resolver thread to outlive the caller) |
 | `Tests/WatchdogHarness/main.swift` | Crash watchdog decision logic (see below) |
+| `Tests/GuiEnvHarness/main.swift` | GUI-session proxy env publish/restore with a fake `launchctl` runner: originals snapshotted and restored, no-op without a snapshot, invalid bind host rejected, idempotent re-apply |
 
 All of the above pass on the current code. A failing check is a regression — do not loosen the assertion to match the bug.
 
@@ -66,6 +67,7 @@ All of the above pass on the current code. A failing check is a regression — d
    - **`ws://` upgrade** — an absolute-form WebSocket handshake returns `101` (the origin must actually see `Upgrade`/`Connection: Upgrade`), then raw frames echo client→origin→client full-duplex; the same over a mock SOCKS5 with an allow-listed host proves the upgrade is tunneled.
 7. **Crash classes** — every trap/SIGPIPE/force-unwrap regression gets a subprocess probe; timed-out DNS must not leak `addrinfo` (`CrashProbes/dns_timeout`).
 8. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
+9. **GUI env injection** — `Tests/GuiEnvHarness/main.swift`: a fake `launchctl` runner asserts the exact managed vars (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`WSS_PROXY`/`NO_PROXY`/`PROXY_MANAGER_ACTIVE`), that pre-existing user values are snapshotted and restored, that `remove()` is a no-op without a snapshot, that an invalid bind host writes nothing, and that an unchanged value set is not re-published.
 
 ## Crash watchdog harness
 

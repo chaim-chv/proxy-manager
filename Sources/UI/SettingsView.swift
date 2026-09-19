@@ -688,6 +688,11 @@ struct SystemSettingsView: View {
                     }
                 }
 
+                SettingsGroup(title: "GUI apps",
+                              help: "Apps opened from Finder or the Dock do not read shell rc files, and some (for example Codex) ignore the macOS system proxy for WebSockets. When on, the app publishes HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, WSS_PROXY and NO_PROXY to your GUI session with launchctl, so newly launched apps route through the proxy. Your existing values are snapshotted and restored when routing is turned off.") {
+                    SettingsToggleRow(title: "Publish proxy env vars to GUI apps", isOn: model.binding(\.system.injectGuiEnv))
+                }
+
                 SettingsGroup(title: "Quit behavior",
                               help: "Restoring on quit puts your original macOS proxy settings back when you quit the app normally.") {
                     VStack(spacing: 0) {

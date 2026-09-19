@@ -21,7 +21,7 @@
                "managed": { "sshHost": "", "sshPort": 22, "username": "", "auth": "KEY",
                             "keyPath": "", "socksHost": "127.0.0.1", "socksPort": 1080 } },
   "policy":  { "failClosedWhenTunnelDown": false },   // false = fail-open
-  "system":  { "injectShellEnv": true, "launchAtLogin": false,
+  "system":  { "injectShellEnv": true, "injectGuiEnv": true, "launchAtLogin": false,
                "restoreOnQuit": true, "colorizeMenuIcon": true,
                "appearanceMode": "SYSTEM", "iconMode": "MENU_BAR_AND_DOCK",
                "managedShellRcs": ["~/.zshrc"], "crashWatchdog": true },

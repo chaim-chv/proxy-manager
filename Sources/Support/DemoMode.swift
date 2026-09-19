@@ -81,6 +81,7 @@ enum DemoMode {
         config.system.appearanceMode = appearanceMode
         config.system.crashWatchdog = false
         config.system.injectShellEnv = false
+        config.system.injectGuiEnv = false
         config.system.launchAtLogin = false
         config.system.restoreOnQuit = false
         config.system.iconMode = .menuBarAndDock

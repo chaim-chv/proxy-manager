@@ -361,10 +361,13 @@ enum Watchdog {
             loadSnapshot: { store.loadSnapshot() },
             restore: { try proxy.restoreWithoutPrompt(snapshot: $0) },
             removeEnv: {
-                guard store.config.system.injectShellEnv else { return }
-                let injector = ShellEnvInjector(configStore: store)
-                injector.remove(rcFiles: store.config.system.managedShellRcs)
-                injector.removeEnvFile()
+                if store.config.system.injectShellEnv {
+                    let injector = ShellEnvInjector(configStore: store)
+                    injector.remove(rcFiles: store.config.system.managedShellRcs)
+                    injector.removeEnvFile()
+                }
+                // No-op unless we published it (guarded by the persisted snapshot).
+                GuiEnvInjector(snapshotURL: store.guiEnvSnapshotURL).remove()
             },
             disarm: { WatchdogController.disarm() },
             log: { Log.app.notice("watchdog: \($0, privacy: .public)") }

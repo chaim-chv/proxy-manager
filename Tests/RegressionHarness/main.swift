@@ -137,6 +137,7 @@ let legacy = """
 """.data(using: .utf8)!
 let legacyDecoded = try? JSONDecoder().decode(AppConfig.self, from: legacy)
 check("legacy config (missing policy/monitor/lock) decodes", legacyDecoded != nil)
+check("legacy config defaults injectGuiEnv to true", legacyDecoded?.system.injectGuiEnv == true)
 
 // A newer config with an extra unknown key must not wipe data either.
 let future = """

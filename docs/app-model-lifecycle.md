@@ -24,7 +24,7 @@ Runs on a background `workQueue`:
 1. Start the proxy server.
 2. Load the persisted snapshot (crash recovery) **or** capture + persist the user's original proxy state.
 3. `applyProxy` (helper → direct `networksetup` as user → osascript).
-4. Write + install shell env (if `injectShellEnv`).
+4. Write + install shell env (if `injectShellEnv`) and publish GUI env via `launchctl` (if `injectGuiEnv`).
 5. `wasOnKey = true`; state → `on` (or `degraded` if the tunnel probe is down).
 
 **On failure, it rolls back.** If the rollback restore succeeds, the snapshot is cleared, the watchdog disarmed, the server stopped, state → `off`. If the rollback **fails**, the snapshot stays on disk, the watchdog stays armed, the listener keeps running (so the machine still has connectivity), and state → `degraded` — the watchdog repairs the dangling proxy when the process exits. The snapshot is never deleted and the watchdog is never disarmed unless a restore actually succeeded.
