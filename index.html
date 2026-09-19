@@ -218,7 +218,7 @@
         <h3>Under the hood</h3>
         <ul>
           <li><strong>Raw sockets, not a framework.</strong> Outbound connections use <code>connect(2)</code> directly, so they never re-enter the system proxy this app sets.</li>
-          <li><strong>Streaming, not buffering.</strong> <code>CONNECT</code> tunnels are relayed byte-for-byte with backpressure, so SSE and LLM token streams arrive as they are produced.</li>
+          <li><strong>Streaming, not buffering.</strong> <code>CONNECT</code> tunnels are relayed byte-for-byte with backpressure, so SSE and LLM token streams arrive as they are produced. WebSocket sessions (<code>ws://</code> and <code>wss://</code>) relay full-duplex too.</li>
           <li><strong>Bounded memory.</strong> Fixed 256 KB buffers per direction, with half-close handled so responses are never truncated.</li>
           <li><strong>Telemetry off the hot path.</strong> Per-request recording is a lock and an append; a single batched writer flushes SQLite.</li>
           <li><strong>Crash-safe.</strong> A watchdog restores your original proxy settings in milliseconds if the app dies.</li>
@@ -266,6 +266,10 @@
         <details>
           <summary>Will it work with curl, node, and other CLI tools?</summary>
           <p>Yes. It writes <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> into your shell rc files, so new terminal sessions route through it automatically.</p>
+        </details>
+        <details>
+          <summary>Does it work with WebSockets?</summary>
+          <p>Yes. <code>wss://</code> (WebSocket over TLS) is carried by the same opaque <code>CONNECT</code> tunnel as other HTTPS traffic, and <code>ws://</code> upgrades are forwarded, so the origin switches protocols and frames flow both ways for the life of the connection.</p>
         </details>
         <details>
           <summary>Is this a VPN?</summary>
