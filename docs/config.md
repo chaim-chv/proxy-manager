@@ -27,12 +27,21 @@
                "managedShellRcs": ["~/.zshrc"], "crashWatchdog": true },
   "targets": [ { "id": "…", "pattern": "example.com", "enabled": true } ],
   "monitor": { "retentionDays": 7, "maxRows": 500000, "recordPaths": true },
-  "lock":    { "enabled": false }
+  "lock":    { "enabled": false },
+  "apps":    { "enabled": false,                          // opt-in per-app routing
+               "defaultMode": "TARGETS",                  // TUNNEL | TARGETS | DIRECT
+               "recordInTelemetry": true,
+               "rules": [ { "id": "…", "key": "com.google.Chrome",
+                            "keyKind": "BUNDLE",          // BUNDLE | EXECUTABLE | EXECUTABLE_NAME
+                            "mode": "TUNNEL",             // TUNNEL | TARGETS | DIRECT
+                            "enabled": true } ] }
 }
 ```
 
 Notes:
 - `targets` is **empty by default** — the app is generic. Seed it via onboarding or presets (`TargetPreset` in `Sources/Config/Presets.swift`).
+- `apps` is **off by default** (zero overhead): per-app routing runs a per-connection identity scan only when `apps.enabled` is true *and* at least one rule exists. `defaultMode` applies to apps with no matching rule. See `docs/per-app-rules.md` and `docs/routing.md`.
+- `AppRule`/`AppSettings` decode tolerantly, and an unknown `keyKind`/`mode`/`defaultMode` value falls back to a default rather than failing the whole config decode.
 - `tunnel.mode` selects who provides the tunnel: `MANUAL` (user's own SOCKS5) or `MANAGED` (the app runs `ssh -N -D`). `effectiveHost`/`effectivePort` resolve to `managed.socksHost/socksPort` in managed mode, else `host`/`port`.
 - `managed.auth` is `KEY` or `PASSWORD`; the password is **not** stored here — it lives in the Keychain (`SSHKeychain`, service `com.proxymanager.ssh`).
 - `tunnel.launchdLabel` (manual mode) is the optional launchd job label for "Supervised by app"; restart only acts when `supervised` is true **and** the label is non-empty.

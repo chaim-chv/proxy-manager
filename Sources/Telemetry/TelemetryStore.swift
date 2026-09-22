@@ -21,12 +21,17 @@ struct RequestEvent: Identifiable, Equatable {
     var durationMs: Int64
     var error: String?
     var srcPort: Int
+    /// Originating app display name, when per-app routing/telemetry is enabled.
+    var app: String?
+    /// Stable app identity (bundle id) when available; nil for CLI tools.
+    var appBundle: String?
 
     init(id: UUID = UUID(), ts: Int64 = Int64(Date().timeIntervalSince1970 * 1000),
          scheme: String = "https", method: String = "CONNECT", host: String = "",
          port: UInt16 = 443, path: String = "", route: Route = .direct,
          status: Int = 0, bytesIn: Int64 = 0, bytesOut: Int64 = 0,
-         durationMs: Int64 = 0, error: String? = nil, srcPort: Int = 0) {
+         durationMs: Int64 = 0, error: String? = nil, srcPort: Int = 0,
+         app: String? = nil, appBundle: String? = nil) {
         self.id = id
         self.ts = ts
         self.scheme = scheme
@@ -41,6 +46,8 @@ struct RequestEvent: Identifiable, Equatable {
         self.durationMs = durationMs
         self.error = error
         self.srcPort = srcPort
+        self.app = app
+        self.appBundle = appBundle
     }
 
     /// Copy with a new byte/duration snapshot (used for live rows while the
@@ -49,7 +56,7 @@ struct RequestEvent: Identifiable, Equatable {
         RequestEvent(id: id, ts: ts, scheme: scheme, method: method, host: host,
                      port: port, path: path, route: route, status: status,
                      bytesIn: bytesIn, bytesOut: bytesOut, durationMs: durationMs,
-                     error: error, srcPort: srcPort)
+                     error: error, srcPort: srcPort, app: app, appBundle: appBundle)
     }
 }
 
@@ -151,6 +158,7 @@ final class TelemetryStore: ObservableObject {
         self.retentionDays = retentionDays
         openDatabase()
         createSchema()
+        migrateSchema()
         prepareStatements()
         startFlusher()
     }
@@ -190,7 +198,9 @@ final class TelemetryStore: ObservableObject {
             bytes_out INTEGER DEFAULT 0,
             duration_ms INTEGER,
             error TEXT,
-            src_port INTEGER
+            src_port INTEGER,
+            app TEXT,
+            app_bundle TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
         CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
@@ -202,12 +212,38 @@ final class TelemetryStore: ObservableObject {
         sqlite3_exec(db, schema, nil, nil, nil)
     }
 
+    /// Adds columns introduced after the first release to an existing DB.
+    /// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a DB from
+    /// a build before per-app telemetry lacks `app`/`app_bundle` and the new
+    /// `INSERT` (which names them) would fail every write. Guarded by
+    /// `PRAGMA table_info` so it is idempotent.
+    private func migrateSchema() {
+        guard let db = db else { return }
+        var existing = Set<String>()
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(requests);", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let name = sqlite3_column_text(stmt, 1) {
+                    existing.insert(String(cString: name))
+                }
+            }
+        }
+        sqlite3_finalize(stmt)
+        if !existing.contains("app") {
+            sqlite3_exec(db, "ALTER TABLE requests ADD COLUMN app TEXT;", nil, nil, nil)
+        }
+        if !existing.contains("app_bundle") {
+            sqlite3_exec(db, "ALTER TABLE requests ADD COLUMN app_bundle TEXT;", nil, nil, nil)
+        }
+    }
+
     private func prepareStatements() {
         guard let db = db else { return }
         let insertSQL = """
         INSERT INTO requests (ts, scheme, method, host, port, path, route, status,
-                              bytes_in, bytes_out, duration_ms, error, src_port)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                              bytes_in, bytes_out, duration_ms, error, src_port,
+                              app, app_bundle)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil)
     }
@@ -417,6 +453,8 @@ final class TelemetryStore: ObservableObject {
             sqlite3_bind_int64(stmt, 11, e.durationMs)
             if let err = e.error { bindText(stmt, 12, err) } else { sqlite3_bind_null(stmt, 12) }
             sqlite3_bind_int(stmt, 13, Int32(e.srcPort))
+            if let app = e.app { bindText(stmt, 14, app) } else { sqlite3_bind_null(stmt, 14) }
+            if let bundle = e.appBundle { bindText(stmt, 15, bundle) } else { sqlite3_bind_null(stmt, 15) }
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("ProxyManager: telemetry insert failed: \(String(cString: sqlite3_errmsg(db)))")
             }
@@ -575,6 +613,37 @@ final class TelemetryStore: ObservableObject {
                 while sqlite3_step(s) == SQLITE_ROW {
                     let host = String(cString: sqlite3_column_text(s, 0))
                     result.append((host, Int(sqlite3_column_int(s, 1))))
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Top apps by request count over a range, for the dashboard breakdown.
+    /// Groups by app identity (bundle id when present) and returns a bundle id
+    /// so the UI can show the app icon.
+    func topApps(rangeSeconds: Int, limit: Int = 10,
+                 completion: @escaping ([(app: String, bundle: String?, count: Int)]) -> Void) {
+        dbQueue.async { [weak self] in
+            guard let self = self, let db = self.db else {
+                DispatchQueue.main.async { completion([]) }
+                return
+            }
+            let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
+            let sql = """
+            SELECT MAX(app) AS name, MAX(app_bundle) AS bundle, COUNT(*) AS c
+            FROM requests
+            WHERE ts >= \(cutoff * 1000) AND app IS NOT NULL AND app != ''
+            GROUP BY COALESCE(app_bundle, app) ORDER BY c DESC LIMIT \(limit);
+            """
+            var result: [(String, String?, Int)] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let name = String(cString: sqlite3_column_text(s, 0))
+                    let bundle = sqlite3_column_text(s, 1).map { String(cString: $0) }
+                    result.append((name, bundle, Int(sqlite3_column_int(s, 2))))
                 }
             }
             sqlite3_finalize(stmt)

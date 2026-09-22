@@ -17,7 +17,7 @@ struct FeedRow: Identifiable, Equatable {
 /// them on the next launch. The cells mirror the previous SwiftUI look
 /// (caption text, monospaced digits, live dot, route chip, inset style).
 struct FeedTable: NSViewRepresentable {
-    static let autosaveName = "ProxyManagerDashboardFeed"
+    static let autosaveName = "ProxyManagerDashboardFeed.v2"
 
     let rows: [FeedRow]
     @Binding var selectedID: UUID?
@@ -33,7 +33,7 @@ struct FeedTable: NSViewRepresentable {
         let table = NSTableView()
         table.style = .inset
         table.usesAlternatingRowBackgroundColors = true
-        table.allowsColumnReordering = false
+        table.allowsColumnReordering = true
         table.allowsMultipleSelection = false
         table.allowsEmptySelection = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -45,6 +45,7 @@ struct FeedTable: NSViewRepresentable {
         FeedTable.addColumn(table, "route", title: "Route", width: 74, min: 60, max: 200, resizable: true)
         FeedTable.addColumn(table, "method", title: "Method", width: 62, min: 50, max: 200, resizable: true)
         FeedTable.addColumn(table, "host", title: "Host", width: 300, min: 120, max: 4000, resizable: true)
+        FeedTable.addColumn(table, "app", title: "App", width: 120, min: 60, max: 400, resizable: true)
         FeedTable.addColumn(table, "status", title: "Status", width: 48, min: 40, max: 200, resizable: true)
         FeedTable.addColumn(table, "bytes", title: "Bytes", width: 76, min: 60, max: 300, resizable: true)
         FeedTable.addColumn(table, "duration", title: "Duration", width: 66, min: 52, max: 300, resizable: true)
@@ -162,6 +163,8 @@ struct FeedTable: NSViewRepresentable {
                              color: .labelColor, align: .left)
             case "host":
                 return host(reuseID, tableView: tableView, host: event.host, port: event.port)
+            case "app":
+                return app(reuseID, tableView: tableView, app: event.app, bundleId: event.appBundle)
             case "status":
                 let text: String
                 let color: NSColor
@@ -210,6 +213,14 @@ struct FeedTable: NSViewRepresentable {
             let cell = (tableView.makeView(withIdentifier: id, owner: self) as? FeedHostCell) ?? FeedHostCell()
             cell.identifier = id
             cell.set(host: host, port: port)
+            return cell
+        }
+
+        private func app(_ id: NSUserInterfaceItemIdentifier, tableView: NSTableView,
+                         app: String?, bundleId: String?) -> NSView? {
+            let cell = (tableView.makeView(withIdentifier: id, owner: self) as? FeedAppCell) ?? FeedAppCell()
+            cell.identifier = id
+            cell.set(app: app, bundleId: bundleId)
             return cell
         }
 
@@ -342,6 +353,62 @@ private final class FeedHostCell: NSTableCellView {
                                  width: portWidth, height: portHeight)
         hostField.frame = NSRect(x: 3, y: max(0, (bounds.height - hostHeight) / 2),
                                  width: max(1, portField.frame.minX - 6), height: hostHeight)
+    }
+}
+
+/// App column: the app icon (or a "no icon" placeholder) followed by its name.
+private final class FeedAppCell: NSTableCellView {
+    private let iconView = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.imageAlignment = .alignCenter
+        addSubview(iconView)
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        label.lineBreakMode = .byTruncatingMiddle
+        label.maximumNumberOfLines = 1
+        label.isSelectable = false
+        addSubview(label)
+    }
+
+    func set(app: String?, bundleId: String?) {
+        let name = app ?? ""
+        let hasApp = !name.isEmpty
+        iconView.isHidden = !hasApp
+        label.isHidden = !hasApp
+        toolTip = hasApp ? bundleId : nil
+        guard hasApp else { return }
+        if let image = AppIcon.image(bundleId: bundleId, path: nil) {
+            iconView.image = image
+            iconView.contentTintColor = nil
+        } else {
+            iconView.image = AppIcon.placeholder
+            iconView.contentTintColor = .tertiaryLabelColor
+        }
+        label.stringValue = name
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let side: CGFloat = 16
+        iconView.frame = NSRect(x: 3, y: max(0, (bounds.height - side) / 2), width: side, height: side)
+        let labelX: CGFloat = iconView.isHidden ? 3 : (3 + side + 5)
+        let height = min(label.intrinsicContentSize.height, bounds.height)
+        label.frame = NSRect(x: labelX, y: max(0, (bounds.height - height) / 2),
+                             width: max(1, bounds.width - labelX - 3), height: height)
     }
 }
 

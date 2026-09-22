@@ -33,6 +33,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case tunnel = "Tunnel"
     case proxy = "Proxy"
     case targets = "Targets"
+    case apps = "Apps"
     case system = "System"
     case monitoring = "Monitoring"
     case about = "About"
@@ -46,6 +47,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .tunnel: return "point.3.connected.trianglepath.dotted"
         case .proxy: return "arrow.triangle.branch"
         case .targets: return "scope"
+        case .apps: return "square.grid.2x2"
         case .system: return "terminal"
         case .monitoring: return "chart.bar"
         case .about: return "info.circle"
@@ -59,6 +61,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .tunnel: return "Tunnel"
         case .proxy: return "Proxy"
         case .targets: return "Targets"
+        case .apps: return "Apps"
         case .system: return "System"
         case .monitoring: return "Monitoring"
         case .about: return "About"
@@ -72,6 +75,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .tunnel: return "The encrypted pipe that carries your selected traffic to a remote machine."
         case .proxy: return "The local router that sends allow-listed hosts to the tunnel and everything else direct."
         case .targets: return "Only these hostnames go through the tunnel."
+        case .apps: return "Route traffic by the app that made the request."
         case .system: return "How routing is wired into macOS and your terminal."
         case .monitoring: return "What gets recorded and how long it's kept."
         case .about: return "How Proxy Manager works, in plain words."
@@ -131,6 +135,7 @@ struct SettingsView: View {
         case .tunnel: TunnelSettingsView()
         case .proxy: ProxySettingsView()
         case .targets: TargetsView()
+        case .apps: AppsSettingsView()
         case .system: SystemSettingsView()
         case .monitoring: MonitoringSettingsView()
         case .about: AboutSettingsView()
@@ -977,6 +982,11 @@ struct AboutSettingsView: View {
                 .padding(.top, 8)
             }
             .frame(maxWidth: .infinity)
+
+            Text("With per-app routing on, the app's rule is checked first — “Tunnel all” or “Direct all” skip the host list.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1011,6 +1021,7 @@ struct AboutSettingsView: View {
             concept("HTTP proxy", "A local middleman your apps talk to. It opens the real connection on their behalf.")
             concept("SOCKS5 proxy / tunnel", "A lower-level encrypted pipe — often created over SSH (`ssh -D`). Traffic you send in comes out on a remote server.")
             concept("Routing", "The app sends only the hostnames on your list through the tunnel; everything else goes direct.")
+            concept("Route by app", "Off by default. When on, each app can go “Tunnel all”, “Use target rules”, or “Direct all”; apps with no rule use the default. An app rule wins over the hostname list.")
             concept("Fail open vs fail closed", "If the tunnel drops: fail open lets traffic go direct (nothing breaks); fail closed blocks the routed hosts until it returns.")
             concept("System proxy vs shell env", "Browsers and apps use the macOS system proxy. Terminal tools read HTTP_PROXY/HTTPS_PROXY. The app sets both.")
             concept("Manual vs managed tunnel", "Point the app at a tunnel you already run, or let it run an SSH tunnel for you.")
@@ -1041,7 +1052,7 @@ struct AboutSettingsView: View {
 
             privacyBullet("No MITM — TLS passes through untouched; the app never sees plaintext.")
             privacyBullet("Local-only — the proxy binds to 127.0.0.1.")
-            privacyBullet("Only metadata is recorded (host, size, timing, status); never bodies or headers.")
+            privacyBullet("Only metadata is recorded (host, app, size, timing, status); never bodies or headers.")
             privacyBullet("The SSH password (if used) lives in the macOS Keychain, never in the config file.")
         }
     }

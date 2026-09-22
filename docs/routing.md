@@ -6,6 +6,24 @@ Decides, per request host, whether to `TUNNEL` (through SOCKS5) or `DIRECT`.
 
 `RoutingEngine` only returns `TUNNEL`/`DIRECT`. The proxy can additionally record route `BLOCK` for two cases it decides itself: a **non-loopback** client targeting a loopback/link-local/RFC1918 host (SSRF guard, `403`), and tunnel-down with `policy.failClosedWhenTunnelDown` — default `false` = **fail-open** (fall back to `DIRECT`, tagged `tunnel_down`); `true` = **fail-closed** (`502`).
 
+## Per-app routing (opt-in)
+
+When `apps.enabled` is true, the decision can also depend on the **originating
+app** (see `docs/per-app-rules.md`). `ProxyServer` resolves the app identity only
+when `RoutingEngine.needsAppIdentity` (enabled **and** ≥1 enabled rule), then
+calls `decide(host:app:)`:
+
+- a matching app rule's mode wins — `TUNNEL` (`Tunnel all`), `DIRECT`
+  (`Direct all`), or `TARGETS` (fall through to the host allow-list);
+- otherwise `apps.defaultMode` applies (`TARGETS` by default, preserving today's
+  behaviour; `DIRECT`/`TUNNEL` give a per-app-VPN model).
+
+With per-app routing off (the default), `decide(host:app:)` is exactly
+`decide(host:)` and no identity scan runs. Rule keys are matched bundle id →
+executable path → executable name; the first enabled rule for a key wins. An
+unresolved app still honours a `DIRECT`/`TUNNEL` default (no leak through the
+host allow-list).
+
 ## Rule model
 
 `TargetRule { id, pattern, enabled }` (see `docs/config.md`). Enabled rules compile into an **exact-match dictionary** plus an ordered **wildcard list**; `decide` checks exact first, then wildcards in list order. No match → `DIRECT`.

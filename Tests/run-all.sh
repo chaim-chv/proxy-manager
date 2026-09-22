@@ -64,6 +64,7 @@ run_probe() {
 
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
+  Sources/Routing/AppIdentity.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
   Sources/Proxy/HostClassifier.swift \
   Sources/System/HelperProtocol.swift \
@@ -71,6 +72,7 @@ run_harness RegressionHarness \
 
 run_harness ProxyE2E \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
+  Sources/Routing/AppIdentity.swift Sources/Routing/AppResolver.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
   Sources/Proxy/HostClassifier.swift \
   Sources/Support/Log.swift \
@@ -89,6 +91,17 @@ run_probe CrashProbe_sigpipe_send \
 run_probe CrashProbe_dns_timeout \
   Sources/Socks/Socket.swift \
   Tests/CrashProbes/dns_timeout/main.swift
+
+run_harness AppIdentityHarness \
+  Sources/Routing/AppIdentity.swift \
+  Sources/Routing/AppResolver.swift \
+  Sources/Support/Log.swift \
+  Tests/AppIdentityHarness/main.swift
+
+run_harness TelemetryHarness \
+  Sources/Config/ConfigModels.swift \
+  Sources/Telemetry/TelemetryStore.swift \
+  Tests/TelemetryHarness/main.swift
 
 run_harness GuiEnvHarness \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \

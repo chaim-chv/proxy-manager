@@ -126,7 +126,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 - **Prefer system frameworks** (`Network`, `Security`, `ServiceManagement`, `Charts`, `SQLite3`). The only third-party dependency is the vendored **Sparkle 2** auto-updater (`Vendor/Sparkle/`, see `docs/updates.md`); no SPM/package-manager deps.
 - **Synchronous admin work goes on a background queue**, never the main thread, and must have a bounded timeout (`runAdmin`, XPC `sync`).
 - **When you change behavior, add/extend the regression harness** in `docs/testing.md` and re-run it.
-- **Settings use a sidebar** (`SettingsView.swift`) with a `SettingsSection` enum; order is General / Appearance / Tunnel / Proxy / Targets / System / Monitoring / About. New options get a **`HelpPopover`** (inline `?` → popover) so they're self-documenting, never bare labels.
+- **Settings use a sidebar** (`SettingsView.swift`) with a `SettingsSection` enum; order is General / Appearance / Tunnel / Proxy / Targets / Apps / System / Monitoring / About. New options get a **`HelpPopover`** (inline `?` → popover) so they're self-documenting, never bare labels.
 - **Onboarding** (`Sources/UI/OnboardingView.swift`) is the first-run walk-through; it's re-openable via Settings → General. It writes config through the same `AppModel` paths as Settings. Presets live in `Sources/Config/Presets.swift` (`TargetPreset`).
 - **Managed SSH tunnel** (`Sources/Tunnel/SSHTunnelRunner.swift`): run `ssh -N -D` as a **foreground** `Process` (never `-f`), drain stderr via `readabilityHandler`, restart with exponential backoff, and classify auth/host-key/key-file errors as fatal. The password is read from the Keychain (`SSHKeychain`) and fed via `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` — **never argv or env**.
 
@@ -139,6 +139,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 | Sockets + SOCKS5 | `docs/networking.md` |
 | HTTP request parsing | `docs/http-parser.md` |
 | Allow-list routing | `docs/routing.md` |
+| Per-app routing (identity, rules, telemetry, UI) | `docs/per-app-rules.md` |
 | Telemetry / SQLite | `docs/telemetry.md` |
 | System proxy + shell env | `docs/system-integration.md` |
 | Privileged helper + XPC | `docs/privileged-helper.md` |

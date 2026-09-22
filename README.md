@@ -12,7 +12,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/chaim-chv/proxy-manager" alt="License"></a>
 </p>
 
-A native macOS menu-bar app that routes **only the hostnames you choose** through an existing SOCKS5 proxy/tunnel — while leaving all other traffic untouched.
+A native macOS menu-bar app that routes **only the traffic you choose** — by hostname or by app — through an existing SOCKS5 proxy/tunnel, while leaving all other traffic untouched.
 
 - **Single on/off switch** in the menu bar (⌘L) or the Dashboard.
 - **Local domain-aware proxy** (`127.0.0.1:8888`) that tunnels allow-listed hosts through your SOCKS5 proxy and passes everything else through directly.
@@ -20,7 +20,8 @@ A native macOS menu-bar app that routes **only the hostnames you choose** throug
 - **Crash watchdog**: a tiny always-on helper restores your original proxy settings if the app is force-quit or crashes while routing is on, so your internet never stays pointed at a dead local proxy (~0% idle CPU; disable in Settings → System).
 - **First-run onboarding** that walks you through pointing the app at your tunnel and choosing what to route.
 - **Run the tunnel for you**: the app can start and supervise an SSH SOCKS5 tunnel (key file or password auth, stored in Keychain), keeping it alive automatically.
-- **Live monitoring**: per-request feed with route decision, host, method, bytes, latency, status; per-route and per-host stats.
+- **Live monitoring**: per-request feed with route decision, host, app, method, bytes, latency, status; per-route, per-host, and per-app stats.
+- **Per-app routing** (off by default): route each app's traffic — **Tunnel all**, **Use target rules**, or **Direct all** — from Settings → Apps, or set the frontmost app's mode right from the menu bar. An app rule wins over the hostname list.
 - **Presets** (DeepSeek, OpenAI, Anthropic/Claude, Google Gemini, GitHub, NVIDIA, WhatsApp) to get started fast, plus full manual control.
 - **Self-updating**: Sparkle 2 checks for new versions in the background (Never/Daily/Weekly in Settings → General → Updates) and always asks before installing.
 - **No MITM.** TLS is pass-through; the app never sees plaintext payloads.
@@ -29,10 +30,12 @@ A native macOS menu-bar app that routes **only the hostnames you choose** throug
 
 - **HTTP proxy** — a local middleman your apps talk to. This app runs one at `127.0.0.1:8888`; it opens the real connection on the app's behalf.
 - **SOCKS5 proxy / tunnel** — a lower-level pipe, often created over SSH (`ssh -D`). Traffic you send into it comes out on a remote server.
-- **What this app does** — connects your apps to that SOCKS5 tunnel, but only for the hostnames on your list. Everything else goes direct.
+- **What this app does** — connects your apps to that SOCKS5 tunnel, but only for the hostnames on your list. Everything else goes direct. Optionally, route by app instead: each app can go through the tunnel, follow the host list, or go direct.
 
 ```
 Browser / CLI ──▶ Local HTTP CONNECT proxy (127.0.0.1:8888)
+                       │
+                       ├─ app rule? ── TUNNEL / DIRECT ──▶ (skips the host check)
                        │
                        ├─ host in allow-list? ── YES ──▶ your SOCKS5 proxy
                        │
@@ -95,6 +98,7 @@ Once installed, Proxy Manager updates itself via Sparkle — use **Check for Upd
 2. Click the menu-bar icon and toggle **Routing** (or press ⌘L).
 3. Open the **Dashboard** (⌘D) to watch live traffic and route decisions.
 4. Edit **Targets** in Settings to change which hostnames are tunneled, or apply a preset.
+5. Optionally open **Settings → Apps** to route by the app that made the request — **Tunnel all**, **Use target rules**, or **Direct all** — or set the frontmost app's mode from the menu bar. This is off by default.
 
 When enabled, the app also writes `~/.config/proxy-manager/env.sh` and adds a guarded `source` line to your shell rc files, so **new** terminal sessions pick up `HTTP_PROXY`/`HTTPS_PROXY` for CLI tools that can't speak SOCKS5 directly (Node/undici, `bun`, `curl`).
 
@@ -121,12 +125,24 @@ The app's configuration lives in `~/Library/Application Support/ProxyManager/con
               "crashWatchdog": true, "colorizeMenuIcon": true, "appearanceMode": "SYSTEM",
               "iconMode": "MENU_BAR_AND_DOCK", "managedShellRcs": ["~/.zshrc"] },
   "targets": [],                                      // empty by default — add your own
+  "apps": {                                           // per-app routing — off by default
+    "enabled": false,
+    "defaultMode": "TARGETS",                         // TUNNEL | TARGETS | DIRECT, for apps with no rule
+    "recordInTelemetry": true,
+    "rules": [
+      { "id": "…", "key": "com.google.Chrome", "keyKind": "BUNDLE",
+        "mode": "TUNNEL", "enabled": true },
+      { "id": "…", "key": "/usr/local/bin/node", "keyKind": "EXECUTABLE",
+        "mode": "TARGETS", "enabled": true }
+    ]
+  },
   "monitor": { "retentionDays": 7, "maxRows": 500000, "recordPaths": true },
   "lock": { "enabled": false }
 }
 ```
 
 - **targets** — the allow-list. Empty by default; use onboarding, a preset, or add rules manually. Wildcard `*.example.com` also matches the apex `example.com`.
+- **apps** — per-app routing, off by default. `enabled` turns it on (zero overhead while off). `defaultMode` (`TUNNEL` | `TARGETS` | `DIRECT`) applies to apps with no rule; each `rules` entry keys on a bundle id (`BUNDLE`), executable path (`EXECUTABLE`), or executable name (`EXECUTABLE_NAME`) and overrides the host list for that app. `recordInTelemetry` stores the originating app name/bundle alongside each request.
 - **tunnel.mode** — `MANUAL` (point at your own tunnel) or `MANAGED` (the app runs the SSH tunnel for you).
 - **tunnel.launchdLabel** — in `MANUAL` mode, if your tunnel is a launchd job, set its label (e.g. `com.user.autossh_socks`) and enable "Supervised by app" to unlock the "Restart tunnel" button.
 - **system** — shell-env injection and the rc files it manages (`managedShellRcs`, default `~/.zshrc`), launch-at-login, quit/watchdog behavior, and appearance (`colorizeMenuIcon`, `appearanceMode`, `iconMode`).
@@ -162,7 +178,7 @@ ProxyManager/
 │   ├── App.swift                 # @main SwiftUI app + menu bar
 │   ├── AppModel.swift            # app-wide state machine + wiring
 │   ├── Config/                   # JSON config store + models + presets
-│   ├── Routing/                  # allow-list matching engine
+│   ├── Routing/                  # allow-list + per-app routing engine
 │   ├── Socks/                    # POSIX sockets + RFC 1928 SOCKS5 client
 │   ├── Proxy/                    # HTTP CONNECT / forwarding proxy core
 │   ├── System/                   # system proxy (helper/direct/osascript) + XPC + shell env
@@ -170,7 +186,7 @@ ProxyManager/
 │   ├── Telemetry/                # SQLite store + live feed
 │   ├── Helper/                   # privileged helper daemon (separate binary)
 │   ├── Support/                  # unified-log logger + crash watchdog
-│   └── UI/                       # dashboard, settings, targets, onboarding, updater
+│   └── UI/                       # dashboard, settings, targets, apps, onboarding, updater
 ├── Resources/                    # app icon + localizations
 ├── Tools/                        # dev tools (app-icon generator)
 ├── Vendor/Sparkle/               # vendored Sparkle 2 auto-update framework
@@ -182,7 +198,7 @@ ProxyManager/
 ## Security & privacy
 
 - Local-only bind (`127.0.0.1`); no remote exposure.
-- TLS is passed through untouched; metadata only (host, size, timing, status).
+- TLS is passed through untouched; metadata only (host, app, size, timing, status).
 - The SSH password (if you use "Run the tunnel for me") is stored in the macOS Keychain — never in `config.json` or on a command line. Key-file auth stores nothing.
 - `Proxy-Authorization` headers are stripped in plain-HTTP forwarding and never logged.
 

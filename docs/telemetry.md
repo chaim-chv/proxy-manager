@@ -2,7 +2,7 @@
 
 `Sources/Telemetry/TelemetryStore.swift`
 
-Records one `RequestEvent` (scheme/method/host/port/path/route/status/bytes/latency/error) per connection, persists to SQLite, and drives a live SwiftUI feed + aggregate stats.
+Records one `RequestEvent` (scheme/method/host/port/path/route/status/bytes/latency/error, plus the originating **app** when per-app telemetry is on) per connection, persists to SQLite, and drives a live SwiftUI feed + aggregate stats.
 
 ## Live sessions (connections appear in the feed while open)
 
@@ -33,7 +33,10 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Storage
 
 - DB at `~/Library/Application Support/ProxyManager/telemetry.sqlite` (WAL, `synchronous=NORMAL`, `cache_size=-8000`).
-- `requests` table (per-request rows, indexed on `ts`/`host`/`route`). Charts aggregate directly from it (`minute_stats` was removed — it was write-only).
+- `requests` table (per-request rows, indexed on `ts`/`host`/`route`). Charts aggregate directly from it (`minute_stats` was removed — it was write-only). Columns: `… src_port, app, app_bundle`.
+- **Per-app columns + migration**: `app` (display name) and `app_bundle` (bundle id, nullable) were added for per-app telemetry. `CREATE TABLE IF NOT EXISTS` never alters an existing table, so `migrateSchema()` runs `PRAGMA table_info(requests)` and `ALTER TABLE … ADD COLUMN` for any missing column before the prepared `INSERT` is created. Without it, every write on an upgraded install would fail. Regression: `Tests/TelemetryHarness` (fresh DB + a pre-per-app DB with a legacy row).
+- The app is recorded only when per-app routing is enabled and `apps.recordInTelemetry` is on (`ProxyRuntimeSettings.recordAppInTelemetry`); otherwise the columns stay NULL and no identity scan runs.
+- `topApps(rangeSeconds:limit:completion:)` groups non-empty `app` values for the dashboard's Hosts/Apps breakdown (mirrors `topHosts`).
 - Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`).
 
 ## Threading

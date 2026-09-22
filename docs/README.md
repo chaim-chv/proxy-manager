@@ -10,14 +10,15 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 | [proxy-core.md](proxy-core.md) | HTTP CONNECT/forward proxy, relay, concurrency model |
 | [networking.md](networking.md) | Raw BSD sockets, SOCKS5 client, timeouts |
 | [http-parser.md](http-parser.md) | Request-line/header parsing, host/port, IPv6, rewrite |
-| [routing.md](routing.md) | Allow-list matching engine |
+| [routing.md](routing.md) | Allow-list matching engine, per-app routing |
+| [per-app-rules.md](per-app-rules.md) | Per-app routing: identity resolution, rules, telemetry, UI |
 | [telemetry.md](telemetry.md) | SQLite store, batched flush, live feed, stats |
 | [system-integration.md](system-integration.md) | System proxy (networksetup), shell env injection, snapshot |
 | [privileged-helper.md](privileged-helper.md) | Helper daemon, XPC protocol, authorization |
 | [app-model-lifecycle.md](app-model-lifecycle.md) | State machine, enable/disable, crash recovery |
 | [config.md](config.md) | JSON config store, models, snapshot persistence |
 | [tunnel-supervisor.md](tunnel-supervisor.md) | SOCKS5 health probe, tunnel restart |
-| [ui.md](ui.md) | App shell, menu bar, dashboard, settings, targets, onboarding |
+| [ui.md](ui.md) | App shell, menu bar, dashboard, settings, targets, apps, onboarding |
 | [build-and-distribution.md](build-and-distribution.md) | build.sh, signing, helper embedding, CI |
 | [updates.md](updates.md) | Sparkle auto-updates, appcast, EdDSA signing keys |
 | [testing.md](testing.md) | How to build/run regression harnesses |

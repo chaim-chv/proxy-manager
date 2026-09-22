@@ -286,7 +286,7 @@ struct OnboardingView: View {
 
     private var targets: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Pick a starting allow-list, or start empty. You can edit this any time in Settings → Targets.")
+            Text("Pick a starting allow-list, or start empty. You can edit this any time in Settings → Targets, or route by app in Settings → Apps.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -368,6 +368,9 @@ struct OnboardingView: View {
             Toggle("Launch at login", isOn: $launchAtLogin)
             Toggle("Set proxy for terminal apps too (shell env)", isOn: $injectShellEnv)
             Text("Terminal apps read HTTP_PROXY/HTTPS_PROXY. Browsers and most apps use the macOS system proxy, which this app also sets while routing is on.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Want to route by app instead of by hostname? Open Settings → Apps any time.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

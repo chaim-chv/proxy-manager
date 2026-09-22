@@ -53,10 +53,15 @@ final class StatusMenuController: NSObject {
     private var errorMenuItem: NSMenuItem?
     private var restartMenuItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
+    private var appControlItem: NSMenuItem?
+    private let appControlMenu = NSMenu()
+    private var lastFrontApp: NSRunningApplication?
+    private var frontAppObserver: NSObjectProtocol?
 
     private override init() {
         super.init()
         menu.autoenablesItems = false
+        menu.delegate = self
         statusItem.menu = menu
         configureStatusButton()
         buildMenu()
@@ -101,6 +106,13 @@ final class StatusMenuController: NSObject {
         restart.target = self
         restartMenuItem = restart
         menu.addItem(restart)
+
+        // Configure routing for the app in front (InputSourcePro/LinearMouse
+        // pattern). The submenu is (re)built on open and on front-app changes.
+        let appControl = NSMenuItem(title: "App", action: nil, keyEquivalent: "")
+        appControl.submenu = appControlMenu
+        appControlItem = appControl
+        menu.addItem(appControl)
 
         menu.addItem(.separator())
 
@@ -154,6 +166,19 @@ final class StatusMenuController: NSObject {
                 self?.checkForUpdatesItem?.isEnabled = canCheck
             }
             .store(in: &cancellables)
+
+        // Track the front app so the menu-bar control targets the right app
+        // even when our own window is frontmost.
+        frontAppObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+               app.bundleIdentifier != Bundle.main.bundleIdentifier {
+                self.lastFrontApp = app
+            }
+            self.refreshAppControl()
+        }
     }
 
     // MARK: - Refresh
@@ -181,6 +206,7 @@ final class StatusMenuController: NSObject {
         }
         errorMenuItem?.isHidden = model.lastError == nil
         restartMenuItem?.isHidden = !model.config.tunnel.supervised
+        refreshAppControl()
     }
 
     private func applyIcon() {
@@ -334,6 +360,99 @@ final class StatusMenuController: NSObject {
 
     @objc private func restartTunnel() {
         model.restartTunnel()
+    }
+
+    // MARK: - Front-app control
+
+    /// The app to configure: the frontmost app, or the last non-self app while
+    /// our own window/menu is frontmost.
+    private func currentFrontApp() -> NSRunningApplication? {
+        let front = NSWorkspace.shared.frontmostApplication
+        if let front, front.bundleIdentifier != Bundle.main.bundleIdentifier {
+            return front
+        }
+        return lastFrontApp
+    }
+
+    private func appKey(for app: NSRunningApplication) -> (key: String, keyKind: AppRuleKeyKind)? {
+        if let id = app.bundleIdentifier, !id.isEmpty { return (id, .bundle) }
+        if let url = app.executableURL { return (url.path, .executable) }
+        return nil
+    }
+
+    /// Rebuilds the "App: <name>" submenu to reflect the front app and its rule.
+    private func refreshAppControl() {
+        guard let item = appControlItem else { return }
+        appControlMenu.removeAllItems()
+
+        guard let app = currentFrontApp(), let (key, keyKind) = appKey(for: app) else {
+            item.title = "App: —"
+            item.isEnabled = false
+            return
+        }
+        item.isEnabled = true
+
+        let name = app.localizedName ?? key
+        let existing = model.appRule(forKey: key, keyKind: keyKind)
+        let effective = existing?.mode ?? model.config.apps.defaultMode
+        item.title = "App: \(name) — \(effective.label)\(existing == nil ? " (default)" : "")"
+        item.toolTip = key
+
+        let header = NSMenuItem(
+            title: existing == nil ? "Using the default for this app" : "Rule for \(name)",
+            action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        appControlMenu.addItem(header)
+        appControlMenu.addItem(.separator())
+
+        for mode in AppRoutingMode.allCases {
+            let modeItem = NSMenuItem(title: mode.label,
+                                      action: #selector(setFrontAppMode(_:)), keyEquivalent: "")
+            modeItem.target = self
+            modeItem.representedObject = ["key": key, "kind": keyKind.rawValue, "mode": mode.rawValue]
+            modeItem.state = mode == effective ? .on : .off
+            modeItem.toolTip = key
+            appControlMenu.addItem(modeItem)
+        }
+
+        if existing != nil {
+            appControlMenu.addItem(.separator())
+            let remove = NSMenuItem(title: "Remove rule", action: #selector(removeFrontAppRule), keyEquivalent: "")
+            remove.target = self
+            appControlMenu.addItem(remove)
+        }
+
+        appControlMenu.addItem(.separator())
+        let more = NSMenuItem(title: "More…", action: #selector(openAppsSettings), keyEquivalent: "")
+        more.target = self
+        appControlMenu.addItem(more)
+    }
+
+    @objc private func setFrontAppMode(_ sender: NSMenuItem) {
+        guard let info = sender.representedObject as? [String: String],
+              let key = info["key"], let kindRaw = info["kind"], let modeRaw = info["mode"],
+              let keyKind = AppRuleKeyKind(rawValue: kindRaw),
+              let mode = AppRoutingMode(rawValue: modeRaw) else { return }
+        model.upsertAppRule(key: key, keyKind: keyKind, mode: mode)
+        refreshAppControl()
+    }
+
+    @objc private func removeFrontAppRule() {
+        guard let app = currentFrontApp(), let (key, keyKind) = appKey(for: app) else { return }
+        model.removeAppRule(key: key, keyKind: keyKind)
+        refreshAppControl()
+    }
+
+    @objc private func openAppsSettings() {
+        model.settingsSelection = .apps
+        openSettings()
+    }
+}
+
+extension StatusMenuController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        refreshAppControl()
     }
 }
 

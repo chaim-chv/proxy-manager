@@ -72,19 +72,28 @@ struct DashboardView: View {
 
     @State private var routeFilter: String = "All"
     @State private var hostFilter: String = ""
+    @State private var appFilterKey: String?
     @State private var paused = false
     @State private var pausedSnapshot: [FeedRow] = []
     @State private var timeRange: TimeRange = .m5
     @State private var metric: ChartMetric = .requests
+    @State private var topMetric: TopMetric = .hosts
     @State private var selectedID: UUID?
 
     // Long-range chart/top-hosts data, loaded from SQLite on a 2 s cadence.
     @State private var dbSeries: [ChartBucket] = []
     @State private var dbTopHosts: [(host: String, count: Int)] = []
+    @State private var dbTopApps: [(app: String, bundle: String?, count: Int)] = []
     @State private var lastDBLoad: Int64 = 0
 
     private let routeOptions = ["All", "Tunneled", "Direct", "Blocked"]
     private let seriesTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
+    private enum TopMetric: String, CaseIterable, Identifiable {
+        case hosts = "Hosts"
+        case apps = "Apps"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,6 +118,7 @@ struct DashboardView: View {
             if isPaused { pausedSnapshot = computeFeedRows() }
         }
         .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
+        .onChange(of: topMetric) { _, _ in refreshLongRange(force: true) }
         .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
         .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
         .onReceive(seriesTimer) { _ in refreshLongRange() }
@@ -135,10 +145,6 @@ struct DashboardView: View {
                       systemImage: model.state.isActive ? "pause.circle" : "play.circle")
             }
             .disabled(model.state == .starting || model.state == .stopping)
-
-            TextField("Filter host…", text: $hostFilter)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 200)
 
             Toggle("Pause", isOn: $paused)
                 .toggleStyle(.checkbox)
@@ -307,16 +313,25 @@ struct DashboardView: View {
 
     private var topHostsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Top tunneled hosts")
-                .font(.headline)
-            let hosts = topHosts
-            if hosts.isEmpty {
+            HStack {
+                Text(topMetric == .hosts ? "Top tunneled hosts" : "Top apps")
+                    .font(.headline)
+                Spacer()
+                Picker("", selection: $topMetric) {
+                    ForEach(TopMetric.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 120)
+            }
+            let items = topItems
+            if items.isEmpty {
                 Text("No data yet")
                     .foregroundStyle(.secondary)
                 Spacer()
             } else {
-                ForEach(Array(hosts.enumerated()), id: \.element.host) { index, item in
-                    hostBar(item: item, ratio: ratio(item.count, in: hosts))
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    topBar(item: item, ratio: ratio(item.count, in: items))
                 }
                 Spacer()
             }
@@ -326,23 +341,45 @@ struct DashboardView: View {
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
     }
 
+    private struct TopItem {
+        let label: String
+        let count: Int
+        let bundleId: String?
+    }
+
+    private var topItems: [TopItem] {
+        if topMetric == .hosts {
+            return topHosts.map { TopItem(label: $0.host, count: $0.count, bundleId: nil) }
+        }
+        return topApps.map { TopItem(label: $0.app, count: $0.count, bundleId: $0.bundle) }
+    }
+
     private var topHosts: [(host: String, count: Int)] {
         if timeRange == .m5 { return inMemoryTopTunneledHosts }
         return dbTopHosts
     }
 
-    private func ratio(_ count: Int, in hosts: [(host: String, count: Int)]) -> CGFloat {
-        let max = hosts.first?.count ?? 1
+    private var topApps: [(app: String, bundle: String?, count: Int)] {
+        if timeRange == .m5 { return inMemoryTopApps }
+        return dbTopApps
+    }
+
+    private func ratio(_ count: Int, in items: [TopItem]) -> CGFloat {
+        let max = items.map(\.count).max() ?? 1
         guard max > 0 else { return 0 }
         return CGFloat(count) / CGFloat(max)
     }
 
-    private func hostBar(item: (host: String, count: Int), ratio: CGFloat) -> some View {
+    private func topBar(item: TopItem, ratio: CGFloat) -> some View {
         HStack(spacing: 8) {
-            Text(item.host)
+            if topMetric == .apps {
+                appIcon(item.bundleId)
+                    .frame(width: 16, height: 16)
+            }
+            Text(item.label)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(width: 118, alignment: .leading)
+                .frame(width: topMetric == .apps ? 102 : 118, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.green.opacity(0.14))
@@ -358,6 +395,18 @@ struct DashboardView: View {
                 .frame(width: 44, alignment: .trailing)
         }
         .font(.callout)
+    }
+
+    @ViewBuilder private func appIcon(_ bundleId: String?) -> some View {
+        if let image = AppIcon.image(bundleId: bundleId, path: nil) {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+        } else {
+            Image(systemName: "app.dashed")
+                .foregroundStyle(.tertiary)
+        }
     }
 
     private var inMemoryTopTunneledHosts: [(host: String, count: Int)] {
@@ -376,6 +425,34 @@ struct DashboardView: View {
             if scanned > 3000 { break }
         }
         return counts.sorted { $0.value > $1.value }.prefix(6).map { (host: $0.key, count: $0.value) }
+    }
+
+    private var inMemoryTopApps: [(app: String, bundle: String?, count: Int)] {
+        let hourAgo = Int64(Date().timeIntervalSince1970 * 1000) - 3_600_000
+        var counts: [String: (name: String, bundle: String?, count: Int)] = [:]
+        func add(_ event: RequestEvent) {
+            guard let app = event.app, !app.isEmpty else { return }
+            let bundle = (event.appBundle?.isEmpty == false) ? event.appBundle : nil
+            let key = bundle ?? app
+            var entry = counts[key] ?? (app, bundle, 0)
+            entry.count += 1
+            if entry.bundle == nil { entry.bundle = bundle }
+            counts[key] = entry
+        }
+        var scanned = 0
+        for event in telemetry.liveRequests {
+            add(event)
+            scanned += 1
+            if scanned > 500 { break }
+        }
+        scanned = 0
+        for event in telemetry.recentRequests.reversed() where event.ts >= hourAgo {
+            add(event)
+            scanned += 1
+            if scanned > 3000 { break }
+        }
+        return counts.sorted { $0.value.count > $1.value.count }.prefix(6)
+            .map { (app: $0.value.name, bundle: $0.value.bundle, count: $0.value.count) }
     }
 
     // MARK: - Feed + detail
@@ -418,7 +495,14 @@ struct DashboardView: View {
             Picker("Route", selection: $routeFilter) {
                 ForEach(routeOptions, id: \.self) { Text($0) }
             }
+            .labelsHidden()
             .frame(width: 130)
+            TextField("Filter host…", text: $hostFilter)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 170)
+            if !appFilterOptions.isEmpty {
+                AppFilterMenu(options: appFilterOptions, selection: $appFilterKey)
+            }
             if paused {
                 Text("paused")
                     .font(.caption)
@@ -429,6 +513,8 @@ struct DashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+        .controlSize(.regular)
+        .frame(height: 24)
     }
 
     private var feedRows: [FeedRow] {
@@ -436,7 +522,9 @@ struct DashboardView: View {
         return computeFeedRows()
     }
 
-    private func computeFeedRows() -> [FeedRow] {
+    /// Live + recent rows before any filter, stable-sorted. Shared by the feed
+    /// and the app-filter options so the filter offers exactly what's in the feed.
+    private func baseFeedRows() -> [FeedRow] {
         var rows: [FeedRow] = []
         rows.reserveCapacity(320)
         for event in telemetry.liveRequests {
@@ -445,6 +533,16 @@ struct DashboardView: View {
         for event in telemetry.recentRequests.suffix(250).reversed() {
             rows.append(FeedRow(event: event, isLive: false))
         }
+        return rows.enumerated()
+            .sorted { a, b in
+                if a.element.event.ts != b.element.event.ts { return a.element.event.ts > b.element.event.ts }
+                return a.offset < b.offset
+            }
+            .map(\.element)
+    }
+
+    private func computeFeedRows() -> [FeedRow] {
+        var rows = baseFeedRows()
         switch routeFilter {
         case "Tunneled": rows = rows.filter { $0.event.route == .tunnel }
         case "Direct": rows = rows.filter { $0.event.route == .direct }
@@ -454,15 +552,32 @@ struct DashboardView: View {
         if !hostFilter.isEmpty {
             rows = rows.filter { $0.event.host.localizedCaseInsensitiveContains(hostFilter) }
         }
-        // Stable sort: equal timestamps keep their pre-sort relative order, so
-        // rows never reshuffle between refreshes (a live feed must not "jump").
-        rows = rows.enumerated()
-            .sorted { a, b in
-                if a.element.event.ts != b.element.event.ts { return a.element.event.ts > b.element.event.ts }
-                return a.offset < b.offset
-            }
-            .map(\.element)
+        if let appFilterKey {
+            rows = rows.filter { ($0.event.appBundle ?? $0.event.app ?? "") == appFilterKey }
+        }
         return Array(rows.prefix(250))
+    }
+
+    /// Apps present in the current feed, most-requested first (then A–Z), with
+    /// their bundle id so the menu can show icons. Derived from the same rows the
+    /// feed shows, so only apps actually in the feed are offered.
+    private var appFilterOptions: [AppFilterOption] {
+        var counts: [String: (name: String, bundle: String?, count: Int)] = [:]
+        for row in baseFeedRows() {
+            let event = row.event
+            let bundle = (event.appBundle?.isEmpty == false) ? event.appBundle : nil
+            guard let key = bundle ?? event.app, !key.isEmpty else { continue }
+            var entry = counts[key] ?? (event.app ?? key, bundle, 0)
+            entry.count += 1
+            if entry.bundle == nil { entry.bundle = bundle }
+            counts[key] = entry
+        }
+        return counts
+            .map { AppFilterOption(id: $0.key, name: $0.value.name, bundleId: $0.value.bundle, count: $0.value.count) }
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
     }
 
     // MARK: - Long-range loading
@@ -474,7 +589,11 @@ struct DashboardView: View {
         lastDBLoad = now
         let range = timeRange.seconds
         telemetry.chartSeries(rangeSeconds: range, bucketMs: timeRange.bucketMs) { dbSeries = $0 }
-        telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
+        if topMetric == .apps {
+            telemetry.topApps(rangeSeconds: range, limit: 6) { dbTopApps = $0 }
+        } else {
+            telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
+        }
     }
 }
 

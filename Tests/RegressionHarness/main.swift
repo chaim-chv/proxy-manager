@@ -5,6 +5,7 @@ import Foundation
 // Build + run (see Tests/run-all.sh):
 //   xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 //     Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
+//     Sources/Routing/AppIdentity.swift \
 //     Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
 //     Sources/System/HelperProtocol.swift \
 //     Tests/RegressionHarness/main.swift -o /tmp/regression && /tmp/regression
@@ -146,6 +147,178 @@ let future = """
 let futureDecoded = try? JSONDecoder().decode(AppConfig.self, from: future)
 check("future config (unknown keys) decodes", futureDecoded != nil)
 check("future config preserves targets", futureDecoded?.targets.count == 1)
+
+print("== Per-app config ==")
+// Absent `apps` block defaults to off (legacy config decoded above).
+check("legacy config defaults apps off", legacyDecoded?.apps.enabled == false)
+check("legacy config defaults app mode to targets", legacyDecoded?.apps.defaultMode == .targets)
+check("legacy config has no app rules", legacyDecoded?.apps.rules.isEmpty == true)
+
+let appsJSON = """
+{"version":2,"apps":{"enabled":true,"defaultMode":"DIRECT","recordInTelemetry":false,"rules":[{"id":"00000000-0000-0000-0000-000000000010","key":"com.google.Chrome","keyKind":"BUNDLE","mode":"TUNNEL","enabled":true},{"id":"00000000-0000-0000-0000-000000000011","key":"/usr/local/bin/node","keyKind":"EXECUTABLE","mode":"DIRECT"}]}}
+""".data(using: .utf8)!
+let appsDecoded = try? JSONDecoder().decode(AppConfig.self, from: appsJSON)
+check("apps config decodes", appsDecoded != nil)
+check("apps enabled decoded", appsDecoded?.apps.enabled == true)
+check("apps defaultMode decoded", appsDecoded?.apps.defaultMode == .direct)
+check("apps recordInTelemetry decoded", appsDecoded?.apps.recordInTelemetry == false)
+check("apps rules decoded", appsDecoded?.apps.rules.count == 2)
+check("app rule keyKind decoded", appsDecoded?.apps.rules.first?.keyKind == .bundle)
+check("app rule mode decoded", appsDecoded?.apps.rules.first?.mode == .tunnel)
+check("app rule missing enabled defaults true", appsDecoded?.apps.rules.last?.enabled == true)
+
+// An unknown enum value written by a future build must not wipe the config.
+let weirdApp = """
+{"targets":[{"pattern":"keep.example.com"}],"apps":{"defaultMode":"NOPE","rules":[{"key":"x","keyKind":"NOPE","mode":"NOPE"}]}}
+""".data(using: .utf8)!
+let weirdDecoded = try? JSONDecoder().decode(AppConfig.self, from: weirdApp)
+check("unknown app enum values do not wipe config", weirdDecoded != nil)
+check("unknown app enum keeps other data", weirdDecoded?.targets.count == 1)
+check("unknown app mode falls back to targets", weirdDecoded?.apps.rules.first?.mode == .targets)
+
+print("== Per-app routing precedence ==")
+func appIdentity(bundle: String? = nil, path: String = "/usr/bin/x",
+                 name: String = "x") -> AppIdentity {
+    AppIdentity(pid: 1, bundleId: bundle, executablePath: path,
+                executableName: name, displayName: name)
+}
+
+// Feature off -> pure host rules, even with rules configured.
+let appDisabled = RoutingEngine()
+appDisabled.update(rules: [TargetRule(pattern: "api.example.com")],
+                   appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .direct)],
+                   appEnabled: false, defaultMode: .direct)
+check("app routing off ignores app rules",
+      appDisabled.decide(host: "api.example.com", app: appIdentity(bundle: "com.google.Chrome")) == .tunnel)
+check("app routing off needs no identity", appDisabled.needsAppIdentity == false)
+
+// Tunnel all overrides an unlisted host.
+let appTunnel = RoutingEngine()
+appTunnel.update(rules: [], appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel)],
+                 appEnabled: true, defaultMode: .targets)
+check("Tunnel all tunnels an unlisted host",
+      appTunnel.decide(host: "other.example", app: appIdentity(bundle: "com.google.Chrome")) == .tunnel)
+check("identity required when a rule exists", appTunnel.needsAppIdentity == true)
+
+// Direct all overrides an allow-listed host.
+let appDirect = RoutingEngine()
+appDirect.update(rules: [TargetRule(pattern: "api.example.com")],
+                 appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .direct)],
+                 appEnabled: true, defaultMode: .targets)
+check("Direct all blocks an allow-listed host",
+      appDirect.decide(host: "api.example.com", app: appIdentity(bundle: "com.google.Chrome")) == .direct)
+
+// Use target rules falls through to the allow-list.
+let appTargets = RoutingEngine()
+appTargets.update(rules: [TargetRule(pattern: "api.example.com")],
+                  appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .targets)],
+                  appEnabled: true, defaultMode: .targets)
+check("Use target rules follows allow-list (tunnel)",
+      appTargets.decide(host: "api.example.com", app: appIdentity(bundle: "com.google.Chrome")) == .tunnel)
+check("Use target rules follows allow-list (direct)",
+      appTargets.decide(host: "other.example", app: appIdentity(bundle: "com.google.Chrome")) == .direct)
+
+// Default mode for apps with no matching rule.
+let appDefaultDirect = RoutingEngine()
+appDefaultDirect.update(rules: [TargetRule(pattern: "api.example.com")],
+                        appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel)],
+                        appEnabled: true, defaultMode: .direct)
+check("default Direct all sends an unlisted app direct",
+      appDefaultDirect.decide(host: "api.example.com", app: appIdentity(bundle: "com.other.App")) == .direct)
+check("default Direct all does not leak an allow-listed host for an unresolved app",
+      appDefaultDirect.decide(host: "api.example.com", app: nil) == .direct)
+
+let appDefaultTunnel = RoutingEngine()
+appDefaultTunnel.update(rules: [], appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel)],
+                        appEnabled: true, defaultMode: .tunnel)
+check("default Tunnel all tunnels an unlisted app",
+      appDefaultTunnel.decide(host: "other.example", app: appIdentity(bundle: "com.other.App")) == .tunnel)
+
+// Matching by executable path and name.
+let appExecPath = RoutingEngine()
+appExecPath.update(rules: [], appRules: [AppRule(key: "/usr/local/bin/node", keyKind: .executable, mode: .tunnel)],
+                   appEnabled: true, defaultMode: .direct)
+check("executable path rule matches",
+      appExecPath.decide(host: "h", app: appIdentity(path: "/usr/local/bin/node", name: "node")) == .tunnel)
+check("executable path rule does not match another path",
+      appExecPath.decide(host: "h", app: appIdentity(path: "/opt/node", name: "node")) == .direct)
+
+let appExecName = RoutingEngine()
+appExecName.update(rules: [], appRules: [AppRule(key: "node", keyKind: .executableName, mode: .tunnel)],
+                   appEnabled: true, defaultMode: .direct)
+check("executable name rule matches any path",
+      appExecName.decide(host: "h", app: appIdentity(path: "/anything/node", name: "node")) == .tunnel)
+
+// Disabled rules ignored; bundle match wins over executable.
+let appMixed = RoutingEngine()
+appMixed.update(rules: [], appRules: [
+    AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel),
+    AppRule(key: "com.other", keyKind: .bundle, mode: .direct, enabled: false),
+], appEnabled: true, defaultMode: .direct)
+check("disabled app rule is ignored",
+      appMixed.decide(host: "h", app: appIdentity(bundle: "com.other")) == .direct)
+check("bundle rule wins over executable",
+      appMixed.decide(host: "h", app: appIdentity(bundle: "com.google.Chrome", path: "/x/node", name: "node")) == .tunnel)
+
+// No rules -> identity not required, but the default mode still applies.
+let appNoRules = RoutingEngine()
+appNoRules.update(rules: [TargetRule(pattern: "api.example.com")], appRules: [],
+                  appEnabled: true, defaultMode: .direct)
+check("no rules -> identity not required", appNoRules.needsAppIdentity == false)
+check("no rules -> default Direct all applies",
+      appNoRules.decide(host: "api.example.com", app: nil) == .direct)
+
+let appNoRulesTargets = RoutingEngine()
+appNoRulesTargets.update(rules: [TargetRule(pattern: "api.example.com")], appRules: [],
+                         appEnabled: true, defaultMode: .targets)
+check("no rules + default targets -> host allow-list",
+      appNoRulesTargets.decide(host: "api.example.com", app: nil) == .tunnel)
+check("no rules + default targets -> direct otherwise",
+      appNoRulesTargets.decide(host: "other", app: nil) == .direct)
+
+// First rule wins for a duplicate key.
+let appDup = RoutingEngine()
+appDup.update(rules: [], appRules: [
+    AppRule(key: "com.a", keyKind: .bundle, mode: .tunnel),
+    AppRule(key: "com.a", keyKind: .bundle, mode: .direct),
+], appEnabled: true, defaultMode: .targets)
+check("first duplicate app rule wins",
+      appDup.decide(host: "h", app: appIdentity(bundle: "com.a")) == .tunnel)
+
+print("== Routing explanation ==")
+let expHost = RoutingEngine()
+expHost.update(rules: [TargetRule(pattern: "api.example.com"), TargetRule(pattern: "*.wild.test")])
+let exactExp = expHost.explain(host: "api.example.com", app: nil)
+check("explain exact target", exactExp.reason == .targetExact && exactExp.route == .tunnel)
+check("explain exact matched pattern", exactExp.matched == "api.example.com")
+let wildExp = expHost.explain(host: "a.wild.test", app: nil)
+check("explain wildcard target", wildExp.reason == .targetWildcard && wildExp.route == .tunnel)
+check("explain wildcard matched pattern", wildExp.matched == "*.wild.test")
+let noneExp = expHost.explain(host: "other.test", app: nil)
+check("explain no match", noneExp.reason == .noMatch && noneExp.route == .direct)
+
+let expApp = RoutingEngine()
+expApp.update(rules: [TargetRule(pattern: "api.example.com")],
+              appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel)],
+              appEnabled: true, defaultMode: .direct)
+let appExp = expApp.explain(host: "other.test", app: appIdentity(bundle: "com.google.Chrome"))
+check("explain app Tunnel all", appExp.reason == .appTunnel && appExp.route == .tunnel)
+check("explain app Tunnel all matched key", appExp.matched == "com.google.Chrome")
+let defExp = expApp.explain(host: "other.test", app: appIdentity(bundle: "com.other"))
+check("explain app default Direct", defExp.reason == .appDefaultDirect && defExp.route == .direct)
+
+let expAppTargets = RoutingEngine()
+expAppTargets.update(rules: [TargetRule(pattern: "api.example.com")],
+                     appRules: [AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .targets)],
+                     appEnabled: true, defaultMode: .targets)
+let atExp = expAppTargets.explain(host: "api.example.com", app: appIdentity(bundle: "com.google.Chrome"))
+check("explain app Use target rules -> exact",
+      atExp.reason == .targetExact && atExp.appRuleMode == .targets)
+
+let expOff = RoutingEngine()
+expOff.update(rules: [TargetRule(pattern: "api.example.com")])
+let offExp = expOff.explain(host: "api.example.com", app: appIdentity(bundle: "com.google.Chrome"))
+check("explain app routing off -> host rules", offExp.reason == .targetExact)
 
 print("== networksetup argument validation ==")
 check("plain service name valid", NetworksetupCommands.isValidService("Wi-Fi"))

@@ -21,6 +21,7 @@ mkdir -p /tmp/harness && cat > /tmp/harness/main.swift <<'EOF'
 EOF
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
+  Sources/Routing/AppIdentity.swift Sources/Routing/AppResolver.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
   Sources/Proxy/HostClassifier.swift \
   Sources/Socks/Socket.swift Sources/Socks/SOCKS5.swift \
@@ -46,6 +47,8 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 | `Tests/CrashProbes/dns_timeout` | A timed-out `getaddrinfo` must not leak the `addrinfo` list (the `delay` seam forces the resolver thread to outlive the caller) |
 | `Tests/WatchdogHarness/main.swift` | Crash watchdog decision logic (see below) |
 | `Tests/GuiEnvHarness/main.swift` | GUI-session proxy env publish/restore with a fake `launchctl` runner: originals snapshotted and restored, no-op without a snapshot, invalid bind host rejected, idempotent re-apply |
+| `Tests/AppIdentityHarness/main.swift` | Per-app identity layer: `enclosingBundle` (plain app, nested helper -> outermost app, code-sign-clone `.app.bundle`, CLI -> none), helper-path classification, the private responsible-process API, and the live `libproc` scan (accepted loopback connection -> client PID -> bundle/executable identity) with cache stability and negative cases |
+| `Tests/TelemetryHarness/main.swift` | Per-app telemetry: a fresh DB creates/writes `app`/`app_bundle`, `topApps` groups; a pre-per-app DB is migrated (`ALTER TABLE`) with its legacy row preserved and new rows writing the app |
 
 All of the above pass on the current code. A failing check is a regression — do not loosen the assertion to match the bug.
 
@@ -65,9 +68,12 @@ All of the above pass on the current code. A failing check is a regression — d
    - **dead-peer reaping** — a burst of RST peers must not accumulate relay threads/fds and the proxy must still serve (this is the SIGPIPE integration regression);
    - **dead-peer + held-open upstream** — after a client RST with the upstream still open and idle, the relay must not busy-spin, and the server must not deallocate while a relay permit is outstanding (catches the libdispatch "semaphore deallocated while in use" trap).
    - **`ws://` upgrade** — an absolute-form WebSocket handshake returns `101` (the origin must actually see `Upgrade`/`Connection: Upgrade`), then raw frames echo client→origin→client full-duplex; the same over a mock SOCKS5 with an allow-listed host proves the upgrade is tunneled.
+   - **per-app rules** — with an app rule keyed on this process's executable name, an allow-listed host routed `Direct all` must bypass the tunnel and an unlisted host routed `Tunnel all` must use it (two mock origins with distinct bodies prove which route was taken).
 7. **Crash classes** — every trap/SIGPIPE/force-unwrap regression gets a subprocess probe; timed-out DNS must not leak `addrinfo` (`CrashProbes/dns_timeout`).
 8. **Crash watchdog** — `Tests/WatchdogHarness/main.swift` (see below).
 9. **GUI env injection** — `Tests/GuiEnvHarness/main.swift`: a fake `launchctl` runner asserts the exact managed vars (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`WSS_PROXY`/`NO_PROXY`/`PROXY_MANAGER_ACTIVE`), that pre-existing user values are snapshotted and restored, that `remove()` is a no-op without a snapshot, that an invalid bind host writes nothing, and that an unchanged value set is not re-published.
+10. **Per-app identity** — `Tests/AppIdentityHarness/main.swift`: `enclosingBundle` resolves a plain app, a nested helper to its **outermost** app bundle, a code-sign-clone `.app.bundle`, and returns none for a CLI; helper-path classification; the responsible-process API (self is responsible for self); and the live `libproc` scan finds the PID of a spawned client and resolves its executable/bundle identity, with a stable cache and nil for unmatched ports / dead PIDs.
+11. **Per-app telemetry** — `Tests/TelemetryHarness/main.swift`: a fresh DB gets `app`/`app_bundle` and stores them (NULL when absent); `topApps` groups non-empty apps; and a **pre-per-app** `requests` table is migrated in place (`ALTER TABLE`), keeping its legacy row (app NULL) while new writes succeed. `Tests/ProxyE2E` additionally asserts a recorded event carries the resolved app name.
 
 ## Crash watchdog harness
 

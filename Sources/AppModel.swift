@@ -36,6 +36,7 @@ final class AppModel: ObservableObject {
     /// to reveal and (optionally) which target rule to highlight.
     @Published var settingsSelection: SettingsSection?
     @Published var revealTargetID: UUID?
+    @Published var revealAppRuleID: UUID?
 
     let configStore: ConfigStore
     let telemetry: TelemetryStore
@@ -426,8 +427,12 @@ final class AppModel: ObservableObject {
         runtime.tunnelPort = config.tunnel.effectivePort
         runtime.failClosed = config.policy.failClosedWhenTunnelDown
         runtime.recordPaths = config.monitor.recordPaths
+        runtime.recordAppInTelemetry = config.apps.enabled && config.apps.recordInTelemetry
         proxyServer.update(settings: runtime)
-        proxyServer.routingEngine.update(rules: config.targets)
+        proxyServer.routingEngine.update(rules: config.targets,
+                                         appRules: config.apps.rules,
+                                         appEnabled: config.apps.enabled,
+                                         defaultMode: config.apps.defaultMode)
     }
 
     /// Starts/stops the app-managed SSH tunnel to match the configured mode.
@@ -615,6 +620,59 @@ final class AppModel: ObservableObject {
     func revealTargetInSettings(_ rule: TargetRule) {
         revealTargetID = rule.id
         settingsSelection = .targets
+        openSettings()
+    }
+
+    // MARK: - Apps
+
+    /// Adds an app rule, or returns the existing one's id if the key already
+    /// exists. Does not enable per-app routing on its own.
+    @discardableResult
+    func addAppRule(key: String, keyKind: AppRuleKeyKind, mode: AppRoutingMode) -> UUID? {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let existing = config.apps.rules.first(where: { $0.key == trimmed && $0.keyKind == keyKind }) {
+            return existing.id
+        }
+        let rule = AppRule(key: trimmed, keyKind: keyKind, mode: mode)
+        config.apps.rules.append(rule)
+        commitConfig()
+        return rule.id
+    }
+
+    func removeAppRule(id: UUID) {
+        config.apps.rules.removeAll { $0.id == id }
+        commitConfig()
+    }
+
+    /// Creates or updates the rule for an app key and turns per-app routing on.
+    /// Used by the menu-bar control, where choosing a mode is a deliberate act.
+    func upsertAppRule(key: String, keyKind: AppRuleKeyKind, mode: AppRoutingMode) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if let index = config.apps.rules.firstIndex(where: { $0.key == trimmed && $0.keyKind == keyKind }) {
+            config.apps.rules[index].mode = mode
+            config.apps.rules[index].enabled = true
+        } else {
+            config.apps.rules.append(AppRule(key: trimmed, keyKind: keyKind, mode: mode))
+        }
+        config.apps.enabled = true
+        commitConfig()
+    }
+
+    func removeAppRule(key: String, keyKind: AppRuleKeyKind) {
+        config.apps.rules.removeAll { $0.key == key && $0.keyKind == keyKind }
+        commitConfig()
+    }
+
+    func appRule(forKey key: String, keyKind: AppRuleKeyKind) -> AppRule? {
+        config.apps.rules.first { $0.key == key && $0.keyKind == keyKind }
+    }
+
+    /// Opens Settings → Apps and highlights the given rule.
+    func revealAppInSettings(_ id: UUID) {
+        revealAppRuleID = id
+        settingsSelection = .apps
         openSettings()
     }
 

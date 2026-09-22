@@ -20,6 +20,7 @@
 - [Hold a `ProcessInfo.beginActivity` assertion while routing](#hold-a-processinfobeginactivity-assertion-while-routing)
 - [GUI apps may ignore the system proxy — publish env via `launchctl`](#gui-apps-may-ignore-the-system-proxy--publish-env-via-launchctl)
 - [Standalone Swift harness gotchas](#standalone-swift-harness-gotchas)
+- [Identify the originating app of a loopback connection via a `libproc` scan](#identify-the-originating-app-of-a-loopback-connection-via-a-libproc-scan)
 
 ## SwiftUI `.popover` is unusable for hover tooltips
 
@@ -185,3 +186,13 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 **Context:** `Tests/run-all.sh` is the driver and encodes the file lists. `Tests/ProxyE2E` includes the RST-burst stage that now passes as the SIGPIPE regression (it used to die with exit 141). See the project skill `skills/standalone-swift-regression-harness` for the full workflow and helper snippets.
 
 **Related:** `Tests/run-all.sh`, `Tests/RegressionHarness/main.swift`, `Tests/ProxyE2E/main.swift`, `docs/testing.md`.
+
+## Identify the originating app of a loopback connection via a `libproc` scan
+
+**Status:** Implemented and wired into the proxy (Phase 2): `Sources/Routing/AppIdentity.swift`, `Sources/Routing/AppResolver.swift`, `RoutingEngine.decide(host:app:)`, `ProxyServer` (gated on `needsAppIdentity`); tests `Tests/AppIdentityHarness` + `Tests/ProxyE2E`. See `docs/per-app-rules.md`.
+
+**Summary:** For per-app routing the proxy must map an accepted `127.0.0.1:8888` TCP connection to the process that opened it. `getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID)` does **not** work for TCP on macOS — it returns `ENOPROTOOPT` (42) and is `AF_UNIX`-only (`LOCAL_PEERCRED` returns an empty `xucred`). The working mechanism is a `libproc` scan (the `lsof`/`nettop` technique), already exposed by Swift's `Darwin` module with no C shim: `proc_listpids(PROC_ALL_PIDS)` → `proc_pidinfo(pid, PROC_PIDLISTFDS)` → `proc_pidfdinfo(pid, fd, PROC_PIDFDSOCKETINFO)`, matching the client socket by `(insi_lport == peer ephemeral port, insi_fport == proxy port)` with `soi_kind == SOCKINFO_TCP`. Measured on this machine (~670 procs / ~8 100 fds / ~890 sockets): ~0.03–0.3 ms when the match is found early, ~1–3 ms full scan, ~18 ms wall for 200 concurrent lookups. `proc_pidinfo` returns nothing for other-user processes (~206/670 here), so root/other-user daemons resolve as "Unknown". Gate the whole scan on per-app rules being enabled so the default hot path is unchanged.
+
+**Context:** Turning the PID into a user-facing app needs more than `NSRunningApplication(pid).bundleIdentifier`, which returns the helper's own id (e.g. `com.google.Chrome.helper`). Walking the executable path to the enclosing `.app` fixes Chrome/Slack helpers but fails for WebKit's shared `com.apple.WebKit.Networking` and for Chrome launched from a code-sign clone. The private `responsibility_get_pid_responsible_for_pid` (from `/usr/lib/system/libsystem_coreservices.dylib`, loaded with `dlsym`) returns the TCC-style responsible process and resolves all of these correctly (WebKit.Networking → its host app). It is a private API, so it must be best-effort with a fallback (enclosing `.app` → own bundle → executable path/name). For bundle-less CLI tools the responsible pid can be the launcher, so prefer the process's own executable there.
+
+**Related:** `docs/per-app-rules.md`, `AGENTS.md` (lesson 13 tolerant config decode), `docs/routing.md`, `Sources/Routing/RoutingEngine.swift`, `Sources/Proxy/ProxyServer.swift`.

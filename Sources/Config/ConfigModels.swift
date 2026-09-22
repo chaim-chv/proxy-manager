@@ -29,6 +29,89 @@ struct TargetRule: Identifiable, Codable, Equatable {
     }
 }
 
+/// What a rule key refers to. Bundle ids are the primary identity; executable
+/// path/name cover CLI tools and apps that ship without a bundle.
+enum AppRuleKeyKind: String, Codable, CaseIterable, Identifiable {
+    case bundle = "BUNDLE"
+    case executable = "EXECUTABLE"
+    case executableName = "EXECUTABLE_NAME"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .bundle: return "Application"
+        case .executable: return "Executable"
+        case .executableName: return "Executable name"
+        }
+    }
+}
+
+/// How an app's traffic is routed. `targets` means "fall through to the host
+/// allow-list"; the other two override it for the app's every request.
+enum AppRoutingMode: String, Codable, CaseIterable, Identifiable {
+    case tunnel = "TUNNEL"
+    case targets = "TARGETS"
+    case direct = "DIRECT"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .tunnel: return "Tunnel all"
+        case .targets: return "Use target rules"
+        case .direct: return "Direct all"
+        }
+    }
+}
+
+struct AppRule: Identifiable, Codable, Equatable {
+    var id: UUID
+    var key: String
+    var keyKind: AppRuleKeyKind
+    var mode: AppRoutingMode
+    var enabled: Bool
+
+    init(id: UUID = UUID(), key: String, keyKind: AppRuleKeyKind,
+         mode: AppRoutingMode, enabled: Bool = true) {
+        self.id = id
+        self.key = key
+        self.keyKind = keyKind
+        self.mode = mode
+        self.enabled = enabled
+    }
+
+    // Tolerant decode (see AppConfig): a missing/extra field must not fail the
+    // whole config load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        key = try c.decodeIfPresent(String.self, forKey: .key) ?? ""
+        keyKind = (try? c.decode(AppRuleKeyKind.self, forKey: .keyKind)) ?? .bundle
+        mode = (try? c.decode(AppRoutingMode.self, forKey: .mode)) ?? .targets
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
+}
+
+/// Per-app routing. Off by default so the proxy hot path is untouched until the
+/// user opts in. `defaultMode` applies to apps with no matching rule.
+struct AppSettings: Codable, Equatable {
+    var enabled: Bool = false
+    var defaultMode: AppRoutingMode = .targets
+    var recordInTelemetry: Bool = true
+    var rules: [AppRule] = []
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        defaultMode = (try? c.decode(AppRoutingMode.self, forKey: .defaultMode)) ?? .targets
+        recordInTelemetry = try c.decodeIfPresent(Bool.self, forKey: .recordInTelemetry) ?? true
+        rules = try c.decodeIfPresent([AppRule].self, forKey: .rules) ?? []
+    }
+}
+
 struct ProxySettings: Codable, Equatable {
     var bindHost: String = "127.0.0.1"
     var port: UInt16 = 8888
@@ -265,6 +348,7 @@ struct AppConfig: Codable, Equatable {
     var targets: [TargetRule] = AppConfig.defaultTargets()
     var monitor: MonitorSettings = MonitorSettings()
     var lock: LockSettings = LockSettings()
+    var apps: AppSettings = AppSettings()
 
     init() {}
 
@@ -281,6 +365,7 @@ struct AppConfig: Codable, Equatable {
         targets = try c.decodeIfPresent([TargetRule].self, forKey: .targets) ?? AppConfig.defaultTargets()
         monitor = try c.decodeIfPresent(MonitorSettings.self, forKey: .monitor) ?? MonitorSettings()
         lock = try c.decodeIfPresent(LockSettings.self, forKey: .lock) ?? LockSettings()
+        apps = try c.decodeIfPresent(AppSettings.self, forKey: .apps) ?? AppSettings()
     }
 
     // The app is generic: no domains are assumed. Users pick their own targets

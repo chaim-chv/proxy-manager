@@ -562,6 +562,67 @@ do {
     check("ws tunneled echoes frame", readExactly(c, 5) == "TUN-1")
 }
 
+print("== E2E: per-app rules (identity resolved from this process) ==")
+// The client here is this test process, so the proxy's libproc scan resolves our
+// own executable. Two mock origins with distinct bodies make the route provable:
+// the mock SOCKS5 always reaches `socksOrigin`, so a body of "DIRECT-APP" means
+// the request bypassed the tunnel and "TUNNEL-APP" means it used it.
+let appExeName = (CommandLine.arguments[0] as NSString).lastPathComponent
+do {
+    // App rule "Direct all" must override an allow-listed host.
+    let directOrigin = MockOrigin(body: "DIRECT-APP")
+    let socksOrigin = MockOrigin(body: "TUNNEL-APP")
+    let socks = MockSOCKS5(originPort: socksOrigin.port)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: socks.port)
+    defer { proxy.stop() }
+    var recSettings = proxy.snapshot()
+    recSettings.recordAppInTelemetry = true
+    proxy.update(settings: recSettings)
+    // `localhost` is allow-listed, so without the app rule this would tunnel.
+    proxy.routingEngine.update(rules: [TargetRule(pattern: "localhost")],
+                               appRules: [AppRule(key: appExeName, keyKind: .executableName, mode: .direct)],
+                               appEnabled: true, defaultMode: .targets)
+    check("app rules require identity resolution", proxy.routingEngine.needsAppIdentity)
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    sendAll(c, Array("CONNECT localhost:\(directOrigin.port) HTTP/1.1\r\nHost: localhost\r\n\r\n".utf8))
+    check("per-app direct CONNECT returns 200", readSome(c).contains("200"))
+    Darwin.shutdown(c, Int32(SHUT_WR))
+    let directResp = String(decoding: recvAll(c), as: UTF8.self)
+    check("app Direct all bypasses the tunnel", directResp.contains("DIRECT-APP"))
+    check("app Direct all did not use the tunnel", !directResp.contains("TUNNEL-APP"))
+    // The recorded event must carry the resolved app (the 10 Hz flusher
+    // publishes to `recentRequests` on main, so pump the run loop briefly).
+    let appDeadline = Date().addingTimeInterval(2)
+    while Date() < appDeadline,
+          !proxy.telemetry.recentRequests.contains(where: { $0.app == appExeName }) {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    }
+    check("recorded event carries the app", proxy.telemetry.recentRequests.contains { $0.app == appExeName })
+}
+do {
+    // App rule "Tunnel all" must tunnel an unlisted host (default mode direct).
+    let directOrigin = MockOrigin(body: "DIRECT-APP")
+    let socksOrigin = MockOrigin(body: "TUNNEL-APP")
+    let socks = MockSOCKS5(originPort: socksOrigin.port)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: socks.port)
+    defer { proxy.stop() }
+    proxy.routingEngine.update(rules: [],
+                               appRules: [AppRule(key: appExeName, keyKind: .executableName, mode: .tunnel)],
+                               appEnabled: true, defaultMode: .direct)
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    // Unlisted host: host rules alone would go direct to `directOrigin`.
+    sendAll(c, Array("CONNECT 127.0.0.1:\(directOrigin.port) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+    check("per-app tunnel CONNECT returns 200", readSome(c).contains("200"))
+    Darwin.shutdown(c, Int32(SHUT_WR))
+    let tunnelResp = String(decoding: recvAll(c), as: UTF8.self)
+    check("app Tunnel all uses the tunnel", tunnelResp.contains("TUNNEL-APP"))
+    check("app Tunnel all did not go direct", !tunnelResp.contains("DIRECT-APP"))
+}
+
 print("")
 if failures == 0 { print("PASS: proxy e2e"); exit(0) }
 else { print("FAIL: \(failures) e2e check(s) failed"); exit(1) }
