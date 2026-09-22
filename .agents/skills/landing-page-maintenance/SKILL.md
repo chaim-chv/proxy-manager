@@ -120,6 +120,7 @@ relevant section in the `gh-pages` worktree (`index.html`, and `privacy.html` /
 | Settings sections or labels | Screenshots + captions | `Sources/UI/SettingsView.swift` (`SettingsSection`) |
 | Onboarding steps or presets | Onboarding screenshot + caption | `Sources/UI/OnboardingView.swift`, `Sources/Config/Presets.swift` |
 | Target rules / wildcards | Targets screenshot + caption | `Sources/Config/ConfigModels.swift` |
+| Per-app routing (modes, default, precedence) | Apps screenshot + caption / How it works | `docs/per-app-rules.md`, `Sources/UI/AppsSettingsView.swift` |
 | Tunnel modes (manual/managed) | Tunnel screenshot + caption | `Sources/Config/ConfigModels.swift` (`TunnelMode`) |
 | Version, requirements, install | Hero meta + final CTA | `build.sh` (`MIN_MACOS`), `README.md` |
 | Privacy behavior (telemetry, Keychain, shell env, watchdog, Sparkle) | `privacy.html` | `README.md`, `docs/telemetry.md`, `docs/updates.md`, `docs/system-integration.md` |

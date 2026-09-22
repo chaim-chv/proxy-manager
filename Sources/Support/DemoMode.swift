@@ -20,8 +20,9 @@ import AppKit
 ///   PROXYMANAGER_DEMO=1            enable the demo (required)
 ///   PROXYMANAGER_SCREEN            dashboard | dashboard-detail |
 ///                                  settings-tunnel | settings-tunnel-managed |
-///                                  settings-targets | settings-about |
-///                                  about-panel | onboarding      (default dashboard)
+///                                  settings-targets | settings-apps |
+///                                  settings-about | about-panel |
+///                                  onboarding                    (default dashboard)
 ///   PROXYMANAGER_APPEARANCE        dark | light                    (default dark)
 ///   PROXYMANAGER_ONBOARDING_STEP   0..3                            (default 2)
 enum DemoMode {
@@ -86,6 +87,10 @@ enum DemoMode {
         config.system.restoreOnQuit = false
         config.system.iconMode = .menuBarAndDock
         config.targets = demoTargets()
+        config.apps.enabled = true
+        config.apps.defaultMode = .targets
+        config.apps.recordInTelemetry = true
+        config.apps.rules = demoAppRules()
         config.monitor.recordPaths = true
 
         let encoder = JSONEncoder()
@@ -112,6 +117,30 @@ enum DemoMode {
         ]
     }
 
+    /// A realistic per-app rule set for the Settings → Apps screenshot. Icons
+    /// resolve from the local machine; missing apps fall back to their key.
+    private static func demoAppRules() -> [AppRule] {
+        [
+            AppRule(key: "com.google.Chrome", keyKind: .bundle, mode: .tunnel),
+            AppRule(key: "com.apple.Safari", keyKind: .bundle, mode: .targets),
+            AppRule(key: "com.tinyspeck.slackmacgap", keyKind: .bundle, mode: .direct),
+            AppRule(key: "/usr/local/bin/node", keyKind: .executable, mode: .direct),
+        ]
+    }
+
+    /// Fake originating app for a seeded host, consistent with `demoAppRules()`
+    /// (Chrome tunnels, Safari follows the host list, node goes direct).
+    private static func appForHost(_ host: String) -> (name: String, bundle: String?) {
+        switch host {
+        case "registry.npmjs.org":
+            return ("node", nil)
+        case "cdn.jsdelivr.net", "swift.org", "www.apple.com":
+            return ("Safari", "com.apple.Safari")
+        default:
+            return ("Google Chrome", "com.google.Chrome")
+        }
+    }
+
     // MARK: - Apply (end of AppModel.init)
 
     /// Seeds fake telemetry and presents the requested screen. Runs on the main
@@ -128,6 +157,7 @@ enum DemoMode {
         switch screen {
         case "settings-tunnel", "settings-tunnel-managed": model.settingsSelection = .tunnel
         case "settings-targets": model.settingsSelection = .targets
+        case "settings-apps": model.settingsSelection = .apps
         case "settings-about": model.settingsSelection = .about
         default: break
         }
@@ -163,7 +193,10 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-about":
+        case "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about":
+            if screen == "settings-apps" {
+                model.revealAppRuleID = model.config.apps.rules.first?.id
+            }
             model.openSettings()
         case "about-panel":
             StatusMenuController.shared.presentAboutPanel()
@@ -213,6 +246,7 @@ enum DemoMode {
             let path = isConnect ? "" : profile.paths.randomElement(using: &rng) ?? ""
             let dl = rng.int64(profile.download)
             let ul = rng.int64(profile.upload)
+            let app = appForHost(profile.host)
             let event = RequestEvent(
                 ts: ts,
                 scheme: profile.scheme,
@@ -226,7 +260,9 @@ enum DemoMode {
                 bytesOut: ul,
                 durationMs: rng.int64(profile.duration),
                 error: error,
-                srcPort: rng.int(50_000...65_000)
+                srcPort: rng.int(50_000...65_000),
+                app: app.name,
+                appBundle: app.bundle
             )
             completed.append(event)
             switch profile.route {
@@ -243,6 +279,7 @@ enum DemoMode {
         // A few in-progress connections so the live dot and "Active" stat render.
         var live: [RequestEvent] = []
         for profile in [HostProfile.liveDeepSeek, .liveOpenAI, .liveGitHub, .liveDirect] {
+            let app = appForHost(profile.host)
             let event = RequestEvent(
                 ts: now - rng.int64(200...4_000),
                 scheme: profile.scheme,
@@ -256,7 +293,9 @@ enum DemoMode {
                 bytesOut: rng.int64(profile.upload),
                 durationMs: rng.int64(200...4_000),
                 error: nil,
-                srcPort: rng.int(50_000...65_000)
+                srcPort: rng.int(50_000...65_000),
+                app: app.name,
+                appBundle: app.bundle
             )
             live.append(event)
         }

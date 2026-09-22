@@ -32,6 +32,7 @@ SCREENS=(
   "tunnel:settings-tunnel"
   "tunnel-managed:settings-tunnel-managed"
   "targets:settings-targets"
+  "apps:settings-apps"
   "onboarding:onboarding"
 )
 APPEARANCES=("dark" "light")

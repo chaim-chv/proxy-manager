@@ -9,11 +9,12 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 | `dashboard` | `dashboard` | Dashboard: stats strip, request-rate chart, top tunneled hosts, live feed | 2240×1496 | Hero image |
 | `dashboard-detail` | `dashboard-detail` | Dashboard with a request selected and the detail inspector open | 2240×1496 | Screenshots → “Per-request detail” |
 | `targets` | `settings-targets` | Settings → Targets: rule list, wildcard, disabled rule, match preview | 1800×1280 | Screenshots → “Your allow-list, editable live” |
+| `apps` | `settings-apps` | Settings → Apps: per-app rules (Chrome/Safari/Slack/node) with the routing detail pane open | 1800×1280 | Screenshots → “Route by app” |
 | `tunnel` | `settings-tunnel` | Settings → Tunnel: manual SOCKS5 config, healthy status, supervision | 1800×1280 | Screenshots → “Bring your own tunnel” |
 | `tunnel-managed` | `settings-tunnel-managed` | Settings → Tunnel in “Run the tunnel for me” (SSH) mode, running | 1800×1280 | Managed-tunnel spotlight |
 | `onboarding` | `onboarding` | First-run wizard, step 2 (choose targets from presets) | 1240×920 | Screenshots → “Set up in about a minute” |
 
-Appearances: `dark`, `light` → 6 screens × 2 = **12 files**.
+Appearances: `dark`, `light` → 7 screens × 2 = **14 files**.
 
 Two more demo screens exist for ad-hoc capture (not part of the site set, so not
 in `SCREENS`): `settings-about` (Settings → About) and `about-panel` (the
@@ -25,6 +26,10 @@ Seeded by `Sources/Support/DemoMode.swift` (deterministic RNG, fixed seed):
 
 - **Targets:** DeepSeek, OpenAI, Anthropic, Gemini, GitHub, NVIDIA (enabled) and
   WhatsApp (disabled) — a realistic mixed allow-list.
+- **Apps:** per-app routing on, default *Use target rules*, with Chrome → Tunnel
+  all, Safari → Use target rules, Slack → Direct all, node → Direct all. Seeded
+  requests carry the originating app so the dashboard App column, app filter, and
+  Top apps breakdown are populated.
 - **Requests:** ~260 completed over the last 5 minutes across tunneled
   (`api.deepseek.com`, `api.openai.com`, `api.anthropic.com`, `github.com`, …),
   direct (`cdn.jsdelivr.net`, `registry.npmjs.org`, `swift.org`, …), and blocked
