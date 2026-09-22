@@ -4,18 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Proxy Manager — route only the traffic you choose on macOS</title>
-<meta name="description" content="A native macOS menu-bar app that sends only the hostnames you choose through your SOCKS5 proxy or SSH tunnel. Everything else stays direct.">
+<meta name="description" content="A native macOS menu-bar app that routes only the traffic you choose — by hostname or by app — through your SOCKS5 proxy or SSH tunnel. Everything else stays direct.">
 <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)">
 <meta property="og:title" content="Proxy Manager">
-<meta property="og:description" content="Send only the sites you choose through your SOCKS5 tunnel. Everything else stays direct.">
+<meta property="og:description" content="Route only the traffic you choose — by hostname or by app — through your SOCKS5 tunnel. Everything else stays direct.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Proxy Manager">
 <meta property="og:url" content="https://chaim-chv.github.io/proxy-manager/">
 <meta property="og:image" content="https://chaim-chv.github.io/proxy-manager/assets/dashboard-dark.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Proxy Manager">
-<meta name="twitter:description" content="Send only the sites you choose through your SOCKS5 tunnel. Everything else stays direct.">
+<meta name="twitter:description" content="Route only the traffic you choose — by hostname or by app — through your SOCKS5 tunnel. Everything else stays direct.">
 <meta name="twitter:image" content="https://chaim-chv.github.io/proxy-manager/assets/dashboard-dark.png">
 <link rel="canonical" href="https://chaim-chv.github.io/proxy-manager/">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
@@ -63,9 +63,9 @@
   <!-- Hero -->
   <section class="hero">
     <div class="wrap">
-      <p class="eyebrow">Local allow-list proxy for macOS</p>
-      <h1>Send only the sites you choose through your tunnel.</h1>
-      <p class="lede">A local proxy that routes the hostnames you allow through your SOCKS5 tunnel — and everything else straight out.</p>
+      <p class="eyebrow">Local allow-list + per-app proxy for macOS</p>
+      <h1>Send only the traffic you choose through your tunnel.</h1>
+      <p class="lede">A local proxy that routes the hostnames you allow — or the apps you pick — through your SOCKS5 tunnel, and everything else straight out.</p>
       <div class="cta-row">
         <div class="download" data-download>
           <a class="btn btn-primary btn-lg dl-main" data-dl-main href="https://github.com/chaim-chv/proxy-manager/releases/latest" rel="noopener">
@@ -153,6 +153,19 @@
         <article class="shot">
           <div class="shot-media" data-tilt>
             <picture>
+              <source srcset="assets/apps-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/apps-light.png" alt="Settings → Apps: per-app routing rules for Chrome, Safari, Slack, and node, with Chrome set to Tunnel all." data-dark="assets/apps-dark.png" data-light="assets/apps-light.png" loading="lazy" width="1800" height="1280">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Route by app</h3>
+            <p>Tunnel all, follow your host list, or go direct — per app. An app rule wins over the allow-list.</p>
+          </div>
+        </article>
+
+        <article class="shot reverse">
+          <div class="shot-media" data-tilt>
+            <picture>
               <source srcset="assets/tunnel-dark.png" media="(prefers-color-scheme: dark)">
               <img src="assets/tunnel-light.png" alt="Tunnel settings for a manual SOCKS5 proxy, showing a healthy tunnel and supervision options." data-dark="assets/tunnel-dark.png" data-light="assets/tunnel-light.png" loading="lazy" width="1800" height="1280">
             </picture>
@@ -163,7 +176,7 @@
           </div>
         </article>
 
-        <article class="shot reverse">
+        <article class="shot">
           <div class="shot-media" data-tilt>
             <picture>
               <source srcset="assets/onboarding-dark.png" media="(prefers-color-scheme: dark)">
@@ -185,7 +198,7 @@
       <h2 class="section-title">How it works</h2>
       <p class="section-lede">One local hop decides where each connection goes.</p>
 
-      <div class="flow" role="img" aria-label="Apps connect to the local proxy on 127.0.0.1:8888, which sends allow-listed hosts to the SOCKS5 tunnel and everything else direct.">
+      <div class="flow" role="img" aria-label="Apps connect to the local proxy on 127.0.0.1:8888, which applies each app's rule first, then sends allow-listed hosts to the SOCKS5 tunnel and everything else direct.">
         <div class="flow-node">
           <span class="flow-title">Apps &amp; CLI</span>
           <span class="flow-sub">browser · curl · node</span>
@@ -197,8 +210,12 @@
         </div>
         <div class="flow-arrow" aria-hidden="true">→</div>
         <div class="flow-branch">
+          <div class="flow-node flow-accent">
+            <span class="flow-title">App rule</span>
+            <span class="flow-sub">→ tunnel all · direct all</span>
+          </div>
           <div class="flow-node flow-ok">
-            <span class="flow-title">Allow-listed</span>
+            <span class="flow-title">Host allow-listed</span>
             <span class="flow-sub">→ SOCKS5 tunnel</span>
           </div>
           <div class="flow-node">
@@ -210,7 +227,7 @@
 
       <ol class="steps">
         <li><strong>Turn it on.</strong> One switch starts the proxy, sets the macOS system proxy, and exports <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> for CLI tools.</li>
-        <li><strong>Traffic is classified.</strong> Each connection is routed to the tunnel or straight out, streamed with backpressure.</li>
+        <li><strong>Traffic is classified.</strong> Each connection is matched to its app first (<em>Tunnel all</em> / <em>Direct all</em>), then to the host allow-list; everything else goes straight out, streamed with backpressure.</li>
         <li><strong>Watch it work.</strong> Every request shows up live. Turning it off restores your original settings.</li>
       </ol>
 
@@ -221,6 +238,7 @@
           <li><strong>Streaming, not buffering.</strong> <code>CONNECT</code> tunnels are relayed byte-for-byte with backpressure, so SSE and LLM token streams arrive as they are produced. WebSocket sessions (<code>ws://</code> and <code>wss://</code>) relay full-duplex too.</li>
           <li><strong>Bounded memory.</strong> Fixed 256 KB buffers per direction, with half-close handled so responses are never truncated.</li>
           <li><strong>Telemetry off the hot path.</strong> Per-request recording is a lock and an append; a single batched writer flushes SQLite.</li>
+          <li><strong>Per-app identity, resolved locally.</strong> With per-app routing on, each connection is matched to its originating app by a local process scan — helpers resolve to their host app. Off by default, so the hot path is unchanged.</li>
           <li><strong>Crash-safe.</strong> A watchdog restores your original proxy settings in milliseconds if the app dies.</li>
           <li><strong>Loopback by default.</strong> The proxy binds to <code>127.0.0.1</code> and blocks non-loopback clients from private destinations.</li>
           <li><strong>No admin prompts.</strong> Proxy toggles use per-user settings, so a normal setup never asks for a password.</li>
@@ -236,7 +254,7 @@
       <ul class="checks">
         <li><strong>No TLS interception.</strong> <code>CONNECT</code> streams are relayed byte-for-byte.</li>
         <li><strong>Local-only.</strong> Binds to <code>127.0.0.1</code>; private destinations are blocked for non-loopback clients.</li>
-        <li><strong>Metadata only, on disk.</strong> Host, size, timing, and status in a local SQLite file. No bodies or headers.</li>
+        <li><strong>Metadata only, on disk.</strong> Host, app, size, timing, and status in a local SQLite file. No bodies or headers.</li>
         <li><strong>Secrets in the Keychain.</strong> An SSH password is never written to the config or a command line.</li>
       </ul>
     </div>
@@ -261,7 +279,11 @@
         </details>
         <details>
           <summary>Does all my traffic go through the tunnel?</summary>
-          <p>No. Only the hostnames on your allow-list. Everything else connects directly, so the rest of your browsing is unaffected.</p>
+          <p>No. Only the hostnames on your allow-list — plus any apps you set to <em>Tunnel all</em>. Everything else connects directly, so the rest of your browsing is unaffected.</p>
+        </details>
+        <details>
+          <summary>Can I route traffic per app?</summary>
+          <p>Yes. In Settings → Apps, each app can be set to <em>Tunnel all</em>, <em>Use target rules</em> (follow the host allow-list), or <em>Direct all</em>, and apps with no rule use a default you choose. You can also set the frontmost app's mode straight from the menu bar. It's off until you turn it on.</p>
         </details>
         <details>
           <summary>Will it work with curl, node, and other CLI tools?</summary>
@@ -344,7 +366,7 @@
             <span data-dl-version></span>
           </span>
         </div>
-        <p class="footer-tag">Route only the hostnames you choose through your SOCKS5 tunnel. Everything else stays direct.</p>
+        <p class="footer-tag">Route only the traffic you choose — by hostname or by app — through your SOCKS5 tunnel. Everything else stays direct.</p>
       </div>
       <nav class="footer-col" aria-label="Product">
         <h4>Product</h4>

@@ -57,7 +57,7 @@
   <div class="wrap narrow page-head">
     <p class="eyebrow">Privacy</p>
     <h1>Your traffic stays yours.</h1>
-    <p class="lede">Proxy Manager routes only the hostnames you choose and passes TLS through untouched. There is no telemetry, no analytics, and no account.</p>
+    <p class="lede">Proxy Manager routes only the traffic you choose — by hostname or by app — and passes TLS through untouched. There is no telemetry, no analytics, and no account.</p>
   </div>
 
   <div class="wrap narrow prose">
@@ -65,10 +65,10 @@
     <p>Proxy Manager collects no data about you. It has no telemetry, no analytics, no account, and no server that sees your traffic. The app is open source under the MIT license, so you can verify every claim on this page in the code.</p>
 
     <h2>The app</h2>
-    <p>Everything the app does happens locally on your Mac. It runs an HTTP proxy bound to <code>127.0.0.1</code> and routes only the hostnames on your allow-list through your SOCKS5 tunnel. Everything else connects directly.</p>
+    <p>Everything the app does happens locally on your Mac. It runs an HTTP proxy bound to <code>127.0.0.1</code> and routes only the hostnames on your allow-list — and, when you enable per-app routing, the apps you choose — through your SOCKS5 tunnel. Everything else connects directly.</p>
     <ul>
       <li><strong>TLS is passed through.</strong> <code>CONNECT</code> streams are relayed byte-for-byte; the app never sees plaintext payloads.</li>
-      <li><strong>Metadata only, on disk.</strong> Per-request records (host, method, route decision, status, byte counts, and timing) are written to a local SQLite file at <code>~/Library/Application Support/ProxyManager/telemetry.sqlite</code>. No request bodies and no headers are captured. Retention is 7 days by default and configurable in Settings.</li>
+      <li><strong>Metadata only, on disk.</strong> Per-request records (host, method, route decision, status, byte counts, and timing) are written to a local SQLite file at <code>~/Library/Application Support/ProxyManager/telemetry.sqlite</code>. When per-app routing is on, the originating app’s name and bundle identifier are recorded too. No request bodies and no headers are captured. Retention is 7 days by default and configurable in Settings.</li>
       <li><strong>Shell integration.</strong> If enabled, the app writes <code>~/.config/proxy-manager/env.sh</code> and adds a guarded <code>source</code> line to the shell rc files you approve, so new terminal sessions export <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code>.</li>
       <li><strong>Secrets in the Keychain.</strong> If you use “Run the tunnel for me,” an SSH password is stored in the macOS Keychain and fed to <code>ssh</code> through a one-shot helper. It is never written to the config or a command line. Key-file auth stores nothing.</li>
       <li><strong>System proxy safety.</strong> Before changing the macOS proxy, the app saves your original settings locally so it can always restore them. A small watchdog does the same if the app crashes.</li>
