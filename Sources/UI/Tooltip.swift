@@ -6,8 +6,15 @@ extension View {
     /// above the view the moment the pointer enters it (no `.help` hover delay)
     /// and hides on exit. Backed by an `NSTrackingArea` and a non-activating
     /// window, so it never steals focus or flickers like a SwiftUI `.popover`.
-    func hoverTooltip(_ text: String) -> some View {
-        background(TooltipTrackingView(text: text))
+    ///
+    /// A `nil`/empty `text` installs no tracking area, so `TruncatableText` can
+    /// pass the string only when the label is actually clipped.
+    @ViewBuilder func hoverTooltip(_ text: String?) -> some View {
+        if let text, !text.isEmpty {
+            background(TooltipTrackingView(text: text))
+        } else {
+            self
+        }
     }
 }
 

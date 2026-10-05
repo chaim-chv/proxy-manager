@@ -376,9 +376,7 @@ struct DashboardView: View {
                 appIcon(item.bundleId)
                     .frame(width: 16, height: 16)
             }
-            Text(item.label)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            TruncatableText(item.label)
                 .frame(width: topMetric == .apps ? 102 : 118, alignment: .leading)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {

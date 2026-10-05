@@ -62,6 +62,11 @@ run_probe() {
   fi
 }
 
+run_harness UIHarness \
+  -framework AppKit \
+  Sources/UI/TruncationDetector.swift \
+  Tests/UIHarness/main.swift
+
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Routing/AppIdentity.swift \

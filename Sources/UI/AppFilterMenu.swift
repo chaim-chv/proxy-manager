@@ -34,9 +34,7 @@ struct AppFilterMenu: View {
                 if let selected {
                     icon(selected.bundleId)
                         .frame(width: 16, height: 16)
-                    Text(selected.name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    TruncatableText(selected.name)
                 } else {
                     Text("All apps")
                 }
@@ -105,9 +103,7 @@ struct AppFilterMenu: View {
                     icon(bundleId)
                         .frame(width: 16, height: 16)
                 }
-                Text(name)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                TruncatableText(name)
                 Spacer(minLength: 6)
                 if let count {
                     Text("\(count)")

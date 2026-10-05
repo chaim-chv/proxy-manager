@@ -579,10 +579,8 @@ private struct ManagedTunnelForm: View {
                 }
                 if let err = model.sshError, !err.isEmpty {
                     SettingsRow {
-                        Text(err)
-                            .font(.caption)
+                        TruncatableText(err, font: .caption, lineLimit: 2, truncationMode: .tail)
                             .foregroundStyle(.red)
-                            .lineLimit(2)
                     }
                 }
                 Divider()

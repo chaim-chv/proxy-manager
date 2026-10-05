@@ -94,10 +94,7 @@ struct RequestDetailView: View {
             Text(label)
                 .foregroundStyle(.secondary)
             Spacer()
-            Text(value)
-                .monospacedDigit()
-                .lineLimit(1)
-                .truncationMode(.middle)
+            TruncatableText(value, monospacedDigit: true)
         }
         .font(.callout)
         .padding(.horizontal, 10)
@@ -116,9 +113,7 @@ struct RequestDetailView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
             .hoverTooltip("Copy host")
-            Text(event.host)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            TruncatableText(event.host)
         }
         .font(.callout)
         .padding(.horizontal, 10)
@@ -148,9 +143,7 @@ struct RequestDetailView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
-                Text(app)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                TruncatableText(app, tooltip: appTooltip(app))
             } else {
                 Text("—")
                     .foregroundStyle(.secondary)
@@ -159,7 +152,11 @@ struct RequestDetailView: View {
         .font(.callout)
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .help(event.appBundle ?? "")
+    }
+
+    private func appTooltip(_ app: String) -> String {
+        guard let bundle = event.appBundle, !bundle.isEmpty, bundle != app else { return app }
+        return "\(app)\n\(bundle)"
     }
 
     private var routeDecisionRow: some View {

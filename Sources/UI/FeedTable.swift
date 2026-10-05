@@ -193,7 +193,8 @@ struct FeedTable: NSViewRepresentable {
                 let err = event.error ?? ""
                 return label(reuseID, tableView: tableView, text: err,
                              font: .systemFont(ofSize: 11, weight: .regular),
-                             color: .systemRed, align: .left, truncation: .byTruncatingMiddle)
+                             color: .systemRed, align: .left, truncation: .byTruncatingMiddle,
+                             tooltipIfTruncated: true)
             default:
                 return nil
             }
@@ -201,10 +202,12 @@ struct FeedTable: NSViewRepresentable {
 
         private func label(_ id: NSUserInterfaceItemIdentifier, tableView: NSTableView,
                            text: String, font: NSFont, color: NSColor,
-                           align: NSTextAlignment, truncation: NSLineBreakMode = .byClipping) -> NSView? {
+                           align: NSTextAlignment, truncation: NSLineBreakMode = .byClipping,
+                           tooltipIfTruncated: Bool = false) -> NSView? {
             let cell = (tableView.makeView(withIdentifier: id, owner: self) as? FeedLabelCell) ?? FeedLabelCell()
             cell.identifier = id
-            cell.set(text: text, font: font, color: color, align: align, truncation: truncation)
+            cell.set(text: text, font: font, color: color, align: align, truncation: truncation,
+                     tooltipIfTruncated: tooltipIfTruncated)
             return cell
         }
 
@@ -265,9 +268,13 @@ private final class FeedDotCell: NSTableCellView {
 private final class FeedLabelCell: NSTableCellView {
     private var leftPadding: CGFloat = 3
     private var rightPadding: CGFloat = 3
+    private var lastText = ""
+    private var lastFont = NSFont.systemFont(ofSize: 11)
+    private var tooltipIfTruncated = false
 
     func set(text: String, font: NSFont, color: NSColor,
-             align: NSTextAlignment, truncation: NSLineBreakMode) {
+             align: NSTextAlignment, truncation: NSLineBreakMode,
+             tooltipIfTruncated: Bool = false) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = align
         paragraph.lineBreakMode = truncation
@@ -284,6 +291,9 @@ private final class FeedLabelCell: NSTableCellView {
         textField?.alignment = align
         textField?.lineBreakMode = truncation
         textField?.attributedStringValue = NSAttributedString(string: text, attributes: attributes)
+        lastText = text
+        lastFont = font
+        self.tooltipIfTruncated = tooltipIfTruncated
         leftPadding = align == .left ? 3 : 1
         rightPadding = align == .right ? 3 : 1
         needsLayout = true
@@ -298,14 +308,20 @@ private final class FeedLabelCell: NSTableCellView {
         field.frame = NSRect(x: leftPadding, y: y,
                              width: max(1, bounds.width - leftPadding - rightPadding),
                              height: height)
+        toolTip = tooltipIfTruncated
+            ? TruncationDetector.tooltip(text: lastText, availableWidth: field.frame.width, font: lastFont)
+            : nil
     }
 }
 
 /// Host column: host (middle-truncated) + a `:port` suffix that always stays
 /// visible at the trailing edge.
 private final class FeedHostCell: NSTableCellView {
+    private static let hostFont = NSFont.systemFont(ofSize: 13, weight: .regular)
     private let hostField = NSTextField(labelWithString: "")
     private let portField = NSTextField(labelWithString: "")
+    private var hostText = ""
+    private var port: UInt16 = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -327,10 +343,12 @@ private final class FeedHostCell: NSTableCellView {
     }
 
     func set(host: String, port: UInt16) {
+        hostText = host
+        self.port = port
         let hostParagraph = NSMutableParagraphStyle()
         hostParagraph.lineBreakMode = .byTruncatingMiddle
         hostField.attributedStringValue = NSAttributedString(string: host, attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: .regular),
+            .font: Self.hostFont,
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: hostParagraph,
         ])
@@ -353,13 +371,18 @@ private final class FeedHostCell: NSTableCellView {
                                  width: portWidth, height: portHeight)
         hostField.frame = NSRect(x: 3, y: max(0, (bounds.height - hostHeight) / 2),
                                  width: max(1, portField.frame.minX - 6), height: hostHeight)
+        toolTip = TruncationDetector.tooltip(text: hostText, availableWidth: hostField.frame.width,
+                                             font: Self.hostFont).map { "\($0):\(port)" }
     }
 }
 
 /// App column: the app icon (or a "no icon" placeholder) followed by its name.
 private final class FeedAppCell: NSTableCellView {
+    private static let labelFont = NSFont.systemFont(ofSize: 11)
     private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private var appName = ""
+    private var bundleId: String?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -375,7 +398,7 @@ private final class FeedAppCell: NSTableCellView {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.imageAlignment = .alignCenter
         addSubview(iconView)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Self.labelFont
         label.textColor = .secondaryLabelColor
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
@@ -385,11 +408,12 @@ private final class FeedAppCell: NSTableCellView {
 
     func set(app: String?, bundleId: String?) {
         let name = app ?? ""
+        appName = name
+        self.bundleId = bundleId
         let hasApp = !name.isEmpty
         iconView.isHidden = !hasApp
         label.isHidden = !hasApp
-        toolTip = hasApp ? bundleId : nil
-        guard hasApp else { return }
+        guard hasApp else { toolTip = nil; return }
         if let image = AppIcon.image(bundleId: bundleId, path: nil) {
             iconView.image = image
             iconView.contentTintColor = nil
@@ -409,6 +433,8 @@ private final class FeedAppCell: NSTableCellView {
         let height = min(label.intrinsicContentSize.height, bounds.height)
         label.frame = NSRect(x: labelX, y: max(0, (bounds.height - height) / 2),
                              width: max(1, bounds.width - labelX - 3), height: height)
+        toolTip = TruncationDetector.tooltip(text: appName, availableWidth: label.frame.width,
+                                             font: Self.labelFont) ?? bundleId
     }
 }
 

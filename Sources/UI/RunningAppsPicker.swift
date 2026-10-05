@@ -355,14 +355,9 @@ private struct RunningAppRow: View {
                 icon
                     .frame(width: 32, height: 32)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(item.name)
-                        .font(.callout)
-                        .lineLimit(1)
-                    Text(item.key)
-                        .font(.caption)
+                    TruncatableText(item.name, font: .callout, truncationMode: .tail)
+                    TruncatableText(item.key, font: .caption)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
                 }
                 Spacer(minLength: 6)
                 if configured {

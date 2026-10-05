@@ -352,10 +352,9 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(preset.name).font(.callout.bold())
                 Text(preset.summary).font(.caption).foregroundStyle(.secondary)
-                Text(preset.rules.map(\.pattern).joined(separator: ", "))
-                    .font(.caption2)
+                TruncatableText(preset.rules.map(\.pattern).joined(separator: ", "),
+                                font: .caption2, lineLimit: 2, truncationMode: .tail)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
             }
             Spacer()
         }

@@ -253,14 +253,9 @@ private struct AppRuleRow: View {
                 .frame(width: 20, height: 20)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(AppDisplay.name(for: rule))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(rule.key)
-                    .font(.caption)
+                TruncatableText(AppDisplay.name(for: rule))
+                TruncatableText(rule.key, font: .caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
 
             Spacer(minLength: 4)
@@ -269,7 +264,6 @@ private struct AppRuleRow: View {
         }
         .padding(.vertical, 1)
         .opacity(rule.enabled ? 1 : 0.5)
-        .help(rule.key)
     }
 
     @ViewBuilder private var icon: some View {
@@ -298,15 +292,9 @@ private struct AppRuleDetail: View {
                     icon
                         .frame(width: 44, height: 44)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(AppDisplay.name(for: rule))
-                            .font(.title3.bold())
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(rule.key)
-                            .font(.callout)
+                        TruncatableText(AppDisplay.name(for: rule), font: .title3.bold())
+                        TruncatableText(rule.key, font: .callout)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
                     }
                     Spacer()
                 }
