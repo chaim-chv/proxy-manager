@@ -175,91 +175,100 @@ struct OnboardingView: View {
     }
 
     private var manualTunnelFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Enter the address of your existing SOCKS5 tunnel. If you made one with `ssh -D`, it's usually 127.0.0.1 and the port you chose.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                TextField("Host", text: $tunnelHost)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
-                TextField("Port", text: $tunnelPortText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 90)
-                Button(testButtonTitle) { test() }
-                    .disabled(testState == .testing)
-                if case .ok = testState { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                if case .fail = testState { Image(systemName: "xmark.circle.fill").foregroundStyle(.red) }
-            }
-
-            if case .fail = testState {
-                Text("Couldn't reach that address. Make sure the tunnel is running and the host/port are right.")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "questionmark.circle")
-                    .foregroundStyle(.secondary)
-                Text("Example: `ssh -D 1080 user@yourserver.com` creates a SOCKS5 tunnel on 127.0.0.1:1080. You don't need the app to create it — just point it here.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        SettingsGroup(
+            title: "SOCKS5 tunnel",
+            help: "The SOCKS5 proxy your selected hosts are routed through. If you made one with `ssh -D`, it's usually 127.0.0.1 and the port you chose.",
+            example: "ssh -D 1080 user@yourserver.com  →  host 127.0.0.1, port 1080"
+        ) {
+            VStack(spacing: 0) {
+                SettingsFieldRow("Host", TextField("Host", text: $tunnelHost))
+                Divider()
+                SettingsFieldRow("Port", TextField("Port", text: $tunnelPortText))
+                Divider()
+                SettingsRow {
+                    Button(testButtonTitle) { test() }
+                        .disabled(testState == .testing)
+                    if case .ok = testState { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+                    if case .fail = testState { Image(systemName: "xmark.circle.fill").foregroundStyle(.red) }
+                    Spacer()
+                }
+                if case .fail = testState {
+                    Text("Couldn't reach that address. Make sure the tunnel is running and the host/port are right.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 7)
+                }
             }
         }
     }
 
     private var managedTunnelFields: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("The app will run and supervise an SSH SOCKS5 tunnel for you — no manual `ssh` needed.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            HStack {
-                TextField("SSH host (IP or address)", text: $sshHost)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Port", text: $sshPortText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 80)
-                TextField("Username", text: $sshUser)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 160)
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsGroup(
+                title: "SSH connection",
+                help: "The app runs and supervises an SSH SOCKS5 tunnel for you — no manual `ssh` needed."
+            ) {
+                VStack(spacing: 0) {
+                    SettingsFieldRow("Host", TextField("SSH host (IP or address)", text: $sshHost))
+                    Divider()
+                    SettingsFieldRow("Port", TextField("Port", text: $sshPortText))
+                    Divider()
+                    SettingsFieldRow("Username", TextField("Username", text: $sshUser))
+                }
             }
 
-            Picker("Authentication", selection: $auth) {
-                Text("Key file").tag(SSHAuthMethod.key)
-                Text("Password").tag(SSHAuthMethod.password)
-            }
-            .pickerStyle(.radioGroup)
-
-            if auth == .key {
-                HStack {
-                    TextField("Private key path", text: $keyPath)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Browse…") {
-                        if let path = KeyFilePicker.chooseKeyFile() {
-                            keyPath = path
+            SettingsGroup(
+                title: "Authentication",
+                help: "A key file is preferred — no secret is passed to ssh; use a passphrase-less key, or one already loaded in ssh-agent. A password is stored in the macOS Keychain and handed to ssh via a one-shot askpass helper — never in the config file.",
+                example: "Key path example: ~/.ssh/id_ed25519"
+            ) {
+                VStack(spacing: 0) {
+                    SettingsRow {
+                        Picker("Authentication", selection: $auth) {
+                            Text("Key file").tag(SSHAuthMethod.key)
+                            Text("Password").tag(SSHAuthMethod.password)
+                        }
+                        .pickerStyle(.radioGroup)
+                        .labelsHidden()
+                    }
+                    Divider()
+                    if auth == .key {
+                        SettingsRow {
+                            Text("Private key")
+                                .frame(width: 130, alignment: .leading)
+                            TextField("Private key path", text: $keyPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: .infinity)
+                            Button("Browse…") {
+                                if let path = KeyFilePicker.chooseKeyFile() {
+                                    keyPath = path
+                                }
+                            }
+                        }
+                    } else {
+                        SettingsRow {
+                            Text("Password")
+                                .frame(width: 130, alignment: .leading)
+                            SecureField("Password", text: $sshPassword)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: .infinity)
                         }
                     }
                 }
-                Text("Use a passphrase-less key, or one already loaded in ssh-agent.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                SecureField("Password", text: $sshPassword)
-                    .textFieldStyle(.roundedBorder)
-                Text("Stored securely in the macOS Keychain — never in the config file.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
-            HStack {
-                TextField("Local SOCKS bind host", text: $socksHost)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-                TextField("Port", text: $socksPortText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 80)
+            SettingsGroup(
+                title: "Local SOCKS port",
+                help: "Where the app's tunnel listens on this Mac. Your selected traffic is sent here."
+            ) {
+                VStack(spacing: 0) {
+                    SettingsFieldRow("Bind host", TextField("Local SOCKS bind host", text: $socksHost))
+                    Divider()
+                    SettingsFieldRow("Port", TextField("Port", text: $socksPortText))
+                }
             }
         }
     }
@@ -363,16 +372,21 @@ struct OnboardingView: View {
     // MARK: - Step 4: Done
 
     private var finishStep: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Toggle("Enable routing now", isOn: $enableNow)
-            Toggle("Launch at login", isOn: $launchAtLogin)
-            Toggle("Set proxy for terminal apps too (shell env)", isOn: $injectShellEnv)
-            Text("Terminal apps read HTTP_PROXY/HTTPS_PROXY. Browsers and most apps use the macOS system proxy, which this app also sets while routing is on.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("Want to route by app instead of by hostname? Open Settings → Apps any time.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        SettingsGroup(
+            title: "Start routing",
+            help: "Turn on routing now to send your selected traffic through the tunnel immediately. Want to route by app instead of by hostname? Open Settings → Apps any time."
+        ) {
+            VStack(spacing: 0) {
+                SettingsToggleRow(title: "Enable routing now", isOn: $enableNow)
+                Divider()
+                SettingsToggleRow(title: "Launch at login", isOn: $launchAtLogin)
+                Divider()
+                SettingsToggleRow(
+                    title: "Set proxy for terminal apps too (shell env)",
+                    help: "Terminal apps read HTTP_PROXY/HTTPS_PROXY. Browsers and most apps use the macOS system proxy, which this app also sets while routing is on.",
+                    isOn: $injectShellEnv
+                )
+            }
         }
     }
 

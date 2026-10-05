@@ -165,6 +165,9 @@ struct TargetsView: View {
         HStack(spacing: 8) {
             Text("Match preview:")
                 .foregroundStyle(.secondary)
+            HelpPopover(
+                text: "A wildcard like *.example.com matches the apex domain and any subdomain. An exact name matches only itself.",
+                example: "*.example.com → example.com, api.example.com, a.b.example.com")
             TextField("type a hostname", text: $previewHost)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 220)
@@ -172,9 +175,6 @@ struct TargetsView: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(previewColor)
             Spacer()
-            HelpPopover(
-                text: "A wildcard like *.example.com matches the apex domain and any subdomain. An exact name matches only itself.",
-                example: "*.example.com → example.com, api.example.com, a.b.example.com")
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)

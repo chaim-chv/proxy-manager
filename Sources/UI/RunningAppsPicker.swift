@@ -141,39 +141,41 @@ struct RunningAppsPickerSheet: View {
             Text("\(count)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            HelpPopover(text: section.explanation)
             Spacer()
         }
         .foregroundStyle(count == 0 ? .tertiary : .secondary)
         .padding(.horizontal, 12)
         .padding(.top, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .help(section.explanation)
     }
 
     @ViewBuilder private func backgroundBlock(_ list: [RunningAppItem]) -> some View {
         let expanded = showBackground || !query.isEmpty
         VStack(alignment: .leading, spacing: 2) {
-            Button {
-                showBackground.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                    Text(RunningAppItem.Section.background.rawValue)
-                        .font(.caption.weight(.semibold))
-                    Text("\(list.count)")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    Spacer()
+            HStack(spacing: 6) {
+                Button {
+                    showBackground.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                        Text(RunningAppItem.Section.background.rawValue)
+                            .font(.caption.weight(.semibold))
+                        Text("\(list.count)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .foregroundStyle(list.isEmpty ? .tertiary : .secondary)
+                    .contentShape(Rectangle())
                 }
-                .foregroundStyle(list.isEmpty ? .tertiary : .secondary)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                HelpPopover(text: RunningAppItem.Section.background.explanation + " Click to expand.")
+                Spacer()
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 12)
             .padding(.top, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .help(RunningAppItem.Section.background.explanation + " Click to expand.")
 
             if expanded {
                 if list.isEmpty {

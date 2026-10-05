@@ -174,7 +174,7 @@ struct SettingsPage<Content: View>: View {
 // grouped-form look while the whitespace — horizontal and vertical — stays tight.
 
 /// Aligns page content to the header inset (20 pt) with a tight vertical rhythm.
-private struct SettingsContent<Content: View>: View {
+struct SettingsContent<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -188,7 +188,7 @@ private struct SettingsContent<Content: View>: View {
 /// A titled settings group rendered as a rounded card aligned to the header.
 /// `title` (with optional inline help) appears above the card, like a section
 /// header in a grouped form.
-private struct SettingsGroup<Content: View>: View {
+struct SettingsGroup<Content: View>: View {
     var title: String? = nil
     var help: String? = nil
     var example: String? = nil
@@ -216,7 +216,7 @@ private struct SettingsGroup<Content: View>: View {
 }
 
 /// A single compact settings row, inset like a grouped-form row.
-private struct SettingsRow<Content: View>: View {
+struct SettingsRow<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -228,7 +228,7 @@ private struct SettingsRow<Content: View>: View {
 }
 
 /// A caption under a control row inside a group card.
-private struct SettingsCaption: View {
+struct SettingsCaption: View {
     let text: String
 
     var body: some View {
@@ -241,7 +241,7 @@ private struct SettingsCaption: View {
 
 /// A row where a title sits on the left and a switch control on the right —
 /// the macOS preferences look for a boolean option.
-private struct SettingsToggleRow: View {
+struct SettingsToggleRow: View {
     let title: String
     var help: String? = nil
     let isOn: Binding<Bool>
@@ -261,7 +261,7 @@ private struct SettingsToggleRow: View {
 }
 
 /// A label + text field row, with a fixed label column so fields line up.
-private struct SettingsFieldRow<Field: View>: View {
+struct SettingsFieldRow<Field: View>: View {
     let label: String
     let field: Field
 
@@ -348,11 +348,13 @@ struct GeneralSettingsView: View {
                     }
                 }
 
-                SettingsGroup {
+                SettingsGroup(
+                    title: "Application",
+                    help: "Restart quits and reopens the app; your routing settings are restored on quit and re-applied on relaunch. Reset all settings and data clears your configuration and recorded history."
+                ) {
                     SettingsRow {
                         Button("Quit") { model.quitApp() }
                         Button("Restart") { model.restartApp() }
-                        HelpPopover(text: "Quits and reopens the app. Your routing settings are restored on quit and re-applied on relaunch.")
                         Spacer()
                         Button("Run setup again") { model.replayOnboarding() }
                         Button("Reset all settings and data") { model.resetAll() }
@@ -479,7 +481,10 @@ private struct ManualTunnelForm: View {
             }
         }
 
-        SettingsGroup(title: "Supervision") {
+        SettingsGroup(
+            title: "Supervision",
+            help: "If your tunnel is a launchd job, enter its label and the app can restart it for you."
+        ) {
             VStack(spacing: 0) {
                 SettingsToggleRow(title: "Supervised by app", isOn: model.binding(\.tunnel.supervised))
                 Divider()
@@ -490,9 +495,6 @@ private struct ManualTunnelForm: View {
                     Button("Restart tunnel") { model.restartTunnel() }
                         .disabled(!model.config.tunnel.supervised || model.config.tunnel.launchdLabel.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
-                SettingsCaption(text: "If your tunnel is a launchd job, enter its label and the app can restart it for you.")
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
             }
         }
     }
@@ -523,7 +525,7 @@ private struct ManagedTunnelForm: View {
         }
 
         SettingsGroup(title: "Authentication",
-                      help: "A key file is preferred — no secret is passed to ssh. A password is read from the Keychain and handed to ssh via a one-shot askpass helper.",
+                      help: "A key file is preferred — no secret is passed to ssh; use a passphrase-less key, or one already loaded in ssh-agent. A password is stored in the macOS Keychain and handed to ssh via a one-shot askpass helper — never in the config file.",
                       example: "Key path example: ~/.ssh/id_ed25519") {
             VStack(spacing: 0) {
                 SettingsRow {
@@ -549,9 +551,6 @@ private struct ManagedTunnelForm: View {
                             }
                         }
                     }
-                    SettingsCaption(text: "Use a passphrase-less key, or one already loaded in ssh-agent.")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
                 } else {
                     SettingsRow {
                         Text("Password")
@@ -561,9 +560,6 @@ private struct ManagedTunnelForm: View {
                             .frame(maxWidth: .infinity)
                             .onSubmit { model.saveManagedPassword(password) }
                     }
-                    SettingsCaption(text: "Stored securely in the macOS Keychain — never in the config file.")
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
                 }
             }
         }
@@ -653,7 +649,10 @@ struct SystemSettingsView: View {
                     SettingsToggleRow(title: "Inject proxy env vars into shell rc files", isOn: model.binding(\.system.injectShellEnv))
                 }
 
-                SettingsGroup(title: "Shell rc files") {
+                SettingsGroup(
+                    title: "Shell rc files",
+                    help: "Files like `~/.zshrc` that new terminal sessions read. The app adds one guarded source line to each, and removes it when shell env injection is turned off."
+                ) {
                     VStack(spacing: 0) {
                         if model.config.system.managedShellRcs.isEmpty {
                             SettingsCaption(text: "No rc files yet.")
@@ -726,7 +725,10 @@ struct MonitoringSettingsView: View {
     var body: some View {
         SettingsPage(title: SettingsSection.monitoring.title, summary: SettingsSection.monitoring.summary) {
             SettingsContent {
-                SettingsGroup(title: "History") {
+                SettingsGroup(
+                    title: "History",
+                    help: "Host, size, and timing are always stored; bodies and headers are never stored."
+                ) {
                     VStack(spacing: 0) {
                         SettingsRow {
                             Text("Retention: \(model.config.monitor.retentionDays) days")
@@ -738,14 +740,13 @@ struct MonitoringSettingsView: View {
                         }
                         Divider()
                         SettingsToggleRow(title: "Record request paths", isOn: model.binding(\.monitor.recordPaths))
-                        Divider()
-                        SettingsCaption(text: "Host, size, and timing are always stored; bodies and headers are never stored.")
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
                     }
                 }
 
-                SettingsGroup(title: "Data") {
+                SettingsGroup(
+                    title: "Data",
+                    help: "Purge deletes everything recorded so far. Recording continues afterward."
+                ) {
                     SettingsRow {
                         Button("Purge history now") { model.telemetry.purge() }
                         Spacer()
