@@ -83,6 +83,18 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     }
 }
 
+extension SettingsSection {
+    /// Sidebar grouping. Order here is the sidebar order; a `nil` title means the
+    /// group has no visible header. Mirrors InputSourcePro's `Nav.grouped`.
+    static let sidebarGroups: [(id: String, title: String?, sections: [SettingsSection])] = [
+        ("general", nil, [.general]),
+        ("connection", "Connection", [.tunnel, .proxy]),
+        ("routing", "Routing", [.targets, .apps]),
+        ("system", "System", [.appearance, .system, .monitoring]),
+        ("about", nil, [.about]),
+    ]
+}
+
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var selection: SettingsSection? = .general
@@ -90,9 +102,17 @@ struct SettingsView: View {
     var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                List(SettingsSection.allCases, selection: $selection) { section in
-                    Label(section.rawValue, systemImage: section.icon)
-                        .tag(section)
+                List(selection: $selection) {
+                    ForEach(SettingsSection.sidebarGroups, id: \.id) { group in
+                        Section {
+                            ForEach(group.sections) { section in
+                                Label(section.title, systemImage: section.icon)
+                                    .tag(section)
+                            }
+                        } header: {
+                            if let title = group.title { Text(title) }
+                        }
+                    }
                 }
                 .listStyle(.sidebar)
 
