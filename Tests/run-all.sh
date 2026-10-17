@@ -67,6 +67,11 @@ run_harness UIHarness \
   Sources/UI/TruncationDetector.swift \
   Tests/UIHarness/main.swift
 
+run_harness WindowTrackerHarness \
+  -framework AppKit \
+  Sources/UI/AppWindowTracker.swift \
+  Tests/WindowTrackerHarness/main.swift
+
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Routing/AppIdentity.swift \

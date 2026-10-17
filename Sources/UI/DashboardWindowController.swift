@@ -17,6 +17,8 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
     private let frameAutosaveName = DemoMode.isEnabled ? "ProxyManagerDemoDashboard" : "ProxyManagerDashboard"
     private var window: NSWindow?
 
+    var currentWindow: NSWindow? { window }
+
     func show() {
         if window == nil {
             let view = DashboardView()
@@ -37,6 +39,7 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
             window = w
         }
         window?.makeKeyAndOrderFront(nil)
+        if let window { AppWindowTracker.shared.trackDashboardWindow(window) }
         NSApp.activate(ignoringOtherApps: true)
     }
 

@@ -148,6 +148,20 @@ let futureDecoded = try? JSONDecoder().decode(AppConfig.self, from: future)
 check("future config (unknown keys) decodes", futureDecoded != nil)
 check("future config preserves targets", futureDecoded?.targets.count == 1)
 
+print("== Icon placement ==")
+check("menu bar only hides the Dock icon with no app windows",
+      !AppIconMode.menuBarOnly.dockIconVisible(hasOpenAppWindow: false))
+check("menu bar only shows the Dock icon while a Dashboard/Settings window is open",
+      AppIconMode.menuBarOnly.dockIconVisible(hasOpenAppWindow: true))
+check("menu bar + Dock always shows the Dock icon",
+      AppIconMode.menuBarAndDock.dockIconVisible(hasOpenAppWindow: false))
+check("Dock only always shows the Dock icon",
+      AppIconMode.dockOnly.dockIconVisible(hasOpenAppWindow: false))
+check("open windows never hide the menu bar item",
+      AppIconMode.menuBarOnly.showsMenuBarIcon &&
+      AppIconMode.menuBarAndDock.showsMenuBarIcon &&
+      !AppIconMode.dockOnly.showsMenuBarIcon)
+
 print("== Per-app config ==")
 // Absent `apps` block defaults to off (legacy config decoded above).
 check("legacy config defaults apps off", legacyDecoded?.apps.enabled == false)

@@ -232,8 +232,9 @@ enum AppearanceMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-/// Where the app's icon lives: menu bar only (no Dock icon), both the menu bar
-/// and the Dock, or the Dock only (no menu bar status item).
+/// Where the app's icon lives: menu bar only (no Dock icon unless the Dashboard
+/// or Settings is open), both the menu bar and the Dock, or the Dock only (no
+/// menu bar status item).
 enum AppIconMode: String, Codable, CaseIterable, Identifiable {
     case menuBarOnly = "MENU_BAR_ONLY"
     case menuBarAndDock = "MENU_BAR_AND_DOCK"
@@ -261,6 +262,12 @@ enum AppIconMode: String, Codable, CaseIterable, Identifiable {
         case .menuBarAndDock, .dockOnly: return true
         case .menuBarOnly: return false
         }
+    }
+
+    /// Whether a Dock icon should be present right now. Menu-bar-only still
+    /// shows one while the Dashboard or Settings window is open.
+    func dockIconVisible(hasOpenAppWindow: Bool) -> Bool {
+        showsDockIcon || hasOpenAppWindow
     }
 }
 

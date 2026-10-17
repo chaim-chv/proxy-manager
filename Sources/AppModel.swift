@@ -130,6 +130,10 @@ final class AppModel: ObservableObject {
             }
         }
 
+        AppWindowTracker.shared.onChange = { [weak self] in
+            self?.applyIconMode()
+        }
+
         Log.app.notice("ProxyManager initialized (config v\(self.config.version))")
         applyAppearance()
         applyIconMode()
@@ -149,12 +153,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Applies the icon placement: menu-bar-only uses the `.accessory`
-    /// activation policy (no Dock icon); the other modes are `.regular`. The
-    /// status item's own visibility is owned by `StatusMenuController`, which
-    /// observes `config`; this only switches the Dock presence.
+    /// activation policy (no Dock icon) unless the Dashboard or Settings window
+    /// is open; the other modes are always `.regular`. The status item's own
+    /// visibility is owned by `StatusMenuController`, which observes `config`;
+    /// this only switches the Dock presence.
     private func applyIconMode() {
-        let policy: NSApplication.ActivationPolicy =
-            config.system.iconMode == .menuBarOnly ? .accessory : .regular
+        let showDock = config.system.iconMode.dockIconVisible(
+            hasOpenAppWindow: AppWindowTracker.shared.hasOpenWindow)
+        let policy: NSApplication.ActivationPolicy = showDock ? .regular : .accessory
         DispatchQueue.main.async { NSApp.setActivationPolicy(policy) }
     }
 

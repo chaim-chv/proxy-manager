@@ -50,6 +50,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 | `Tests/AppIdentityHarness/main.swift` | Per-app identity layer: `enclosingBundle` (plain app, nested helper -> outermost app, code-sign-clone `.app.bundle`, CLI -> none), helper-path classification, the private responsible-process API, and the live `libproc` scan (accepted loopback connection -> client PID -> bundle/executable identity) with cache stability and negative cases |
 | `Tests/TelemetryHarness/main.swift` | Per-app telemetry: a fresh DB creates/writes `app`/`app_bundle`, `topApps` groups; a pre-per-app DB is migrated (`ALTER TABLE`) with its legacy row preserved and new rows writing the app |
 | `Tests/UIHarness/main.swift` | Truncation-tooltip decision logic (`TruncationDetector`, shared by `TruncatableText` and the AppKit feed cells): single-line width and multi-line height boundaries with the sub-pixel epsilon, zero/empty guards, `requiredWidth` measurement, and the "tooltip only when clipped" rule |
+| `Tests/WindowTrackerHarness/main.swift` | `AppWindowTracker`: a hidden window does not count, showing/closing/reopening the Dashboard or Settings updates the open state, order-out/order-in is tracked, multiple open windows keep the Dock icon, and the last close clears it |
 
 All of the above pass on the current code. A failing check is a regression — do not loosen the assertion to match the bug.
 
@@ -76,6 +77,7 @@ All of the above pass on the current code. A failing check is a regression — d
 10. **Per-app identity** — `Tests/AppIdentityHarness/main.swift`: `enclosingBundle` resolves a plain app, a nested helper to its **outermost** app bundle, a code-sign-clone `.app.bundle`, and returns none for a CLI; helper-path classification; the responsible-process API (self is responsible for self); and the live `libproc` scan finds the PID of a spawned client and resolves its executable/bundle identity, with a stable cache and nil for unmatched ports / dead PIDs.
 11. **Per-app telemetry** — `Tests/TelemetryHarness/main.swift`: a fresh DB gets `app`/`app_bundle` and stores them (NULL when absent); `topApps` groups non-empty apps; and a **pre-per-app** `requests` table is migrated in place (`ALTER TABLE`), keeping its legacy row (app NULL) while new writes succeed. `Tests/ProxyE2E` additionally asserts a recorded event carries the resolved app name.
 12. **Truncation tooltips** — `Tests/UIHarness/main.swift`: `TruncationDetector` is the single decision point for "is this label ellipsised?" (used by `TruncatableText` and the AppKit feed cells). It pins the single-line width / multi-line height boundaries with the sub-pixel epsilon, the zero-required/zero-available (unmeasured) guards, `requiredWidth` measurement, and that a tooltip is returned only when the text is clipped (never for text that fits or is empty).
+13. **Dock icon presence** — `Tests/WindowTrackerHarness/main.swift`: `AppWindowTracker` must count a window only while it is open (visible or minimized), including close/reopen and order-out/order-in, so Menu-bar-only can show the Dock icon only while the Dashboard or Settings is open.
 
 ## Crash watchdog harness
 

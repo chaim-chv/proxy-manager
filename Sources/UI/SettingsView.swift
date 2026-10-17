@@ -11,7 +11,10 @@ enum SettingsWindow {
 private struct SettingsWindowRef: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = SettingsWindowRefView()
-        view.onWindowChange = { SettingsWindow.current = $0 }
+        view.onWindowChange = { window in
+            SettingsWindow.current = window
+            AppWindowTracker.shared.settingsWindowChanged(window)
+        }
         return view
     }
 
@@ -395,7 +398,7 @@ struct AppearanceSettingsView: View {
         SettingsPage(title: SettingsSection.appearance.title, summary: SettingsSection.appearance.summary) {
             SettingsContent {
                 SettingsGroup(title: "Icon placement",
-                              help: "Menu bar only hides the Dock icon. Dock only hides the menu bar item — click the Dock icon to open the dashboard. Menu bar + Dock shows both.") {
+                              help: "Menu bar only hides the Dock icon, except while the dashboard or Settings window is open. Dock only hides the menu bar item — click the Dock icon to open the dashboard. Menu bar + Dock shows both.") {
                     SettingsRow {
                         AppIconModePicker(mode: model.binding(\.system.iconMode))
                     }

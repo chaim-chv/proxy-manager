@@ -144,7 +144,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        DashboardWindowController.shared.show()
+        // A Dock click should bring back whichever app window is already open
+        // (Settings is a common case while menu-bar-only has temporarily shown
+        // the Dock icon) instead of always opening the Dashboard.
+        let candidates = [SettingsWindow.current,
+                          DashboardWindowController.shared.currentWindow,
+                          OnboardingWindowController.shared.window].compactMap { $0 }
+        let open = candidates.filter { $0.isVisible || $0.isMiniaturized }
+        let front = NSApp.orderedWindows.first { window in
+            open.contains { $0 === window }
+        } ?? open.first
+        if let front {
+            if front.isMiniaturized { front.deminiaturize(nil) }
+            front.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else {
+            DashboardWindowController.shared.show()
+        }
         return true
     }
 
