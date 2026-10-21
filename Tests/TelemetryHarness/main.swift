@@ -27,7 +27,8 @@ func openDB(_ path: String) -> OpaquePointer? {
     return db
 }
 
-func exec(_ db: OpaquePointer?, _ sql: String) {
+@discardableResult
+func exec(_ db: OpaquePointer?, _ sql: String) -> Int32 {
     sqlite3_exec(db, sql, nil, nil, nil)
 }
 
@@ -45,6 +46,12 @@ func queryInt(_ db: OpaquePointer?, _ sql: String) -> Int? {
     defer { sqlite3_finalize(stmt) }
     guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
     return Int(sqlite3_column_int64(stmt, 0))
+}
+
+func fileSize(_ path: String) -> Int64? {
+    guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+          let size = attrs[.size] as? NSNumber else { return nil }
+    return size.int64Value
 }
 
 func columns(_ db: OpaquePointer?) -> Set<String> {
@@ -130,12 +137,193 @@ if let db2 = openDB(legacyPath) {
     check("open migrated DB", false)
 }
 
-try? FileManager.default.removeItem(atPath: freshPath)
-try? FileManager.default.removeItem(atPath: legacyPath)
-try? FileManager.default.removeItem(atPath: freshPath + "-wal")
-try? FileManager.default.removeItem(atPath: freshPath + "-shm")
-try? FileManager.default.removeItem(atPath: legacyPath + "-wal")
-try? FileManager.default.removeItem(atPath: legacyPath + "-shm")
+print("== locked DB keeps rows queued and writes them after unlock ==")
+let lockedPath = tmpDir + "pm-telemetry-locked-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: lockedPath)
+let lockedStore = TelemetryStore(dbURL: URL(fileURLWithPath: lockedPath), maxRows: 1000, retentionDays: 1)
+let holder = openDB(lockedPath)
+check("holder connection opened", holder != nil)
+check("holder acquired the write lock", exec(holder, "BEGIN IMMEDIATE;") == SQLITE_OK)
+lockedStore.record(RequestEvent(host: "locked.example", route: .tunnel, app: "Locked"))
+let lockStart = Date()
+lockedStore.flushNow()
+let lockElapsed = Date().timeIntervalSince(lockStart)
+check("flushNow returns while DB is locked (no hang)", lockElapsed < 8)
+check("locked store reports itself available (prepare succeeded)", !lockedStore.telemetryUnavailable)
+exec(holder, "ROLLBACK;")
+if let holder { sqlite3_close(holder) }
+lockedStore.flushNow()
+if let db = openDB(lockedPath) {
+    check("queued row persisted after the lock was released",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='locked.example'") == 1)
+    sqlite3_close(db)
+} else {
+    check("open locked DB", false)
+}
+
+print("== retention trims to maxRows in bounded chunks ==")
+let capPath = tmpDir + "pm-telemetry-cap-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: capPath)
+let capStore = TelemetryStore(dbURL: URL(fileURLWithPath: capPath), maxRows: 100, retentionDays: 3650)
+for i in 0..<12_000 {
+    capStore.record(RequestEvent(host: "cap\(i).example", route: .direct))
+}
+capStore.flushNow()
+if let db = openDB(capPath) {
+    check("all rows persisted before the trim", queryInt(db, "SELECT COUNT(*) FROM requests") == 12_000)
+    sqlite3_close(db)
+} else {
+    check("open max-rows DB", false)
+}
+capStore.runRetentionNow()
+if let db = openDB(capPath) {
+    check("max-rows trim converges to the cap", queryInt(db, "SELECT COUNT(*) FROM requests") == 100)
+    check("trim keeps the newest rows",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE id > 11900") == 100)
+    sqlite3_close(db)
+} else {
+    check("open trimmed DB", false)
+}
+check("max-rows trim used multiple bounded chunks (12k rows, 5k per batch)",
+      capStore.lastRetentionDeleteChunks >= 2)
+
+print("== retention removes expired rows and keeps recent ones ==")
+let expiryPath = tmpDir + "pm-telemetry-expiry-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: expiryPath)
+let expiryStore = TelemetryStore(dbURL: URL(fileURLWithPath: expiryPath), maxRows: 100_000, retentionDays: 1)
+let oldTs = Int64(Date().timeIntervalSince1970 * 1000) - 3 * 86_400_000
+for i in 0..<20 {
+    expiryStore.record(RequestEvent(ts: oldTs, host: "old\(i).example"))
+}
+for i in 0..<5 {
+    expiryStore.record(RequestEvent(host: "recent\(i).example"))
+}
+expiryStore.flushNow()
+expiryStore.runRetentionNow()
+if let db = openDB(expiryPath) {
+    check("expired rows removed", queryInt(db, "SELECT COUNT(*) FROM requests WHERE host LIKE 'old%'") == 0)
+    check("recent rows kept", queryInt(db, "SELECT COUNT(*) FROM requests WHERE host LIKE 'recent%'") == 5)
+    check("only recent rows remain", queryInt(db, "SELECT COUNT(*) FROM requests") == 5)
+    sqlite3_close(db)
+} else {
+    check("open expiry DB", false)
+}
+
+print("== flushNow checkpoints/truncates the WAL and purge vacuums ==")
+let walPath = tmpDir + "pm-telemetry-wal-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: walPath)
+let walStore = TelemetryStore(dbURL: URL(fileURLWithPath: walPath), maxRows: 1000, retentionDays: 1)
+for i in 0..<200 {
+    walStore.record(RequestEvent(host: "wal\(i).example"))
+}
+walStore.flushNow()
+let walSize = fileSize(walPath + "-wal") ?? 0
+check("WAL truncated after flushNow (\(walSize) bytes)", walSize <= 1_000_000)
+if let db = openDB(walPath) {
+    check("rows persisted before the checkpoint", queryInt(db, "SELECT COUNT(*) FROM requests") == 200)
+    sqlite3_close(db)
+} else {
+    check("open WAL DB", false)
+}
+
+walStore.purge()
+walStore.flushNow() // drains the purge/VACUUM queued ahead of this sync
+let walAfterPurge = fileSize(walPath + "-wal") ?? 0
+check("WAL truncated after user purge (\(walAfterPurge) bytes)", walAfterPurge <= 1_000_000)
+if let db = openDB(walPath) {
+    check("user purge deleted all rows", queryInt(db, "SELECT COUNT(*) FROM requests") == 0)
+    check("VACUUM returned freed pages (freelist 0)", queryInt(db, "PRAGMA freelist_count") == 0)
+    sqlite3_close(db)
+} else {
+    check("open purged DB", false)
+}
+
+print("== hostile retention values are clamped, cutoff cannot overflow ==")
+let hostile = Data(#"{"monitor":{"retentionDays":9223372036854775807,"maxRows":-5}}"#.utf8)
+if let config = try? JSONDecoder().decode(AppConfig.self, from: hostile) {
+    check("huge retentionDays clamped to 3650", config.monitor.retentionDays == 3650)
+    check("negative maxRows clamped to 0", config.monitor.maxRows == 0)
+} else {
+    check("decode hostile monitor settings", false)
+}
+let hugeRows = Data(#"{"monitor":{"maxRows":9223372036854775807}}"#.utf8)
+if let config = try? JSONDecoder().decode(AppConfig.self, from: hugeRows) {
+    check("huge maxRows clamped to 10,000,000", config.monitor.maxRows == 10_000_000)
+} else {
+    check("decode huge maxRows", false)
+}
+let nowMs: Int64 = 1_700_000_000_000
+check("normal cutoff computed",
+      TelemetryStore.retentionCutoffMs(nowMs: nowMs, days: 7) == nowMs - 7 * 86_400_000)
+check("Int.max days falls back to Int64.min without trapping",
+      TelemetryStore.retentionCutoffMs(nowMs: nowMs, days: Int.max) == Int64.min)
+check("cutoff subtraction underflow falls back to Int64.min",
+      TelemetryStore.retentionCutoffMs(nowMs: Int64.min, days: 1) == Int64.min)
+
+print("== unavailable DB path does not crash or hang flushNow ==")
+let missingDir = tmpDir + "pm-telemetry-missing-\(getpid())"
+let missingPath = missingDir + "/telemetry.sqlite"
+try? FileManager.default.removeItem(atPath: missingDir)
+let badStore = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
+check("open failure marks telemetry unavailable", badStore.telemetryUnavailable)
+badStore.record(RequestEvent(host: "nowhere.example"))
+let badStart = Date()
+badStore.flushNow()
+check("flushNow returns promptly with an unavailable DB", Date().timeIntervalSince(badStart) < 3)
+check("store survives the failed flush", badStore.telemetryUnavailable)
+
+print("== live limit change applies without relaunch ==")
+let livePath = tmpDir + "pm-telemetry-live-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: livePath)
+let liveStore = TelemetryStore(dbURL: URL(fileURLWithPath: livePath), maxRows: 500_000, retentionDays: 7)
+let twoDaysAgo = Int64(Date().timeIntervalSince1970 * 1000) - 2 * 86_400_000
+liveStore.record(RequestEvent(ts: twoDaysAgo, host: "old-live.example"))
+liveStore.record(RequestEvent(host: "recent-live.example"))
+liveStore.flushNow()
+liveStore.setLimits(maxRows: 500_000, retentionDays: 1)
+let liveLimits = liveStore.currentLimits()
+check("setLimits is visible on the running store",
+      liveLimits.maxRows == 500_000 && liveLimits.retentionDays == 1)
+liveStore.runRetentionNow()
+if let db = openDB(livePath) {
+    check("lowered retentionDays purges 2-day-old row immediately",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='old-live.example'") == 0)
+    check("recent row survives the new retention window",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='recent-live.example'") == 1)
+    sqlite3_close(db)
+} else {
+    check("open live-limits DB", false)
+}
+
+print("== live maxRows change trims down to the new cap ==")
+let liveCapPath = tmpDir + "pm-telemetry-live-cap-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: liveCapPath)
+let liveCapStore = TelemetryStore(dbURL: URL(fileURLWithPath: liveCapPath), maxRows: 100_000, retentionDays: 3650)
+for i in 0..<50 {
+    liveCapStore.record(RequestEvent(host: "live-cap\(i).example", route: .direct))
+}
+liveCapStore.flushNow()
+liveCapStore.setLimits(maxRows: 10, retentionDays: 3650)
+let capLimits = liveCapStore.currentLimits()
+check("setLimits updates maxRows without reconstruction", capLimits.maxRows == 10)
+liveCapStore.runRetentionNow()
+if let db = openDB(liveCapPath) {
+    check("lowered maxRows converges to 10 rows", queryInt(db, "SELECT COUNT(*) FROM requests") == 10)
+    check("trim keeps the newest rows", queryInt(db, "SELECT COUNT(*) FROM requests WHERE id > 40") == 10)
+    sqlite3_close(db)
+} else {
+    check("open live-cap DB", false)
+}
+liveCapStore.setLimits(maxRows: -5, retentionDays: 999_999)
+let clamped = liveCapStore.currentLimits()
+check("setLimits clamps maxRows to 0...10,000,000", clamped.maxRows == 0)
+check("setLimits clamps retentionDays to 1...3650", clamped.retentionDays == 3650)
+
+for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath] {
+    try? FileManager.default.removeItem(atPath: base)
+    try? FileManager.default.removeItem(atPath: base + "-wal")
+    try? FileManager.default.removeItem(atPath: base + "-shm")
+}
 
 print("")
 if failures == 0 { print("PASS: telemetry"); exit(0) }

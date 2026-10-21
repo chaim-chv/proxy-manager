@@ -1,10 +1,16 @@
 import Foundation
+import os
 import SQLite3
 
 /// Tells SQLite to copy the bound string immediately. `nil`/`SQLITE_STATIC`
 /// would store a raw pointer into a temporary `NSString` that is released before
 /// `sqlite3_step` runs — a use-after-free.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+/// Same subsystem/category as `Log.telemetry`, declared locally so this file
+/// still compiles in the standalone TelemetryHarness (which does not link
+/// `Support/Log.swift`).
+private let telemetryLog = Logger(subsystem: "com.proxymanager.app", category: "telemetry")
 
 struct RequestEvent: Identifiable, Equatable {
     let id: UUID
@@ -130,10 +136,16 @@ final class TelemetryStore: ObservableObject {
     @Published var stats = StatsSnapshot()
 
     private let dbURL: URL
-    private let maxRows: Int
-    private let retentionDays: Int
+    /// Live retention limits, guarded by `lock`. Read as one snapshot by the
+    /// retention pass so a concurrent `setLimits` cannot mix the pair.
+    private var maxRows: Int
+    private var retentionDays: Int
     private var db: OpaquePointer?
     private var insertStmt: OpaquePointer?
+
+    /// Set when the DB could not be opened or the INSERT could not be prepared;
+    /// writes are kept in the retry queue instead of being silently discarded.
+    private(set) var telemetryUnavailable = false
 
     private let dbQueue = DispatchQueue(label: "com.proxymanager.telemetry.db")
     private let lock = NSLock()
@@ -143,6 +155,32 @@ final class TelemetryStore: ObservableObject {
     private var dbAccumulator: [RequestEvent] = []
     private var activeCount = 0
     private var lastPurgeMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
+
+    // Failed batches stay queued (bounded) instead of being dropped on a
+    // transient lock. Guarded by `lock`; SQLite work never runs under it.
+    private var retryBatches: [[RequestEvent]] = []
+    private var retryEventCount = 0
+    private var retryAfterMs: Int64 = 0
+    private var retryDropReported = false
+    private var lastDbErrorLogMs: Int64 = 0
+    private var suppressedDbErrors = 0
+
+    private static let maxRetryBatches = 4
+    private static let maxRetryEvents = 50_000
+    private static let retryBackoffMs: Int64 = 2_000
+
+    /// Rows touched by one trim statement. Bounds the work (and the rollback
+    /// journal) of a single autocommit instead of materialising the whole
+    /// excess in one multi-second `LIMIT -1 OFFSET` delete.
+    private static let trimChunkSize = 5_000
+    /// Safety cap per trim pass (5,000 × 2,000 = 10M rows). A larger backlog is
+    /// left for the next pass and logged rather than monopolising `dbQueue`.
+    private static let trimMaxIterations = 2_000
+
+    /// Test seam: how many bounded DELETE statements the last retention pass
+    /// actually executed. Written on `dbQueue`, so it is safe to read after
+    /// `runRetentionNow()` returns.
+    private(set) var lastRetentionDeleteChunks = 0
 
     private var flusher: DispatchSourceTimer?
 
@@ -154,8 +192,8 @@ final class TelemetryStore: ObservableObject {
 
     init(dbURL: URL, maxRows: Int = 500_000, retentionDays: Int = 7) {
         self.dbURL = dbURL
-        self.maxRows = maxRows
-        self.retentionDays = retentionDays
+        self.maxRows = Self.clampMaxRows(maxRows)
+        self.retentionDays = Self.clampRetentionDays(retentionDays)
         openDatabase()
         createSchema()
         migrateSchema()
@@ -171,13 +209,19 @@ final class TelemetryStore: ObservableObject {
 
     private func openDatabase() {
         if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
-            NSLog("ProxyManager: failed to open telemetry DB: \(String(cString: sqlite3_errmsg(db)))")
+            telemetryUnavailable = true
+            let message = String(cString: sqlite3_errmsg(db))
+            telemetryLog.error("failed to open telemetry DB: \(message, privacy: .public)")
             db = nil
         }
         if let db = db {
+            sqlite3_busy_timeout(db, 2_000)
             sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nil, nil, nil)
             sqlite3_exec(db, "PRAGMA synchronous=NORMAL;", nil, nil, nil)
             sqlite3_exec(db, "PRAGMA cache_size=-8000;", nil, nil, nil)
+            // Cap how much WAL a checkpoint leaves behind. Without this the
+            // `-wal` sidecar grows to the peak write volume and never shrinks.
+            execChecked(db, "PRAGMA journal_size_limit=33554432;", "journal_size_limit pragma")
         }
     }
 
@@ -209,7 +253,7 @@ final class TelemetryStore: ObservableObject {
         -- upgrade. Charts read the `requests` table directly.
         DROP TABLE IF EXISTS minute_stats;
         """
-        sqlite3_exec(db, schema, nil, nil, nil)
+        execChecked(db, schema, "schema creation")
     }
 
     /// Adds columns introduced after the first release to an existing DB.
@@ -230,22 +274,34 @@ final class TelemetryStore: ObservableObject {
         }
         sqlite3_finalize(stmt)
         if !existing.contains("app") {
-            sqlite3_exec(db, "ALTER TABLE requests ADD COLUMN app TEXT;", nil, nil, nil)
+            execChecked(db, "ALTER TABLE requests ADD COLUMN app TEXT;", "app column migration")
         }
         if !existing.contains("app_bundle") {
-            sqlite3_exec(db, "ALTER TABLE requests ADD COLUMN app_bundle TEXT;", nil, nil, nil)
+            execChecked(db, "ALTER TABLE requests ADD COLUMN app_bundle TEXT;", "app_bundle column migration")
         }
     }
 
     private func prepareStatements() {
-        guard let db = db else { return }
+        guard let db = db else {
+            telemetryUnavailable = true
+            return
+        }
         let insertSQL = """
         INSERT INTO requests (ts, scheme, method, host, port, path, route, status,
                               bytes_in, bytes_out, duration_ms, error, src_port,
                               app, app_bundle)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
-        sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil)
+        let rc = sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil)
+        guard rc == SQLITE_OK, insertStmt != nil else {
+            telemetryUnavailable = true
+            if insertStmt != nil {
+                sqlite3_finalize(insertStmt)
+                insertStmt = nil
+            }
+            noteDatabaseFailure("prepare INSERT failed (\(rc)): \(String(cString: sqlite3_errmsg(db)))")
+            return
+        }
     }
 
     private func startFlusher() {
@@ -326,6 +382,8 @@ final class TelemetryStore: ObservableObject {
     // MARK: - Flush (10 Hz, single background thread)
 
     private func flush() {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let canRetry = retriesDue(nowMs: nowMs)
         lock.lock()
         let batch = pending
         let delta = pendingDelta
@@ -333,7 +391,7 @@ final class TelemetryStore: ObservableObject {
         pending.removeAll(keepingCapacity: true)
         pendingDelta = StatsSnapshot()
         dbAccumulator.append(contentsOf: batch)
-        let flushDB = dbAccumulator.count >= Self.dbBatchSize
+        let flushDB = dbAccumulator.count >= Self.dbBatchSize || canRetry
         let dbBatch = flushDB ? dbAccumulator : []
         if flushDB { dbAccumulator.removeAll(keepingCapacity: true) }
 
@@ -344,7 +402,6 @@ final class TelemetryStore: ObservableObject {
 
         // Snapshot live sessions whose row content changed (bytes moved or
         // ≥1 s elapsed so the duration ticks).
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         var updates: [RequestEvent] = []
         for id in sessionOrder {
             guard let s = sessions[id] else { continue }
@@ -435,8 +492,39 @@ final class TelemetryStore: ObservableObject {
     // MARK: - SQLite (batched)
 
     private func insertBatch(_ events: [RequestEvent]) {
-        guard let db = db, let stmt = insertStmt, !events.isEmpty else { return }
-        sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
+        var batches = takeRetries()
+        if !events.isEmpty { batches.append(events) }
+        guard !batches.isEmpty else { return }
+        guard let db = db, let stmt = insertStmt else {
+            let queued = batches.reduce(0) { $0 + $1.count }
+            noteDatabaseFailure("telemetry unavailable (db=\(db != nil), insertStmt=\(insertStmt != nil)); \(queued) event(s) queued for retry")
+            requeue(batches)
+            return
+        }
+        var index = 0
+        while index < batches.count {
+            if insertTransaction(batches[index], db: db, stmt: stmt) {
+                index += 1
+            } else {
+                requeue(Array(batches[index...]))
+                return
+            }
+        }
+        lock.lock()
+        retryDropReported = false
+        lock.unlock()
+    }
+
+    private func insertTransaction(_ events: [RequestEvent], db: OpaquePointer,
+                                   stmt: OpaquePointer) -> Bool {
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            let message = String(cString: sqlite3_errmsg(db))
+            _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            noteDatabaseFailure("BEGIN IMMEDIATE failed, \(events.count) event(s) not written: \(message)")
+            return false
+        }
+        var failed = 0
+        var firstError: String?
         for e in events {
             sqlite3_reset(stmt)
             sqlite3_clear_bindings(stmt)
@@ -456,33 +544,288 @@ final class TelemetryStore: ObservableObject {
             if let app = e.app { bindText(stmt, 14, app) } else { sqlite3_bind_null(stmt, 14) }
             if let bundle = e.appBundle { bindText(stmt, 15, bundle) } else { sqlite3_bind_null(stmt, 15) }
             if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("ProxyManager: telemetry insert failed: \(String(cString: sqlite3_errmsg(db)))")
+                failed += 1
+                if firstError == nil {
+                    firstError = String(cString: sqlite3_errmsg(db))
+                }
             }
         }
-        if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
-            NSLog("ProxyManager: telemetry commit failed: \(String(cString: sqlite3_errmsg(db)))")
+        if failed == 0 {
+            if sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK { return true }
+            let message = String(cString: sqlite3_errmsg(db))
+            let rb = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+            noteDatabaseFailure("COMMIT failed, \(events.count) event(s) rolled back: \(message)\(rollbackSuffix(rb, db: db))")
+            return false
         }
+        let rb = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+        noteDatabaseFailure("\(failed)/\(events.count) INSERT(s) failed; batch rolled back (first error: \(firstError ?? "unknown"))\(rollbackSuffix(rb, db: db))")
+        return false
+    }
+
+    private func rollbackSuffix(_ rc: Int32, db: OpaquePointer) -> String {
+        guard rc != SQLITE_OK else { return "" }
+        return " (ROLLBACK also failed: \(String(cString: sqlite3_errmsg(db))))"
+    }
+
+    /// Logs at most once per minute while failures persist, so a locked or
+    /// corrupt DB cannot flood the unified log. The first failure of a burst is
+    /// always logged; the suppressed count is reported on the next log.
+    private func noteDatabaseFailure(_ message: String) {
+        let now = Self.nowMs()
+        lock.lock()
+        guard now - lastDbErrorLogMs >= 60_000 else {
+            suppressedDbErrors += 1
+            lock.unlock()
+            return
+        }
+        let suppressed = suppressedDbErrors
+        suppressedDbErrors = 0
+        lastDbErrorLogMs = now
+        lock.unlock()
+        if suppressed > 0 {
+            telemetryLog.error("telemetry DB error: \(message, privacy: .public) [\(suppressed, privacy: .public) similar failure(s) suppressed]")
+        } else {
+            telemetryLog.error("telemetry DB error: \(message, privacy: .public)")
+        }
+    }
+
+    @discardableResult
+    private func execChecked(_ db: OpaquePointer, _ sql: String, _ label: String) -> Bool {
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
+            let detail = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
+            sqlite3_free(errorMessage)
+            noteDatabaseFailure("\(label) failed: \(detail)")
+            return false
+        }
+        return true
+    }
+
+    private func takeRetries() -> [[RequestEvent]] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !retryBatches.isEmpty else { return [] }
+        let batches = retryBatches
+        retryBatches.removeAll(keepingCapacity: true)
+        retryEventCount = 0
+        retryAfterMs = 0
+        return batches
+    }
+
+    private func requeue(_ batches: [[RequestEvent]]) {
+        let incoming = batches.filter { !$0.isEmpty }
+        guard !incoming.isEmpty else { return }
+        var dropped = 0
+        lock.lock()
+        retryBatches.append(contentsOf: incoming)
+        for batch in incoming { retryEventCount += batch.count }
+        while retryBatches.count > Self.maxRetryBatches || retryEventCount > Self.maxRetryEvents {
+            var oldest = retryBatches.removeFirst()
+            let excess = retryEventCount - Self.maxRetryEvents
+            if excess > 0 && oldest.count > excess {
+                oldest.removeFirst(excess)
+                dropped += excess
+                retryEventCount -= excess
+                retryBatches.insert(oldest, at: 0)
+            } else {
+                dropped += oldest.count
+                retryEventCount -= oldest.count
+            }
+        }
+        retryAfterMs = Self.nowMs() + Self.retryBackoffMs
+        let reportDrop = dropped > 0 && !retryDropReported
+        if reportDrop { retryDropReported = true }
+        lock.unlock()
+        if reportDrop {
+            telemetryLog.error("telemetry retry queue saturated; dropped \(dropped, privacy: .public) oldest event(s)")
+        }
+    }
+
+    private func retriesDue(nowMs: Int64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !retryBatches.isEmpty && nowMs >= retryAfterMs
+    }
+
+    private static func nowMs() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
     }
 
     private func bindText(_ stmt: OpaquePointer, _ idx: Int32, _ text: String) {
         sqlite3_bind_text(stmt, idx, (text as NSString).utf8String, -1, SQLITE_TRANSIENT)
     }
 
+    /// Safe even for an in-memory hostile `days`: on overflow the cutoff is
+    /// `Int64.min`, which purges rows older than any representable timestamp.
+    static func retentionCutoffMs(nowMs: Int64, days: Int) -> Int64 {
+        let safeDays = max(1, days)
+        let (span, overflow) = Int64(clamping: safeDays).multipliedReportingOverflow(by: 86_400_000)
+        guard !overflow else { return Int64.min }
+        let (cutoff, underflow) = nowMs.subtractingReportingOverflow(span)
+        return underflow ? Int64.min : cutoff
+    }
+
+    // Same ranges as `MonitorSettings` decoding (TM-10), applied again at the
+    // setter so a runtime update cannot introduce an out-of-range limit.
+    private static func clampMaxRows(_ value: Int) -> Int {
+        min(max(value, 0), 10_000_000)
+    }
+
+    private static func clampRetentionDays(_ value: Int) -> Int {
+        min(max(value, 1), 3_650)
+    }
+
+    /// Applies new retention limits to the running store (no relaunch needed).
+    /// The values are clamped, and a real change forces the next flusher tick
+    /// (≤0.1 s) to run a retention pass. A no-op commit does not, so dragging an
+    /// unrelated setting cannot queue a trim pass per commit. No SQLite work
+    /// happens on the caller's thread.
+    func setLimits(maxRows: Int, retentionDays: Int) {
+        let cap = Self.clampMaxRows(maxRows)
+        let days = Self.clampRetentionDays(retentionDays)
+        lock.lock()
+        let changed = self.maxRows != cap || self.retentionDays != days
+        self.maxRows = cap
+        self.retentionDays = days
+        if changed {
+            // `maybePurge` treats a very old timestamp as due immediately.
+            lastPurgeMs = 0
+        }
+        lock.unlock()
+    }
+
+    /// Atomic snapshot of the active limits (thread-safe diagnostic/test seam).
+    func currentLimits() -> (maxRows: Int, retentionDays: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (maxRows, retentionDays)
+    }
+
     private func maybePurge(nowMs: Int64) {
         // Retention purge once every 5 minutes. `nowMs` is reused from `flush`
         // so the 10 Hz tick does not pay for an extra `Date()` every time.
-        guard nowMs - lastPurgeMs > 300_000 else { return }
-        lastPurgeMs = nowMs
-        dbQueue.async { [weak self] in
-            guard let self = self, let db = self.db else { return }
-            let days = max(1, self.retentionDays)
-            let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(days) * 86_400_000
-            var sql = "DELETE FROM requests WHERE ts < \(cutoff);"
-            sqlite3_exec(db, sql, nil, nil, nil)
-            if self.maxRows > 0 {
-                sql = "DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY ts DESC, id DESC LIMIT -1 OFFSET \(self.maxRows));"
-                sqlite3_exec(db, sql, nil, nil, nil)
+        lock.lock()
+        let due = nowMs - lastPurgeMs > 300_000
+        if due { lastPurgeMs = nowMs }
+        lock.unlock()
+        guard due else { return }
+        dbQueue.async { [weak self] in self?.purgeExpiredOnQueue() }
+    }
+
+    /// Test seam: run the periodic retention/max-rows pass immediately instead
+    /// of waiting for the 5-minute cadence. Resets the cadence so the next
+    /// natural pass is not skipped; production timing is otherwise unchanged.
+    func runRetentionNow() {
+        lock.lock()
+        lastPurgeMs = Self.nowMs()
+        lock.unlock()
+        dbQueue.sync { purgeExpiredOnQueue() }
+    }
+
+    /// Runs on `dbQueue` with a live connection. Checkpoints only when the pass
+    /// actually deleted something, so an idle pass does not touch the WAL.
+    private func purgeExpiredOnQueue() {
+        lastRetentionDeleteChunks = 0
+        guard let db = db else { return }
+        if runRetentionPass(db: db) {
+            checkpointTruncate(db, "retention purge")
+        }
+    }
+
+    /// One retention pass: age first, then the row cap. Must run on `dbQueue`.
+    /// Returns true when at least one row was deleted.
+    private func runRetentionPass(db: OpaquePointer) -> Bool {
+        // One locked snapshot: a `setLimits` racing this pass either applies
+        // entirely before (this pass uses the new pair) or entirely after.
+        let limits = currentLimits()
+        let cutoff = Self.retentionCutoffMs(nowMs: Self.nowMs(), days: limits.retentionDays)
+        var deleted = deleteOlderThan(cutoff, db: db, label: "retention purge")
+        let cap = limits.maxRows
+        if cap > 0 {
+            deleted = trimToMaxRows(cap, db: db) || deleted
+        }
+        return deleted
+    }
+
+    /// Chunked `DELETE ... WHERE ts < cutoff`. Stops at the first failed
+    /// statement (locked/disk-full) so a bad DB cannot spin the DB queue.
+    /// Returns true when at least one row was deleted.
+    private func deleteOlderThan(_ cutoffMs: Int64, db: OpaquePointer, label: String) -> Bool {
+        var deletedAny = false
+        for _ in 0..<Self.trimMaxIterations {
+            let sql = """
+            DELETE FROM requests WHERE id IN (
+                SELECT id FROM requests WHERE ts < \(cutoffMs) LIMIT \(Self.trimChunkSize)
+            );
+            """
+            guard execChecked(db, sql, label) else { return deletedAny }
+            guard sqlite3_changes(db) > 0 else { return deletedAny }
+            deletedAny = true
+            lastRetentionDeleteChunks += 1
+        }
+        telemetryLog.error("\(label, privacy: .public) hit the \(Self.trimMaxIterations, privacy: .public)-chunk cap; excess rows remain for the next pass")
+        return deletedAny
+    }
+
+    /// Chunked trim down to `maxRows`, keeping the newest `(ts, id)` rows. The
+    /// boundary is resolved once; every batch deletes only rows strictly older
+    /// than it, so the trim is resumable across passes.
+    private func trimToMaxRows(_ maxRows: Int, db: OpaquePointer) -> Bool {
+        var boundary: (ts: Int64, id: Int64)?
+        var stmt: OpaquePointer?
+        let boundarySQL = "SELECT ts, id FROM requests ORDER BY ts DESC, id DESC LIMIT 1 OFFSET \(maxRows);"
+        if sqlite3_prepare_v2(db, boundarySQL, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+            let rc = sqlite3_step(s)
+            if rc == SQLITE_ROW {
+                boundary = (sqlite3_column_int64(s, 0), sqlite3_column_int64(s, 1))
+            } else if rc != SQLITE_DONE {
+                noteDatabaseFailure("max-rows boundary query failed (\(rc)): \(String(cString: sqlite3_errmsg(db)))")
             }
+        } else {
+            noteDatabaseFailure("max-rows boundary query failed to prepare: \(String(cString: sqlite3_errmsg(db)))")
+        }
+        sqlite3_finalize(stmt)
+        guard let b = boundary else { return false }
+
+        var deletedAny = false
+        for _ in 0..<Self.trimMaxIterations {
+            // The boundary row itself is outside the newest `maxRows`, so it is
+            // deleted too (`<=`); only strictly newer rows survive.
+            let sql = """
+            DELETE FROM requests WHERE id IN (
+                SELECT id FROM requests
+                WHERE ts < \(b.ts) OR (ts = \(b.ts) AND id <= \(b.id))
+                LIMIT \(Self.trimChunkSize)
+            );
+            """
+            guard execChecked(db, sql, "max-rows purge") else { return deletedAny }
+            guard sqlite3_changes(db) > 0 else { return deletedAny }
+            deletedAny = true
+            lastRetentionDeleteChunks += 1
+        }
+        telemetryLog.error("max-rows purge hit the \(Self.trimMaxIterations, privacy: .public)-chunk cap; excess rows remain for the next pass")
+        return deletedAny
+    }
+
+    /// `TRUNCATE` returns the WAL to the filesystem instead of leaving stale
+    /// frames behind. A busy checkpoint is logged (throttled) and ignored: the
+    /// data is already durable and the next checkpoint retries.
+    private func checkpointTruncate(_ db: OpaquePointer, _ label: String) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA wal_checkpoint(TRUNCATE);", -1, &stmt, nil) == SQLITE_OK,
+              let s = stmt else {
+            let message = String(cString: sqlite3_errmsg(db))
+            sqlite3_finalize(stmt)
+            noteDatabaseFailure("\(label) WAL checkpoint failed to prepare: \(message)")
+            return
+        }
+        let rc = sqlite3_step(s)
+        let busy = rc == SQLITE_ROW ? sqlite3_column_int(s, 0) : 0
+        sqlite3_finalize(stmt)
+        if rc != SQLITE_ROW && rc != SQLITE_DONE {
+            noteDatabaseFailure("\(label) WAL checkpoint failed (\(rc)): \(String(cString: sqlite3_errmsg(db)))")
+        } else if busy > 0 {
+            noteDatabaseFailure("\(label) WAL checkpoint blocked by a reader/writer; WAL left in place")
         }
     }
 
@@ -498,8 +841,12 @@ final class TelemetryStore: ObservableObject {
         pending.removeAll(keepingCapacity: true)
         lock.unlock()
         let all = accumulated + buffered
-        guard !all.isEmpty else { return }
-        dbQueue.sync { insertBatch(all) }
+        dbQueue.sync {
+            insertBatch(all)
+            if let db = db {
+                checkpointTruncate(db, "quit")
+            }
+        }
     }
 
     func purge() {
@@ -511,6 +858,10 @@ final class TelemetryStore: ObservableObject {
         pendingFinishes.removeAll()
         sessions.removeAll()
         sessionOrder.removeAll()
+        retryBatches.removeAll()
+        retryEventCount = 0
+        retryAfterMs = 0
+        retryDropReported = false
         lock.unlock()
         DispatchQueue.main.async { [weak self] in
             self?.recentRequests = []
@@ -519,7 +870,14 @@ final class TelemetryStore: ObservableObject {
         }
         dbQueue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
-            sqlite3_exec(db, "DELETE FROM requests;", nil, nil, nil)
+            guard self.execChecked(db, "DELETE FROM requests;", "history purge") else { return }
+            self.checkpointTruncate(db, "history purge")
+            // `DELETE` only frees pages for reuse; `VACUUM` is what returns the
+            // space to the filesystem. User-initiated only because it rewrites
+            // the whole DB and needs ~2× its size in free space.
+            if self.execChecked(db, "VACUUM;", "history vacuum") {
+                self.checkpointTruncate(db, "history vacuum")
+            }
         }
     }
 

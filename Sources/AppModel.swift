@@ -435,6 +435,8 @@ final class AppModel: ObservableObject {
         runtime.recordPaths = config.monitor.recordPaths
         runtime.recordAppInTelemetry = config.apps.enabled && config.apps.recordInTelemetry
         proxyServer.update(settings: runtime)
+        telemetry.setLimits(maxRows: config.monitor.maxRows,
+                            retentionDays: config.monitor.retentionDays)
         proxyServer.routingEngine.update(rules: config.targets,
                                          appRules: config.apps.rules,
                                          appEnabled: config.apps.enabled,

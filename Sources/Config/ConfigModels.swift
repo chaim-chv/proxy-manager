@@ -327,8 +327,10 @@ struct MonitorSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        retentionDays = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 7
-        maxRows = try c.decodeIfPresent(Int.self, forKey: .maxRows) ?? 500_000
+        let decodedRetention = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 7
+        retentionDays = min(max(decodedRetention, 1), 3_650)
+        let decodedMaxRows = try c.decodeIfPresent(Int.self, forKey: .maxRows) ?? 500_000
+        maxRows = min(max(decodedMaxRows, 0), 10_000_000)
         recordPaths = try c.decodeIfPresent(Bool.self, forKey: .recordPaths) ?? true
     }
 }
