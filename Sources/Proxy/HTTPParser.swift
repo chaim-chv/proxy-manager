@@ -92,12 +92,35 @@ struct HTTPRequest {
         isConnect ? "https" : (target.hasPrefix("https://") ? "https" : "http")
     }
 
+    /// Authority to emit as `Host` after rewriting to origin-form.
+    ///
+    /// `host` is deliberately host-only, so using it here silently dropped a
+    /// non-default port and IPv6 brackets. Absolute-form requests are
+    /// normalized from the URL; origin-form requests keep the client's
+    /// authority verbatim.
+    var hostHeader: String {
+        if isConnect { return target }
+        if target.hasPrefix("http://") || target.hasPrefix("https://") {
+            if let url = URL(string: target), let urlHost = url.host, !urlHost.isEmpty {
+                var authority = urlHost.contains(":") ? "[\(urlHost)]" : urlHost
+                let defaultPort = scheme == "https" ? 443 : 80
+                if let p = url.port, p != defaultPort { authority += ":\(p)" }
+                return authority
+            }
+        }
+        if let h = headerNamed("host") {
+            let trimmed = h.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return host
+    }
+
     var path: String {
         if target.hasPrefix("http://") || target.hasPrefix("https://") {
             if let url = URL(string: target) {
-                var p = url.path
+                var p = url.path.isEmpty ? "/" : url.path
                 if let q = url.query { p += "?" + q }
-                return p.isEmpty ? "/" : p
+                return p
             }
         }
         return target
@@ -161,7 +184,7 @@ enum HTTPParser {
             if lk == "host" { continue }
             lines.append("\(key): \(value)")
         }
-        lines.append("Host: \(request.host)")
+        lines.append("Host: \(request.hostHeader)")
         if isUpgrade {
             lines.append("Connection: Upgrade")
             lines.append("Upgrade: \(request.headerNamed("upgrade") ?? "websocket")")

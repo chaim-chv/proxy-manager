@@ -118,6 +118,38 @@ let plainOut = rewrite(plainReq)
 check("plain request still strips Upgrade", !plainOut.lowercased().contains("upgrade:"))
 check("plain request still forces Connection: close", plainOut.lowercased().contains("connection: close"))
 
+// The rewritten Host must be the full authority: `request.host` is host-only,
+// so using it dropped non-default ports and IPv6 brackets (PS-04).
+func hostLines(_ raw: String) -> [String] {
+    raw.components(separatedBy: "\r\n").filter { $0.lowercased().hasPrefix("host:") }
+}
+let portReq = "GET http://example.com:8080/api?x=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n"
+let portOut = rewrite(portReq)
+check("absolute non-default port: request line", portOut.hasPrefix("GET /api?x=1 HTTP/1.1\r\n"))
+check("absolute non-default port: exactly one Host", hostLines(portOut) == ["Host: example.com:8080"])
+
+let http80Out = rewrite("GET http://example.com:80/x HTTP/1.1\r\nHost: example.com:80\r\n\r\n")
+check("http default port 80 omitted from Host", hostLines(http80Out) == ["Host: example.com"])
+let https443Out = rewrite("GET https://example.com:443/x HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+check("https default port 443 omitted from Host", hostLines(https443Out) == ["Host: example.com"])
+let httpsPortOut = rewrite("GET https://example.com:8443/x HTTP/1.1\r\nHost: example.com:8443\r\n\r\n")
+check("https non-default port kept in Host", hostLines(httpsPortOut) == ["Host: example.com:8443"])
+
+let ipv6Out = rewrite("GET http://[::1]:8080/x HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n")
+check("IPv6 absolute-form Host keeps brackets+port", hostLines(ipv6Out) == ["Host: [::1]:8080"])
+let ipv6DefaultOut = rewrite("GET http://[::1]/x HTTP/1.1\r\nHost: [::1]\r\n\r\n")
+check("IPv6 absolute-form default port Host keeps brackets", hostLines(ipv6DefaultOut) == ["Host: [::1]"])
+
+let originPortOut = rewrite("GET /x HTTP/1.1\r\nHost: example.com:8080\r\n\r\n")
+check("origin-form preserves client Host verbatim", hostLines(originPortOut) == ["Host: example.com:8080"])
+check("origin-form request line unchanged", originPortOut.hasPrefix("GET /x HTTP/1.1\r\n"))
+let originIPv6Out = rewrite("GET /x HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n")
+check("origin-form preserves bracketed IPv6 Host", hostLines(originIPv6Out) == ["Host: [::1]:8080"])
+
+let queryOnlyOut = rewrite("GET http://example.com?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n")
+check("query-only absolute URL keeps slash", queryOnlyOut.hasPrefix("GET /?x=1 HTTP/1.1\r\n"))
+check("query-only absolute URL Host", hostLines(queryOnlyOut) == ["Host: example.com"])
+
 check("isUpgrade true for Connection: Upgrade", parsed(wsReq)?.isUpgrade == true)
 check("isUpgrade true when Upgrade token leads the list",
       parsed("GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, keep-alive\r\nUpgrade: websocket\r\n\r\n")?.isUpgrade == true)
