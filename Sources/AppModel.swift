@@ -207,7 +207,8 @@ final class AppModel: ObservableObject {
                     WatchdogController.arm(port: port)
                 }
                 try self.ensureSnapshotCovers(services)
-                try self.systemProxyManager.applyProxy(services: services, port: port)
+                try self.systemProxyManager.applyProxy(services: services, port: port,
+                                                       host: self.systemProxyHost(bindHost))
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
             } catch {
@@ -268,7 +269,7 @@ final class AppModel: ObservableObject {
                 throw NSError(domain: "ProxyManager", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "cannot determine the current system proxy state; refusing to change it without a recovery snapshot"])
             }
-            let captured = systemProxyManager.captureSnapshot(services: services)
+            let captured = try systemProxyManager.captureSnapshot(services: services)
             guard !captured.isEmpty else {
                 throw NSError(domain: "ProxyManager", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "cannot capture your original system proxy settings; refusing to change the proxy"])
@@ -281,7 +282,7 @@ final class AppModel: ObservableObject {
         let known = Set((snapshot ?? [:]).keys)
         let added = services.filter { !known.contains($0) }
         guard !added.isEmpty else { return }
-        let captured = systemProxyManager.captureSnapshot(services: added)
+        let captured = try systemProxyManager.captureSnapshot(services: added)
         guard !captured.isEmpty else { return }
         var merged = snapshot ?? [:]
         for (svc, state) in captured { merged[svc] = state }
@@ -321,6 +322,16 @@ final class AppModel: ObservableObject {
         case .on, .degraded: disable()
         default: break
         }
+    }
+
+    /// The host the system proxy must point at to reach the local listener.
+    /// A loopback or wildcard bind is reachable on `127.0.0.1`; a specific
+    /// non-loopback bind is only reachable at that address (the listener bound
+    /// it successfully, so it is local and `networksetup` accepts it).
+    private func systemProxyHost(_ bindHost: String) -> String {
+        let trimmed = bindHost.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "0.0.0.0" || trimmed == "::" { return "127.0.0.1" }
+        return trimmed
     }
 
     func enable() {
@@ -372,7 +383,8 @@ final class AppModel: ObservableObject {
                 // through (some services already modified), so the catch below must
                 // roll back whenever we've started touching the system proxy.
                 touchedSystemProxy = true
-                try self.systemProxyManager.applyProxy(services: services, port: port)
+                try self.systemProxyManager.applyProxy(services: services, port: port,
+                                                       host: self.systemProxyHost(bindHost))
 
                 if cfg.system.injectShellEnv {
                     self.shellEnvInjector.writeEnvFile(port: port, bindHost: bindHost, tunnelHost: cfg.tunnel.effectiveHost)
@@ -621,7 +633,8 @@ final class AppModel: ObservableObject {
                 WatchdogController.installIfNeeded()
                 WatchdogController.arm(port: port)
             }
-            try systemProxyManager.applyProxy(services: services, port: port)
+            try systemProxyManager.applyProxy(services: services, port: port,
+                                              host: systemProxyHost(bindHost))
             appliedPort = port
             appliedBindHost = bindHost
         } catch {
@@ -637,7 +650,8 @@ final class AppModel: ObservableObject {
                     // Never apply an empty list: `services` was verified
                     // non-empty before the rebind started.
                     try ensureSnapshotCovers(services)
-                    try systemProxyManager.applyProxy(services: services, port: oldPort)
+                    try systemProxyManager.applyProxy(services: services, port: oldPort,
+                                                      host: systemProxyHost(oldBindHost))
                     if watchdog { WatchdogController.arm(port: oldPort) }
                     appliedPort = oldPort
                     appliedBindHost = oldBindHost

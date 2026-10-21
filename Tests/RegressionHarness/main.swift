@@ -525,6 +525,25 @@ check("shell metacharacter rejected", !NetworksetupCommands.isValidService("svc;
 check("empty rejected", !NetworksetupCommands.isValidService(""))
 check("backtick rejected", !NetworksetupCommands.isValidService("a`b`"))
 
+print("== system proxy host (LC-11) ==")
+// The system proxy must point at the host the listener actually bound. A bare
+// loopback apply against a LAN listener sends browser/system traffic to a dead
+// port while the UI still reports ON.
+let lanApply = NetworksetupCommands.applyProxy(services: ["Wi-Fi"], port: 8888, host: "192.168.1.10")
+check("apply uses the configured host (web)",
+      lanApply.contains(["-setwebproxy", "Wi-Fi", "192.168.1.10", "8888"]))
+check("apply uses the configured host (secure)",
+      lanApply.contains(["-setsecurewebproxy", "Wi-Fi", "192.168.1.10", "8888"]))
+let defaultApply = NetworksetupCommands.applyProxy(services: ["Wi-Fi"], port: 8888)
+check("apply defaults to loopback (web)",
+      defaultApply.contains(["-setwebproxy", "Wi-Fi", "127.0.0.1", "8888"]))
+check("apply defaults to loopback (secure)",
+      defaultApply.contains(["-setsecurewebproxy", "Wi-Fi", "127.0.0.1", "8888"]))
+check("default apply never emits the non-loopback host",
+      !defaultApply.contains(["-setwebproxy", "Wi-Fi", "192.168.1.10", "8888"]))
+check("apply keeps the bypass list",
+      lanApply.contains(["-setproxybypassdomains", "Wi-Fi"] + NetworksetupCommands.bypass))
+
 print("== Snapshot validation (PAC) ==")
 var s = ServiceProxyState()
 s.webEnabled = true
@@ -560,6 +579,91 @@ let oldDecoded = try? JSONDecoder().decode(SystemProxySnapshot.self, from: oldSn
 check("old snapshot (no bypassDomains) decodes", oldDecoded != nil)
 check("old snapshot PAC '(null)' normalized to empty", oldDecoded?["Wi-Fi"]?.pacURL == "")
 check("old snapshot bypass defaults empty", oldDecoded?["Wi-Fi"]?.bypassDomains.isEmpty == true)
+check("old snapshot web auth defaults false", oldDecoded?["Wi-Fi"]?.webAuthenticated == false)
+check("old snapshot secure auth defaults false", oldDecoded?["Wi-Fi"]?.secureAuthenticated == false)
+check("old snapshot auto-discovery defaults false", oldDecoded?["Wi-Fi"]?.autoDiscoveryEnabled == false)
+
+print("== Restore fidelity (LC-16) ==")
+
+// An originally empty bypass list must clear the app's bypass entries, using
+// the documented `networksetup` form for "no domains".
+let emptyBypassCmds = NetworksetupCommands.restore(snapshot: ["Wi-Fi": ServiceProxyState()])
+check("empty bypass clears the list",
+      emptyBypassCmds.contains(["-setproxybypassdomains", "Wi-Fi", "Empty"]))
+check("non-empty bypass restored verbatim",
+      NetworksetupCommands.restore(snapshot: ["Wi-Fi": {
+          var st = ServiceProxyState()
+          st.bypassDomains = ["*.local", "10.0.0.0/8"]
+          return st
+      }()]).contains(["-setproxybypassdomains", "Wi-Fi", "*.local", "10.0.0.0/8"]))
+
+// PAC enabled with no URL must never be enabled (that breaks connectivity) and
+// must not emit a URL command at all.
+var pacNoURL = ServiceProxyState()
+pacNoURL.pacEnabled = true
+let pacNoURLCmds = NetworksetupCommands.restore(snapshot: ["Wi-Fi": pacNoURL])
+check("PAC on with empty URL is disabled",
+      pacNoURLCmds.contains(["-setautoproxystate", "Wi-Fi", "off"]))
+check("PAC on with empty URL sets no URL",
+      !pacNoURLCmds.contains(where: { $0.first == "-setautoproxyurl" }))
+
+// PAC enabled with a valid URL restores the URL and turns PAC on.
+var pacURLState = ServiceProxyState()
+pacURLState.pacEnabled = true
+pacURLState.pacURL = "http://pac.corp/proxy.pac"
+let pacURLCmds = NetworksetupCommands.restore(snapshot: ["Wi-Fi": pacURLState])
+check("PAC valid URL restored",
+      pacURLCmds.contains(["-setautoproxyurl", "Wi-Fi", "http://pac.corp/proxy.pac"]))
+check("PAC valid URL enabled",
+      pacURLCmds.contains(["-setautoproxystate", "Wi-Fi", "on"]))
+
+// A valid but disabled PAC URL is restored without turning PAC on.
+var pacOffState = ServiceProxyState()
+pacOffState.pacURL = "https://pac.corp/proxy.pac"
+let pacOffCmds = NetworksetupCommands.restore(snapshot: ["Wi-Fi": pacOffState])
+check("disabled PAC URL restored",
+      pacOffCmds.contains(["-setautoproxyurl", "Wi-Fi", "https://pac.corp/proxy.pac"]))
+check("disabled PAC stays off",
+      pacOffCmds.contains(["-setautoproxystate", "Wi-Fi", "off"]))
+check("non-HTTP PAC URL is not applied",
+      !NetworksetupCommands.restore(snapshot: ["Wi-Fi": {
+          var st = ServiceProxyState()
+          st.pacURL = "ftp://pac.corp/proxy.pac"
+          return st
+      }()]).contains(where: { $0.first == "-setautoproxyurl" }))
+
+// Auto Proxy Discovery must be restored both ways.
+var discoveryOn = ServiceProxyState()
+discoveryOn.autoDiscoveryEnabled = true
+check("auto-discovery on restored",
+      NetworksetupCommands.restore(snapshot: ["Wi-Fi": discoveryOn])
+        .contains(["-setproxyautodiscovery", "Wi-Fi", "on"]))
+check("auto-discovery off restored",
+      NetworksetupCommands.restore(snapshot: ["Wi-Fi": ServiceProxyState()])
+        .contains(["-setproxyautodiscovery", "Wi-Fi", "off"]))
+
+// The authenticated-proxy flag must round-trip on web/secure commands.
+var authState = ServiceProxyState()
+authState.webEnabled = true
+authState.webServer = "proxy.corp"
+authState.webPort = "3128"
+authState.webAuthenticated = true
+authState.secureEnabled = true
+authState.secureServer = "proxy.corp"
+authState.securePort = "3129"
+authState.secureAuthenticated = false
+let authCmds = NetworksetupCommands.restore(snapshot: ["Wi-Fi": authState])
+check("web auth on restored",
+      authCmds.contains(["-setwebproxy", "Wi-Fi", "proxy.corp", "3128", "on"]))
+check("secure auth off restored",
+      authCmds.contains(["-setsecurewebproxy", "Wi-Fi", "proxy.corp", "3129", "off"]))
+check("auth flags survive the XPC dictionary round-trip",
+      ServiceProxyState(dictionary: authState.dictionary).webAuthenticated
+      && !ServiceProxyState(dictionary: authState.dictionary).secureAuthenticated)
+var discoveryRoundTrip = ServiceProxyState()
+discoveryRoundTrip.autoDiscoveryEnabled = true
+check("auto-discovery survives the XPC dictionary round-trip",
+      ServiceProxyState(dictionary: discoveryRoundTrip.dictionary).autoDiscoveryEnabled)
 
 print("== Missing-service tolerance ==")
 // A deleted USB/dock/VPN service makes `networksetup` exit 8 with this text.
@@ -579,10 +683,13 @@ zetaState.webServer = "proxy.corp"
 zetaState.webPort = "3128"
 let twoServiceSnapshot: SystemProxySnapshot = ["Zeta": zetaState, "Alpha": ServiceProxyState()]
 let orderedRestore = NetworksetupCommands.restore(snapshot: twoServiceSnapshot)
+let lastAlphaIndex = orderedRestore.lastIndex { $0.count > 1 && $0[1] == "Alpha" }
+let firstZetaIndex = orderedRestore.firstIndex { $0.count > 1 && $0[1] == "Zeta" }
 check("restore deterministic: Alpha commands first",
-      orderedRestore.prefix(3).map { $0.count > 1 ? $0[1] : "" } == ["Alpha", "Alpha", "Alpha"])
-check("restore deterministic: Zeta follows Alpha",
-      orderedRestore.count > 3 && orderedRestore[3].count > 1 && orderedRestore[3][1] == "Zeta")
+      lastAlphaIndex != nil && firstZetaIndex != nil && lastAlphaIndex! < firstZetaIndex!)
+check("restore deterministic: every service present",
+      orderedRestore.contains { $0.count > 1 && $0[1] == "Alpha" }
+      && orderedRestore.contains { $0.count > 1 && $0[1] == "Zeta" })
 
 // Filtering to still-existing services must keep a disabled service (the `*`
 // prefix from -listallnetworkservices is cosmetic) and drop a deleted one.

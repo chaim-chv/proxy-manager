@@ -3,9 +3,13 @@ import Foundation
 /// The object exported over XPC. Runs as root (LaunchDaemon), so `networksetup`
 /// needs no per-call authorization. All arguments are validated before use.
 final class HelperService: NSObject, ProxyManagerHelperProtocol {
-    func applyProxy(services: [String], port: Int, withReply reply: @escaping (Bool, String?) -> Void) {
+    func applyProxy(services: [String], port: Int, host: String, withReply reply: @escaping (Bool, String?) -> Void) {
         guard port >= 1 && port <= 65535 else {
             reply(false, "invalid port")
+            return
+        }
+        guard NetworksetupCommands.isValidProxyServer(host) else {
+            reply(false, "invalid proxy host")
             return
         }
         let valid = services.filter(NetworksetupCommands.isValidService)
@@ -13,7 +17,7 @@ final class HelperService: NSObject, ProxyManagerHelperProtocol {
             reply(false, "no valid network services")
             return
         }
-        let result = run(NetworksetupCommands.applyProxy(services: valid, port: port))
+        let result = run(NetworksetupCommands.applyProxy(services: valid, port: port, host: host))
         reply(result.0, result.1)
     }
 

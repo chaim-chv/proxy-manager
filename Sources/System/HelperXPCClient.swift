@@ -27,9 +27,9 @@ final class HelperXPCClient {
         try daemon.register()
     }
 
-    func applyProxy(services: [String], port: Int) throws {
+    func applyProxy(services: [String], port: Int, host: String) throws {
         try withProxy { proxy, state in
-            try sync(state) { proxy.applyProxy(services: services, port: port, withReply: $0) }
+            try sync(state) { proxy.applyProxy(services: services, port: port, host: host, withReply: $0) }
         }
     }
 

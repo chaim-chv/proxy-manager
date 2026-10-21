@@ -53,27 +53,35 @@ final class SystemProxyManager {
             .filter { !$0.isEmpty }
     }
 
-    func captureSnapshot(services: [String]) -> SystemProxySnapshot {
+    /// Captures the original proxy state for every service that is about to be
+    /// proxied.
+    ///
+    /// Every field is required: a failed read must abort the capture rather than
+    /// record a defaulted `off`/empty state, because restoring that later would
+    /// turn the user's working proxy off.
+    func captureSnapshot(services: [String]) throws -> SystemProxySnapshot {
         var snapshot = SystemProxySnapshot()
         for svc in services {
+            guard let web = runRead(["-getwebproxy", svc]),
+                  let sec = runRead(["-getsecurewebproxy", svc]),
+                  let pac = runRead(["-getautoproxyurl", svc]),
+                  let discovery = runRead(["-getproxyautodiscovery", svc]),
+                  let bypass = runRead(["-getproxybypassdomains", svc]) else {
+                throw SocketError.message("cannot read the current proxy settings for \(svc); refusing to capture a partial snapshot")
+            }
             var state = ServiceProxyState()
-            if let web = runRead(["-getwebproxy", svc]) {
-                parseProxyOutput(web, enabled: &state.webEnabled, server: &state.webServer, port: &state.webPort)
+            parseProxyOutput(web, enabled: &state.webEnabled, server: &state.webServer,
+                             port: &state.webPort, authenticated: &state.webAuthenticated)
+            parseProxyOutput(sec, enabled: &state.secureEnabled, server: &state.secureServer,
+                             port: &state.securePort, authenticated: &state.secureAuthenticated)
+            state.pacEnabled = pac.contains(where: { $0.hasPrefix("Enabled:") && $0.lowercased().contains("yes") })
+            for line in pac where line.hasPrefix("URL:") {
+                state.pacURL = ServiceProxyState.normalizePAC(String(line.dropFirst("URL:".count)))
             }
-            if let sec = runRead(["-getsecurewebproxy", svc]) {
-                parseProxyOutput(sec, enabled: &state.secureEnabled, server: &state.secureServer, port: &state.securePort)
-            }
-            if let pac = runRead(["-getautoproxyurl", svc]) {
-                state.pacEnabled = pac.contains(where: { $0.hasPrefix("Enabled:") && $0.lowercased().contains("yes") })
-                for line in pac where line.hasPrefix("URL:") {
-                    state.pacURL = ServiceProxyState.normalizePAC(String(line.dropFirst("URL:".count)))
-                }
-            }
-            if let bypass = runRead(["-getproxybypassdomains", svc]) {
-                state.bypassDomains = bypass
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty && !$0.lowercased().hasPrefix("there aren't any") }
-            }
+            state.autoDiscoveryEnabled = parseAutoDiscovery(discovery)
+            state.bypassDomains = bypass
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !$0.lowercased().hasPrefix("there aren't any") }
             snapshot[svc] = state
         }
         return snapshot
@@ -106,7 +114,8 @@ final class SystemProxyManager {
         return statePointsAtLocalhost(lines, port: port) ? .ours : .clean
     }
 
-    private func parseProxyOutput(_ lines: [String], enabled: inout Bool, server: inout String, port: inout String) {
+    private func parseProxyOutput(_ lines: [String], enabled: inout Bool, server: inout String,
+                                  port: inout String, authenticated: inout Bool) {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("Enabled:") {
@@ -115,18 +124,36 @@ final class SystemProxyManager {
                 server = String(trimmed.dropFirst("Server:".count)).trimmingCharacters(in: .whitespaces)
             } else if trimmed.hasPrefix("Port:") {
                 port = String(trimmed.dropFirst("Port:".count)).trimmingCharacters(in: .whitespaces)
+            } else if trimmed.hasPrefix("Authenticated Proxy Enabled:") {
+                authenticated = String(trimmed.dropFirst("Authenticated Proxy Enabled:".count))
+                    .trimmingCharacters(in: .whitespaces) == "1"
             }
         }
     }
 
+    /// `-getproxyautodiscovery` prints `Auto Proxy Discovery: On|Off`.
+    private func parseAutoDiscovery(_ lines: [String]) -> Bool {
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.lowercased().hasPrefix("auto proxy discovery:") else { continue }
+            let value = String(trimmed.dropFirst("Auto Proxy Discovery:".count))
+                .trimmingCharacters(in: .whitespaces)
+            return value.lowercased() == "on"
+        }
+        return false
+    }
+
     // MARK: - Mutations (helper → direct-as-user → osascript)
 
-    func applyProxy(services: [String], port: UInt16) throws {
+    func applyProxy(services: [String], port: UInt16, host: String = "127.0.0.1") throws {
         guard !services.isEmpty else {
             throw SocketError.message("refusing to apply the system proxy with no network services")
         }
-        try runMutations(commands: NetworksetupCommands.applyProxy(services: services, port: Int(port))) {
-            try helper.applyProxy(services: services, port: Int(port))
+        guard NetworksetupCommands.isValidProxyServer(host) else {
+            throw SocketError.message("invalid system proxy host '\(host)'")
+        }
+        try runMutations(commands: NetworksetupCommands.applyProxy(services: services, port: Int(port), host: host)) {
+            try helper.applyProxy(services: services, port: Int(port), host: host)
         }
     }
 
@@ -234,7 +261,9 @@ final class SystemProxyManager {
         var enabled = false
         var server = ""
         var foundPort = ""
-        parseProxyOutput(lines, enabled: &enabled, server: &server, port: &foundPort)
+        var authenticated = false
+        parseProxyOutput(lines, enabled: &enabled, server: &server, port: &foundPort,
+                         authenticated: &authenticated)
         guard enabled && server == "127.0.0.1" else { return false }
         return port == 0 || foundPort == String(port)
     }
