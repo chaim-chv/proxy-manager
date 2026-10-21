@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Dispatch
 
 /// A bundle discovered on an executable's path (its `Contents/Info.plist`).
 struct AppBundleInfo: Equatable {
@@ -23,7 +24,9 @@ private typealias ResponsibleFn = @convention(c) (Int32) -> Int32
 ///
 /// The scan is only run when per-app rules are enabled, so the default hot path
 /// is untouched. Results are cached per PID (validated against the process start
-/// time to survive PID reuse).
+/// time to survive PID reuse) and per `(localPort, proxyPort)` for a few seconds,
+/// so a connection burst does not trigger one full system scan per connection.
+/// Scans are bounded by a permit semaphore and reuse pooled scan buffers.
 final class AppResolver {
     private static let maxPids = 4096
     private static let maxFds = 8192
@@ -32,17 +35,56 @@ final class AppResolver {
     private static let cacheTTL: TimeInterval = 30
     private static let bundleCacheLimit = 512
 
+    private static let identityCacheLimit = 4096
+    private static let portCacheTTL: TimeInterval = 5
+    private static let portCacheLimit = 1024
+    private static let scanPermits = 6
+    private static let scanWaitMs = 100
+
     private struct CacheEntry {
         let identity: AppIdentity
         let startSec: UInt64
         let startUsec: UInt64
         let expiresAt: Date
+        let cachedAt: Date
+    }
+
+    private struct PortKey: Hashable {
+        let localPort: UInt16
+        let proxyPort: UInt16
+    }
+
+    private struct PortCacheEntry: Equatable {
+        let pid: Int32
+        let startSec: UInt64
+        let startUsec: UInt64
+        let expiresAt: Date
+    }
+
+    /// Reused across scans. `proc_listpids`/`proc_pidinfo` rewrite the populated
+    /// prefix; entries past the returned count are stale and never read.
+    private final class ScanBuffers {
+        var pids: [pid_t]
+        var fds: [proc_fdinfo]
+        var sock = socket_fdinfo()
+
+        init(pidCount: Int, fdCount: Int) {
+            pids = [pid_t](repeating: 0, count: pidCount)
+            fds = [proc_fdinfo](repeating: proc_fdinfo(), count: fdCount)
+        }
     }
 
     private let lock = NSLock()
     private var identityCache: [Int32: CacheEntry] = [:]
     private var bundleCache: [String: AppBundleInfo] = [:]
     private var noBundlePaths = Set<String>()
+    private var portCache: [PortKey: PortCacheEntry] = [:]
+
+    private let scanSemaphore = DispatchSemaphore(value: AppResolver.scanPermits)
+    private let bufferLock = NSLock()
+    private var freeScanBuffers: [ScanBuffers] = []
+    private var scanCounter = 0
+    private var scanTimeoutCounter = 0
 
     /// Whether the private responsible-process API could be resolved. When
     /// false, helper processes still resolve to their enclosing app bundle (and
@@ -59,6 +101,9 @@ final class AppResolver {
     }()
 
     init() {
+        freeScanBuffers = (0..<Self.scanPermits).map {
+            _ in ScanBuffers(pidCount: Self.maxPids, fdCount: Self.maxFds)
+        }
         Log.proxy.debug("AppResolver ready (responsible-process API: \(Self.responsibleProcessAPIAvailable ? "available" : "unavailable"))")
     }
 
@@ -68,10 +113,77 @@ final class AppResolver {
     /// `localPort` is the client's ephemeral port (the accepted socket's peer
     /// port); `proxyPort` is the proxy's listening port.
     func resolve(localPort: UInt16, proxyPort: UInt16) -> AppIdentity? {
-        guard let pid = Self.pidForLoopbackConnection(localPort: localPort, proxyPort: proxyPort) else {
+        let key = PortKey(localPort: localPort, proxyPort: proxyPort)
+        let now = Date()
+        lock.lock()
+        let cached = portCache[key]
+        lock.unlock()
+
+        if let cached {
+            // Re-validate the PID and its start time: the ephemeral port may have
+            // been reused, and the cached PID may have died since the scan.
+            if cached.expiresAt > now, let start = Self.processStartTime(cached.pid),
+               start.sec == cached.startSec, start.usec == cached.startUsec {
+                return identity(forPid: cached.pid)
+            }
+            lock.lock()
+            if portCache[key] == cached { portCache.removeValue(forKey: key) }
+            lock.unlock()
+        }
+
+        guard let pid = scanPid(localPort: localPort, proxyPort: proxyPort),
+              let start = Self.processStartTime(pid) else {
             return nil
         }
+        lock.lock()
+        portCache[key] = PortCacheEntry(pid: pid, startSec: start.sec, startUsec: start.usec,
+                                        expiresAt: now.addingTimeInterval(Self.portCacheTTL))
+        trimPortCacheLocked()
+        lock.unlock()
         return identity(forPid: pid)
+    }
+
+    /// Runs one bounded libproc scan. Returns nil (unknown identity) rather than
+    /// blocking a proxy thread indefinitely when all scan permits are busy.
+    private func scanPid(localPort: UInt16, proxyPort: UInt16) -> Int32? {
+        let deadline = DispatchTime.now() + .milliseconds(Self.scanWaitMs)
+        guard scanSemaphore.wait(timeout: deadline) == .success else {
+            lock.lock()
+            scanTimeoutCounter += 1
+            lock.unlock()
+            return nil
+        }
+        defer { scanSemaphore.signal() }
+
+        bufferLock.lock()
+        let buffers = freeScanBuffers.popLast()
+        bufferLock.unlock()
+        guard let buffers else { return nil }
+        defer {
+            bufferLock.lock()
+            freeScanBuffers.append(buffers)
+            bufferLock.unlock()
+        }
+
+        lock.lock()
+        scanCounter += 1
+        lock.unlock()
+
+        return Self.pidForLoopbackConnection(localPort: localPort, proxyPort: proxyPort,
+                                             buffers: buffers)
+    }
+
+    private func trimPortCacheLocked() {
+        while portCache.count > Self.portCacheLimit {
+            var oldestKey: PortKey?
+            var oldestAt = Date.distantFuture
+            for (key, entry) in portCache where entry.expiresAt < oldestAt {
+                oldestAt = entry.expiresAt
+                oldestKey = key
+            }
+            guard let oldestKey else { break }
+            portCache.removeValue(forKey: oldestKey)
+        }
     }
 
     /// Resolves (and caches) the identity of a live PID. Returns nil if the
@@ -80,16 +192,23 @@ final class AppResolver {
         guard pid > 0 else { return nil }
         let now = Date()
         lock.lock()
-        if let entry = identityCache[pid], entry.expiresAt > now {
-            lock.unlock()
-            if let start = Self.processStartTime(pid),
-               start.sec == entry.startSec, start.usec == entry.startUsec {
-                return entry.identity
+        if let entry = identityCache[pid] {
+            if entry.expiresAt > now {
+                lock.unlock()
+                if let start = Self.processStartTime(pid),
+                   start.sec == entry.startSec, start.usec == entry.startUsec {
+                    return entry.identity
+                }
+                lock.lock()
+                if identityCache[pid]?.cachedAt == entry.cachedAt {
+                    identityCache.removeValue(forKey: pid)
+                }
+                lock.unlock()
+                // Fall through and re-resolve; the PID was reused.
+            } else {
+                identityCache.removeValue(forKey: pid)
+                lock.unlock()
             }
-            lock.lock()
-            identityCache.removeValue(forKey: pid)
-            lock.unlock()
-            // Fall through and re-resolve; the PID was reused.
         } else {
             lock.unlock()
         }
@@ -99,11 +218,43 @@ final class AppResolver {
         guard !path.isEmpty else { return nil }
         let identity = buildIdentity(pid: pid, path: path)
         lock.lock()
-        identityCache[pid] = CacheEntry(identity: identity, startSec: start.sec,
+        insertIdentityLocked(CacheEntry(identity: identity, startSec: start.sec,
                                         startUsec: start.usec,
-                                        expiresAt: now.addingTimeInterval(Self.cacheTTL))
+                                        expiresAt: now.addingTimeInterval(Self.cacheTTL),
+                                        cachedAt: now),
+                             forPid: pid, now: now)
         lock.unlock()
         return identity
+    }
+
+    private func insertIdentityLocked(_ entry: CacheEntry, forPid pid: Int32, now: Date) {
+        pruneIdentityCacheLocked(now: now)
+        if identityCache.count >= Self.identityCacheLimit {
+            evictOldestIdentityLocked()
+        }
+        identityCache[pid] = entry
+    }
+
+    private func pruneIdentityCacheLocked(now: Date) {
+        var expired: [Int32] = []
+        for (pid, entry) in identityCache where entry.expiresAt <= now {
+            expired.append(pid)
+        }
+        for pid in expired {
+            identityCache.removeValue(forKey: pid)
+        }
+    }
+
+    private func evictOldestIdentityLocked() {
+        var oldestPid: Int32?
+        var oldestAt = Date.distantFuture
+        for (pid, entry) in identityCache where entry.cachedAt < oldestAt {
+            oldestAt = entry.cachedAt
+            oldestPid = pid
+        }
+        if let oldestPid {
+            identityCache.removeValue(forKey: oldestPid)
+        }
     }
 
     func clearCache() {
@@ -111,7 +262,36 @@ final class AppResolver {
         identityCache.removeAll()
         bundleCache.removeAll()
         noBundlePaths.removeAll()
+        portCache.removeAll()
         lock.unlock()
+    }
+
+    // MARK: - Diagnostics (internal; used by the standalone harness)
+
+    var identityCacheCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return identityCache.count
+    }
+
+    var portCacheCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return portCache.count
+    }
+
+    /// Number of libproc scans actually started (cache misses that acquired a permit).
+    var scanCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return scanCounter
+    }
+
+    /// Number of scans skipped because every permit was busy past the deadline.
+    var scanTimeoutCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return scanTimeoutCounter
     }
 
     private func buildIdentity(pid: Int32, path: String) -> AppIdentity {
@@ -207,38 +387,36 @@ final class AppResolver {
     /// Finds the PID owning the client end of a loopback TCP connection by
     /// matching the client's local port and the proxy port. Returns nil when the
     /// process is owned by another user (unreadable) or the socket is gone.
-    static func pidForLoopbackConnection(localPort: UInt16, proxyPort: UInt16) -> Int32? {
-        var pidBuffer = [pid_t](repeating: 0, count: maxPids)
-        let pidBytes = pidBuffer.withUnsafeMutableBytes {
+    /// `buffers` is reused across calls; see `ScanBuffers`.
+    private static func pidForLoopbackConnection(localPort: UInt16, proxyPort: UInt16,
+                                                 buffers: ScanBuffers) -> Int32? {
+        let pidBytes = buffers.pids.withUnsafeMutableBytes {
             proc_listpids(UInt32(PROC_ALL_PIDS), 0, $0.baseAddress,
                           Int32(maxPids * MemoryLayout<pid_t>.size))
         }
         guard pidBytes > 0 else { return nil }
         let pidCount = min(Int(pidBytes) / MemoryLayout<pid_t>.size, maxPids)
 
-        var fdBuffer = [proc_fdinfo](repeating: proc_fdinfo(), count: maxFds)
-        var sockInfo = socket_fdinfo()
-
         for i in 0..<pidCount {
-            let pid = pidBuffer[i]
+            let pid = buffers.pids[i]
             if pid <= 0 { continue }
-            let fdBytes = fdBuffer.withUnsafeMutableBytes {
+            let fdBytes = buffers.fds.withUnsafeMutableBytes {
                 proc_pidinfo(pid, Int32(PROC_PIDLISTFDS), 0, $0.baseAddress,
                              Int32(maxFds * MemoryLayout<proc_fdinfo>.size))
             }
             if fdBytes <= 0 { continue }
             let fdCount = min(Int(fdBytes) / MemoryLayout<proc_fdinfo>.size, maxFds)
             for j in 0..<fdCount {
-                let fdInfo = fdBuffer[j]
+                let fdInfo = buffers.fds[j]
                 guard Int32(fdInfo.proc_fdtype) == PROX_FDTYPE_SOCKET else { continue }
-                let rc = withUnsafeMutablePointer(to: &sockInfo) {
+                let rc = withUnsafeMutablePointer(to: &buffers.sock) {
                     proc_pidfdinfo(pid, fdInfo.proc_fd, Int32(PROC_PIDFDSOCKETINFO),
                                    $0, Int32(MemoryLayout<socket_fdinfo>.size))
                 }
                 guard rc > 0 else { continue }
-                guard sockInfo.psi.soi_kind == sockInfoTCP,
-                      sockInfo.psi.soi_family == AF_INET else { continue }
-                let ini = sockInfo.psi.soi_proto.pri_tcp.tcpsi_ini
+                guard buffers.sock.psi.soi_kind == sockInfoTCP,
+                      buffers.sock.psi.soi_family == AF_INET else { continue }
+                let ini = buffers.sock.psi.soi_proto.pri_tcp.tcpsi_ini
                 let lport = UInt16(bigEndian: UInt16(truncatingIfNeeded: ini.insi_lport))
                 let fport = UInt16(bigEndian: UInt16(truncatingIfNeeded: ini.insi_fport))
                 if lport == localPort && fport == proxyPort { return pid }

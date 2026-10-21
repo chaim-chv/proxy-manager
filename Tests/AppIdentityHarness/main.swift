@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Dispatch
 
 // Standalone harness for the per-app identity layer (no XCTest / SPM).
 //
@@ -21,7 +22,7 @@ func check(_ name: String, _ condition: Bool) {
     else { failures += 1; print("  FAIL \(name)") }
 }
 
-func tcpListen() -> (fd: Int32, port: UInt16) {
+func tcpListen(backlog: Int32 = 16) -> (fd: Int32, port: UInt16) {
     let fd = socket(AF_INET, SOCK_STREAM, 0)
     var opt: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
@@ -36,12 +37,30 @@ func tcpListen() -> (fd: Int32, port: UInt16) {
         }
     }
     precondition(br == 0, "bind failed")
-    precondition(listen(fd, 16) == 0, "listen failed")
+    precondition(listen(fd, backlog) == 0, "listen failed")
     var len = socklen_t(MemoryLayout<sockaddr_in>.size)
     _ = withUnsafeMutablePointer(to: &addr) {
         $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
     }
     return (fd, UInt16(bigEndian: addr.sin_port))
+}
+
+/// Connects a loopback client socket; returns -1 on failure.
+func tcpConnect(port: UInt16) -> Int32 {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { return -1 }
+    var addr = sockaddr_in()
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    let rc = withUnsafePointer(to: &addr) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+    if rc != 0 { close(fd); return -1 }
+    return fd
 }
 
 func peerPort(_ fd: Int32) -> UInt16 {
@@ -190,6 +209,82 @@ if let cfd = acceptWithTimeout(bundled.fd, seconds: 5) {
 }
 bundledChild.waitUntilExit()
 close(bundled.fd)
+
+// 3. The (localPort, proxyPort) scan cache: a duplicate lookup must not rescan.
+print("== port cache reuse ==")
+resolver.clearCache()
+let cacheListen = tcpListen()
+let cacheClient = tcpConnect(port: cacheListen.port)
+let cacheAccepted = cacheClient >= 0 ? acceptWithTimeout(cacheListen.fd, seconds: 5) : nil
+if let cacheAccepted, cacheClient >= 0 {
+    let cachePort = peerPort(cacheAccepted)
+    let scansBefore = resolver.scanCount
+    let first = resolver.resolve(localPort: cachePort, proxyPort: cacheListen.port)
+    let scansAfterFirst = resolver.scanCount
+    let second = resolver.resolve(localPort: cachePort, proxyPort: cacheListen.port)
+    let scansAfterSecond = resolver.scanCount
+    check("first resolve runs one scan", scansAfterFirst - scansBefore == 1)
+    check("duplicate lookup reuses the port cache (no rescan)", scansAfterSecond == scansAfterFirst)
+    check("duplicate lookup returns the same identity", first != nil && first == second)
+    check("port cache holds the lookup", resolver.portCacheCount == 1)
+    check("identity cache holds the PID", resolver.identityCacheCount >= 1)
+    close(cacheAccepted)
+} else {
+    check("cache client connected", false)
+}
+if cacheClient >= 0 { close(cacheClient) }
+close(cacheListen.fd)
+resolver.clearCache()
+check("clearCache empties the port cache", resolver.portCacheCount == 0)
+check("clearCache empties the identity cache", resolver.identityCacheCount == 0)
+
+// 4. Connection burst: 100 concurrent resolves over real loopback clients must
+// all return (bounded by the scan permit deadline) and must not deadlock.
+print("== concurrent resolve burst (100) ==")
+resolver.clearCache()
+let burstCount = 100
+let burstListen = tcpListen(backlog: 128)
+var burstClientFDs: [Int32] = []
+var burstAcceptedFDs: [Int32] = []
+var burstPorts: [UInt16] = []
+var burstConnected = true
+for _ in 0..<burstCount {
+    let cfd = tcpConnect(port: burstListen.port)
+    guard cfd >= 0, let afd = acceptWithTimeout(burstListen.fd, seconds: 5) else {
+        if cfd >= 0 { close(cfd) }
+        burstConnected = false
+        break
+    }
+    burstClientFDs.append(cfd)
+    burstAcceptedFDs.append(afd)
+    burstPorts.append(peerPort(afd))
+}
+check("burst: \(burstCount) clients connected", burstConnected && burstPorts.count == burstCount)
+
+let burstPid = getpid()
+let burstLock = NSLock()
+var burstResolved = 0
+var burstWrongPid = 0
+let burstStart = Date()
+DispatchQueue.concurrentPerform(iterations: burstPorts.count) { i in
+    let identity = resolver.resolve(localPort: burstPorts[i], proxyPort: burstListen.port)
+    burstLock.lock()
+    if let identity {
+        burstResolved += 1
+        if identity.pid != burstPid { burstWrongPid += 1 }
+    }
+    burstLock.unlock()
+}
+let burstElapsed = Date().timeIntervalSince(burstStart)
+print(String(format: "  burst: %d/%d resolved in %.3fs (%d scan timeouts)",
+             burstResolved, burstPorts.count, burstElapsed, resolver.scanTimeoutCount))
+check("burst: all resolves completed within 10s", burstElapsed < 10)
+check("burst: at least one connection resolved", burstResolved > 0)
+check("burst: resolved identities point at this process", burstWrongPid == 0)
+
+for fd in burstAcceptedFDs { close(fd) }
+for fd in burstClientFDs { close(fd) }
+close(burstListen.fd)
 
 print("== negative cases ==")
 check("unmatched port pair resolves nil", resolver.resolve(localPort: 1, proxyPort: 1) == nil)
