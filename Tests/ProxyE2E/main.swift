@@ -168,6 +168,118 @@ final class MockOrigin {
     }
 }
 
+// MARK: - Chunked origin
+
+/// Minimal chunked-upload origin. It records whether the forwarded request
+/// actually carried `Transfer-Encoding: chunked`, dechunks the body, and echoes
+/// the decoded bytes with a `Content-Length` response. If the proxy strips the
+/// framing header, the origin answers 400 (and the echo check fails).
+final class MockChunkedOrigin {
+    let fd: Int32
+    let port: UInt16
+    private let lock = NSLock()
+    private var sawChunked = false
+    private var connections = 0
+
+    init() {
+        let l = tcpListen()
+        self.fd = l.fd
+        self.port = l.port
+        Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    func lastRequestSawChunked() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return sawChunked
+    }
+
+    func connectionCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return connections
+    }
+
+    private func acceptLoop() {
+        while true {
+            let c = accept(fd, nil, nil)
+            if c < 0 { break }
+            noSIGPIPE(c)
+            lock.lock(); connections += 1; lock.unlock()
+            Thread.detachNewThread { [weak self] in self?.handle(c) }
+        }
+    }
+
+    private func handle(_ c: Int32) {
+        defer { close(c) }
+        guard let header = readLineBlock(c) else { return }
+        let text = String(decoding: header, as: UTF8.self)
+        let chunked = text.lowercased().contains("transfer-encoding: chunked")
+        lock.lock(); sawChunked = chunked; lock.unlock()
+        guard chunked, let body = readChunkedBody(c) else {
+            sendAll(c, Array("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        var resp = Array("HTTP/1.1 200 OK\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n".utf8)
+        resp.append(contentsOf: body)
+        sendAll(c, resp)
+    }
+
+    /// Reads through the request's `\r\n\r\n` terminator (byte-by-byte: the
+    /// chunked body immediately follows and must not be consumed here).
+    private func readLineBlock(_ c: Int32) -> [UInt8]? {
+        var out: [UInt8] = []
+        var one = [UInt8](repeating: 0, count: 1)
+        while out.count < 65_536 {
+            let n = recv(c, &one, 1, 0)
+            if n <= 0 { return nil }
+            out.append(one[0])
+            if out.count >= 4, out.suffix(4) == [13, 10, 13, 10] { return out }
+        }
+        return nil
+    }
+
+    private func readChunkedBody(_ c: Int32) -> [UInt8]? {
+        var body: [UInt8] = []
+        while true {
+            guard let line = readCRLFLine(c) else { return nil }
+            let sizeText = line.split(separator: ";", maxSplits: 1).first.map(String.init) ?? ""
+            guard let size = Int(sizeText.trimmingCharacters(in: .whitespaces), radix: 16), size >= 0 else {
+                return nil
+            }
+            if size == 0 {
+                _ = readCRLFLine(c) // CRLF terminating the last-chunk / trailers
+                return body
+            }
+            guard let chunk = readExactlyBytes(c, size), readCRLFLine(c) != nil else { return nil }
+            body.append(contentsOf: chunk)
+        }
+    }
+
+    private func readCRLFLine(_ c: Int32) -> String? {
+        var bytes: [UInt8] = []
+        var one = [UInt8](repeating: 0, count: 1)
+        while bytes.count < 8192 {
+            let n = recv(c, &one, 1, 0)
+            if n <= 0 { return nil }
+            bytes.append(one[0])
+            if bytes.count >= 2, bytes.suffix(2) == [13, 10] {
+                return String(decoding: bytes.dropLast(2), as: UTF8.self)
+            }
+        }
+        return nil
+    }
+
+    private func readExactlyBytes(_ c: Int32, _ count: Int) -> [UInt8]? {
+        var out: [UInt8] = []
+        var buf = [UInt8](repeating: 0, count: count)
+        while out.count < count {
+            let n = recv(c, &buf, count - out.count, 0)
+            if n <= 0 { return nil }
+            out.append(contentsOf: buf[0..<n])
+        }
+        return out
+    }
+}
+
 // MARK: - Chatty origin
 
 /// Writes 16 KB every 1 ms until the peer stops reading, counting every byte it
@@ -737,6 +849,47 @@ do {
     let tunnelResp = String(decoding: recvAll(c), as: UTF8.self)
     check("app Tunnel all uses the tunnel", tunnelResp.contains("TUNNEL-APP"))
     check("app Tunnel all did not go direct", !tunnelResp.contains("DIRECT-APP"))
+}
+
+print("== E2E: chunked POST preserves framing (PS-05) ==")
+do {
+    let origin = MockChunkedOrigin()
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    // Absolute-form POST with a chunked body, exactly as a forward proxy client
+    // sends it. 127.0.0.1 is not allow-listed -> direct to the origin.
+    let req = "POST http://127.0.0.1:\(origin.port)/upload HTTP/1.1\r\n" +
+        "Host: 127.0.0.1:\(origin.port)\r\n" +
+        "Transfer-Encoding: chunked\r\n\r\n" +
+        "5\r\nhello\r\n0\r\n\r\n"
+    sendAll(c, Array(req.utf8))
+    let resp = String(decoding: recvAll(c), as: UTF8.self)
+    check("chunked origin received the request", origin.connectionCount() == 1)
+    check("chunked origin saw Transfer-Encoding: chunked", origin.lastRequestSawChunked())
+    check("chunked POST returns 200", resp.contains("200 OK"))
+    check("chunked POST body was dechunked and echoed", resp.hasSuffix("hello"))
+}
+
+print("== E2E: TE + Content-Length rejected (PS-05) ==")
+do {
+    let origin = MockChunkedOrigin()
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 5)
+    let req = "POST http://127.0.0.1:\(origin.port)/upload HTTP/1.1\r\n" +
+        "Host: 127.0.0.1:\(origin.port)\r\n" +
+        "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n" +
+        "5\r\nhello\r\n0\r\n\r\n"
+    sendAll(c, Array(req.utf8))
+    let resp = String(decoding: recvAll(c), as: UTF8.self)
+    check("TE + CL request gets 400", resp.contains("400 Bad Request"))
+    Thread.sleep(forTimeInterval: 0.2)
+    check("TE + CL request never reaches the origin", origin.connectionCount() == 0)
 }
 
 // SSRF: the policy must use the resolved address, not the host string. The

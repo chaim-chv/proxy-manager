@@ -202,6 +202,20 @@ final class ProxyServer {
             scheme = request.scheme
             path = s.recordPaths ? request.path : ""
 
+            // Ambiguous body framing (TE + CL, conflicting duplicate CL, or an
+            // unsupported transfer coding) is a request-smuggling primitive.
+            // The relay forwards the body verbatim, so reject before routing
+            // instead of handing the origin two ways to frame it.
+            if request.hasConflictingFraming {
+                route = .block
+                errMsg = "conflicting_request_framing"
+                status = 400
+                try sendResponse(cfd, status: 400, reason: "Bad Request")
+                record(startTs: startTs, srcPort: srcPort, host: host, port: port, method: method, scheme: scheme,
+                       path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut, error: errMsg)
+                return
+            }
+
             // SSRF guard: the proxy has no authentication, so a non-loopback
             // client must never use it to reach loopback/link-local/private
             // destinations. Loopback clients (the normal case) are unaffected.

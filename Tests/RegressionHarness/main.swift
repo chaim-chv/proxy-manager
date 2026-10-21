@@ -206,6 +206,51 @@ let queryOnlyOut = rewrite("GET http://example.com?x=1 HTTP/1.1\r\nHost: example
 check("query-only absolute URL keeps slash", queryOnlyOut.hasPrefix("GET /?x=1 HTTP/1.1\r\n"))
 check("query-only absolute URL Host", hostLines(queryOnlyOut) == ["Host: example.com"])
 
+// PS-05: the proxy forwards the body byte-for-byte, so it must preserve the
+// client's framing. Stripping Transfer-Encoding/Trailer left the origin with a
+// chunked body and no way to frame it.
+func headerCount(_ raw: String, _ name: String) -> Int {
+    raw.components(separatedBy: "\r\n")
+        .filter { $0.lowercased().hasPrefix(name.lowercased() + ":") }.count
+}
+let chunkedReq = "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\n" +
+    "Transfer-Encoding: chunked\r\nTrailer: X-Checksum\r\n\r\n"
+let chunkedOut = rewrite(chunkedReq)
+check("chunked request keeps Transfer-Encoding", chunkedOut.lowercased().contains("transfer-encoding: chunked\r\n"))
+check("chunked request keeps Trailer", chunkedOut.lowercased().contains("trailer: x-checksum\r\n"))
+check("chunked request has no Content-Length", !chunkedOut.lowercased().contains("content-length:"))
+check("chunked request still closes connection", chunkedOut.lowercased().contains("connection: close"))
+check("chunked request is not a framing conflict", parsed(chunkedReq)?.hasConflictingFraming == false)
+
+let dupSameCL = "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\n" +
+    "Content-Length: 5\r\ncontent-length: 5\r\n\r\n"
+check("identical duplicate Content-Length is not conflicting",
+      parsed(dupSameCL)?.hasConflictingFraming == false)
+check("identical duplicate Content-Length emitted once",
+      headerCount(rewrite(dupSameCL), "content-length") == 1)
+
+let dupDiffCL = "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\n" +
+    "Content-Length: 5\r\ncontent-length: 6\r\n\r\n"
+check("conflicting duplicate Content-Length is rejected",
+      parsed(dupDiffCL)?.hasConflictingFraming == true)
+let sameCaseDiffCL = "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\n" +
+    "Content-Length: 5\r\nContent-Length: 6\r\n\r\n"
+check("same-case conflicting Content-Length is rejected",
+      parsed(sameCaseDiffCL)?.hasConflictingFraming == true)
+
+let teCLReq = "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\n" +
+    "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"
+check("TE + Content-Length is rejected", parsed(teCLReq)?.hasConflictingFraming == true)
+check("unsupported transfer coding is rejected",
+      parsed("POST http://example.com/u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip\r\n\r\n")?
+        .hasConflictingFraming == true)
+check("malformed transfer coding does not crash",
+      parsed("POST http://example.com/u HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: ,chunked\r\n\r\n")?
+        .hasConflictingFraming == true)
+check("malformed Content-Length is rejected",
+      parsed("POST http://example.com/u HTTP/1.1\r\nHost: h\r\nContent-Length: five\r\n\r\n")?
+        .hasConflictingFraming == true)
+
 check("isUpgrade true for Connection: Upgrade", parsed(wsReq)?.isUpgrade == true)
 check("isUpgrade true when Upgrade token leads the list",
       parsed("GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, keep-alive\r\nUpgrade: websocket\r\n\r\n")?.isUpgrade == true)

@@ -5,16 +5,75 @@ struct HTTPRequest {
     var target: String
     var version: String
     var headers: [String: String]
+    /// Header lines in wire order with duplicates and original casing intact.
+    /// `headers` is a dictionary, so it collapses same-named lines and treats
+    /// differently-cased names as distinct; framing validation and forwarding
+    /// need the unmodified list.
+    var rawHeaders: [(name: String, value: String)]
 
     var headerNamed: (String) -> String? = { _ in nil }
 
-    init(method: String, target: String, version: String, headers: [String: String]) {
+    init(method: String, target: String, version: String, headers: [String: String],
+         rawHeaders: [(name: String, value: String)] = []) {
         self.method = method
         self.target = target
         self.version = version
         self.headers = headers
+        self.rawHeaders = rawHeaders.isEmpty
+            ? headers.map { (name: $0.key, value: $0.value) }
+            : rawHeaders
         let lower = Dictionary(headers.map { ($0.key.lowercased(), $0.value) }, uniquingKeysWith: { first, _ in first })
         self.headerNamed = { lower[$0.lowercased()] }
+    }
+
+    /// Header lines in wire order (falls back to `headers` for requests built
+    /// without them).
+    var orderedHeaders: [(name: String, value: String)] {
+        rawHeaders
+    }
+
+    private func headerValues(_ name: String) -> [String] {
+        orderedHeaders.compactMap { pair in
+            pair.name.lowercased() == name ? pair.value.trimmingCharacters(in: .whitespaces) : nil
+        }
+    }
+
+    /// True when the request's body framing is ambiguous or unsupported:
+    /// `Transfer-Encoding` together with `Content-Length`, differing duplicate
+    /// `Content-Length` values, or a transfer coding this proxy does not
+    /// understand. The proxy forwards the body verbatim, so forwarding an
+    /// ambiguous request would hand the origin two ways to frame it (request
+    /// smuggling). Malformed input must never trap.
+    var hasConflictingFraming: Bool {
+        let transferEncoding = headerValues("transfer-encoding")
+        let contentLength = headerValues("content-length")
+
+        if !transferEncoding.isEmpty && !contentLength.isEmpty { return true }
+
+        if !contentLength.isEmpty {
+            if Set(contentLength).count > 1 { return true }
+            for value in contentLength where value.isEmpty || !value.allSatisfy({ $0.isNumber }) {
+                return true
+            }
+        }
+
+        if !transferEncoding.isEmpty {
+            var tokens: [String] = []
+            for value in transferEncoding {
+                for part in value.split(separator: ",", omittingEmptySubsequences: false) {
+                    let token = part.trimmingCharacters(in: .whitespaces).lowercased()
+                    if token.isEmpty { return true }
+                    tokens.append(token)
+                }
+            }
+            for token in tokens where token != "chunked" && token != "identity" {
+                return true
+            }
+            if tokens.filter({ $0 == "chunked" }).count > 1 { return true }
+            if tokens.contains("chunked") && tokens.last != "chunked" { return true }
+        }
+
+        return false
     }
 
     var isConnect: Bool { method.uppercased() == "CONNECT" }
@@ -143,13 +202,16 @@ enum HTTPParser {
         let version = parts[2]
 
         var headers: [String: String] = [:]
+        var rawHeaders: [(name: String, value: String)] = []
         for line in lines.dropFirst() {
             guard let idx = line.firstIndex(of: ":") else { continue }
             let key = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
             let value = String(line[line.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
             headers[key] = value
+            rawHeaders.append((name: key, value: value))
         }
-        return HTTPRequest(method: method, target: target, version: version, headers: headers)
+        return HTTPRequest(method: method, target: target, version: version,
+                           headers: headers, rawHeaders: rawHeaders)
     }
 
     static func findHeaderEnd(in bytes: [UInt8]) -> Range<Int>? {
@@ -163,6 +225,14 @@ enum HTTPParser {
     /// Rewrites a proxied absolute-form request to origin-form, stripping
     /// hop-by-hop / proxy headers.
     ///
+    /// Framing headers (`Content-Length`, `Transfer-Encoding`, `Trailer`) are
+    /// preserved: the proxy forwards the body byte-for-byte, so the origin must
+    /// receive the same framing the client used. Stripping `Transfer-Encoding`
+    /// (the old behavior) left a chunked body with no framing at the origin.
+    /// Each framing header is emitted at most once (case-insensitive); a
+    /// request with genuinely conflicting values is rejected before reaching
+    /// this function.
+    ///
     /// A protocol upgrade (plaintext WebSocket, `ws://`) is the one case where
     /// `Connection` and `Upgrade` are **not** stripped: forwarding them is what
     /// lets the origin answer `101 Switching Protocols` and switch the socket to
@@ -175,14 +245,19 @@ enum HTTPParser {
         let isUpgrade = request.isUpgrade
         var lines: [String] = []
         lines.append("\(request.method) \(request.path) \(request.version)")
-        for (key, value) in request.headers {
-            let lk = key.lowercased()
-            if ["proxy-connection", "proxy-authorization", "proxy-authenticate", "connection",
-                "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"].contains(lk) {
-                continue
-            }
+        let hopByHop: Set<String> = ["proxy-connection", "proxy-authorization", "proxy-authenticate",
+                                     "connection", "keep-alive", "te", "upgrade"]
+        let framing: Set<String> = ["content-length", "transfer-encoding", "trailer"]
+        var emittedFraming: Set<String> = []
+        for pair in request.orderedHeaders {
+            let lk = pair.name.lowercased()
             if lk == "host" { continue }
-            lines.append("\(key): \(value)")
+            if hopByHop.contains(lk) { continue }
+            if framing.contains(lk) {
+                if emittedFraming.contains(lk) { continue }
+                emittedFraming.insert(lk)
+            }
+            lines.append("\(pair.name): \(pair.value)")
         }
         lines.append("Host: \(request.hostHeader)")
         if isUpgrade {
