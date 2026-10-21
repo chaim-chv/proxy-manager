@@ -71,19 +71,43 @@ final class ConfigStore {
     }
 
     /// Atomic write, then restrict to the owner. `.atomic` replaces the inode,
-    /// so the permission fix must run after the write, not before.
-    private func writeOwnerOnly(_ data: Data, to url: URL) {
-        try? data.write(to: url, options: .atomic)
-        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    /// so the permission fix must run after the write, not before. Returns
+    /// whether the data itself was written; a permission fix failing is logged
+    /// but does not invalidate the recovery contract.
+    @discardableResult
+    private func writeOwnerOnly(_ data: Data, to url: URL) -> Bool {
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            Log.system.error("write failed for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+        do {
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            Log.system.error("could not restrict permissions for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        return true
     }
 
     // MARK: - System-proxy snapshot (persisted so a crash can't lose the
     // user's original proxy settings; see AppModel enable/disable/quit).
 
-    func saveSnapshot(_ snapshot: SystemProxySnapshot) {
+    /// Persists the recovery contract. Returns false when the snapshot could
+    /// not be encoded/written (or is empty); callers must abort before touching
+    /// the system proxy rather than route without a recovery path.
+    func saveSnapshot(_ snapshot: SystemProxySnapshot) -> Bool {
+        guard !snapshot.isEmpty else {
+            Log.system.error("refusing to persist an empty system-proxy snapshot")
+            return false
+        }
         let encoder = JSONEncoder()
-        guard let data = try? encoder.encode(snapshot) else { return }
-        writeOwnerOnly(data, to: snapshotURL)
+        guard let data = try? encoder.encode(snapshot) else {
+            Log.system.error("could not encode the system-proxy snapshot")
+            return false
+        }
+        guard writeOwnerOnly(data, to: snapshotURL) else { return false }
+        return true
     }
 
     func loadSnapshot() -> SystemProxySnapshot? {
@@ -91,8 +115,35 @@ final class ConfigStore {
         return try? JSONDecoder().decode(SystemProxySnapshot.self, from: data)
     }
 
-    func clearSnapshot() {
-        try? fileManager.removeItem(at: snapshotURL)
+    /// Removes the recovery contract. Idempotent (a missing file is success).
+    /// Returns false when an existing file could not be removed; the caller
+    /// should quarantine it so a later enable cannot load a stale "original".
+    func clearSnapshot() -> Bool {
+        guard fileManager.fileExists(atPath: snapshotURL.path) else { return true }
+        do {
+            try fileManager.removeItem(at: snapshotURL)
+            return true
+        } catch {
+            Log.system.error("could not remove the system-proxy snapshot: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// Moves an unremovable snapshot aside (rename within the support dir) so it
+    /// can never be mistaken for the user's current original settings.
+    @discardableResult
+    func quarantineSnapshot() -> Bool {
+        guard fileManager.fileExists(atPath: snapshotURL.path) else { return true }
+        let stamp = Int(Date().timeIntervalSince1970 * 1000)
+        let destination = supportDir.appendingPathComponent("system-proxy-snapshot.stale-\(stamp).json")
+        do {
+            try fileManager.moveItem(at: snapshotURL, to: destination)
+            Log.system.notice("quarantined stale system-proxy snapshot as \(destination.lastPathComponent, privacy: .public)")
+            return true
+        } catch {
+            Log.system.error("could not quarantine the stale system-proxy snapshot: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     func reset() {

@@ -190,6 +190,12 @@ final class AppModel: ObservableObject {
         Log.app.notice("re-applying proxy after \(reason)")
         workQueue.async { [weak self] in
             guard let self, self.state.isActive else { return }
+            guard let services = self.systemProxyManager.listServicesChecked(), !services.isEmpty else {
+                let message = "cannot read the network service list; keeping the current proxy state"
+                self.setLastError("Failed to re-apply proxy after \(reason): \(message)")
+                Log.app.error("re-apply after \(reason): \(message)")
+                return
+            }
             if !self.proxyServer.isRunning {
                 do { try self.proxyServer.start() } catch {
                     Log.app.error("re-apply: proxy restart failed: \(error.localizedDescription)")
@@ -200,7 +206,8 @@ final class AppModel: ObservableObject {
                     WatchdogController.installIfNeeded()
                     WatchdogController.arm(port: port)
                 }
-                try self.systemProxyManager.applyProxy(services: self.systemProxyManager.listServices(), port: port)
+                try self.ensureSnapshotCovers(services)
+                try self.systemProxyManager.applyProxy(services: services, port: port)
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
             } catch {
@@ -228,6 +235,84 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Snapshot coverage
+
+    /// Ensures every service that is about to be proxied has its original state
+    /// in the snapshot, so disable/quit/crash recovery can restore it.
+    ///
+    /// A USB/Thunderbolt Ethernet, dock, or VPN interface can appear after
+    /// `enable()`; re-applying to it without capturing it would leave that
+    /// (often primary) service pointing at a dead listener after disable.
+    /// WorkQueue-only. Persists before returning so the apply is always covered,
+    /// and throws if the recovery contract could not be written.
+    private func ensureSnapshotCovers(_ services: [String]) throws {
+        if snapshot == nil, let persisted = configStore.loadSnapshot(), !persisted.isEmpty {
+            snapshot = persisted
+        }
+        if snapshot == nil {
+            // Never capture our own dangling proxy as the user's "original":
+            // clear it first (prompt-free), and refuse to guess when the state
+            // cannot be read.
+            switch systemProxyManager.proxyCheck(port: 0) {
+            case .clean:
+                break
+            case .ours:
+                Log.app.notice("snapshot: clearing a dangling local system proxy before capturing the original state")
+                do {
+                    try systemProxyManager.clearLocalProxies(port: 0)
+                } catch {
+                    throw NSError(domain: "ProxyManager", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "cannot clear the dangling local system proxy before capturing your original settings: \(error.localizedDescription)"])
+                }
+            case .unknown:
+                throw NSError(domain: "ProxyManager", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "cannot determine the current system proxy state; refusing to change it without a recovery snapshot"])
+            }
+            let captured = systemProxyManager.captureSnapshot(services: services)
+            guard !captured.isEmpty else {
+                throw NSError(domain: "ProxyManager", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "cannot capture your original system proxy settings; refusing to change the proxy"])
+            }
+            try persist(snapshot: captured)
+            snapshot = captured
+            Log.app.notice("snapshot: captured \(captured.count) service(s) before apply")
+            return
+        }
+        let known = Set((snapshot ?? [:]).keys)
+        let added = services.filter { !known.contains($0) }
+        guard !added.isEmpty else { return }
+        let captured = systemProxyManager.captureSnapshot(services: added)
+        guard !captured.isEmpty else { return }
+        var merged = snapshot ?? [:]
+        for (svc, state) in captured { merged[svc] = state }
+        try persist(snapshot: merged)
+        snapshot = merged
+        Log.app.notice("snapshot: added new service(s) before apply: \(captured.keys.sorted().joined(separator: ", "))")
+    }
+
+    /// Persists the recovery contract before the system proxy is changed. An
+    /// unwritable snapshot means the app must not route: without it neither a
+    /// crash nor quit can restore the user's settings.
+    private func persist(snapshot value: SystemProxySnapshot) throws {
+        guard configStore.saveSnapshot(value) else {
+            throw NSError(domain: "ProxyManager", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "cannot save the system-proxy recovery snapshot; refusing to change the proxy"])
+        }
+    }
+
+    /// Best-effort snapshot cleanup after a successful restore/disable/quit.
+    /// If the file cannot be removed, quarantine it so a later enable cannot
+    /// load a stale "original" over the user's current settings (LC-08).
+    private func clearSnapshotBestEffort() {
+        snapshot = nil
+        if !configStore.clearSnapshot() {
+            Log.app.error("snapshot: could not remove the persisted recovery snapshot; quarantining it")
+            if !configStore.quarantineSnapshot() {
+                Log.app.error("snapshot: could not quarantine the stale recovery snapshot")
+            }
+        }
+    }
+
     // MARK: - Toggle
 
     func toggle() {
@@ -250,19 +335,27 @@ final class AppModel: ObservableObject {
         workQueue.async { [weak self] in
             guard let self = self else { return }
             self.syncManagedTunnel()
-            let services = self.systemProxyManager.listServices()
-            var proxyApplied = false
+            var services: [String] = []
+            var touchedSystemProxy = false
+            var startedListener = false
             do {
+                let listed = self.systemProxyManager.listServicesChecked()
+                guard let listed, !listed.isEmpty else {
+                    let message = listed == nil
+                        ? "cannot read the network service list; refusing to enable routing"
+                        : "no enabled network services; refusing to enable routing"
+                    throw NSError(domain: "ProxyManager", code: 1,
+                                  userInfo: [NSLocalizedDescriptionKey: message])
+                }
+                services = listed
+                let listenerWasRunning = self.proxyServer.isRunning
                 try self.proxyServer.start()
+                startedListener = !listenerWasRunning
 
                 // Persist the user's ORIGINAL proxy state before touching it, so
-                // a later crash/relaunch can still restore correctly.
-                if let persisted = self.configStore.loadSnapshot() {
-                    self.snapshot = persisted
-                } else if self.snapshot == nil {
-                    self.snapshot = self.systemProxyManager.captureSnapshot(services: services)
-                    self.configStore.saveSnapshot(self.snapshot ?? [:])
-                }
+                // a later crash/relaunch can still restore correctly. Throws (and
+                // aborts before apply) if the recovery contract cannot be saved.
+                try self.ensureSnapshotCovers(services)
 
                 // Arm the crash watchdog *before* touching the system proxy: if
                 // we die at any point past here, the watchdog restores it.
@@ -271,17 +364,20 @@ final class AppModel: ObservableObject {
                     WatchdogController.arm(port: port)
                 }
 
+                // Persist the intent *before* mutating the system proxy: a crash
+                // after apply but before the success path below must still make
+                // the next launch auto-enable and repair a dangling proxy.
+                UserDefaults.standard.set(true, forKey: self.wasOnKey)
                 // Set before applyProxy: a networksetup failure can happen partway
                 // through (some services already modified), so the catch below must
                 // roll back whenever we've started touching the system proxy.
-                proxyApplied = true
+                touchedSystemProxy = true
                 try self.systemProxyManager.applyProxy(services: services, port: port)
 
                 if cfg.system.injectShellEnv {
                     self.shellEnvInjector.writeEnvFile(port: port, bindHost: bindHost, tunnelHost: cfg.tunnel.effectiveHost)
                     self.shellEnvInjector.install(rcFiles: cfg.system.managedShellRcs)
                 }
-                UserDefaults.standard.set(true, forKey: self.wasOnKey)
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
                 self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
@@ -290,8 +386,8 @@ final class AppModel: ObservableObject {
             } catch {
                 // Roll back so we never leave the system proxy dangling.
                 Log.app.error("enable() failed, rolling back: \(error.localizedDescription)")
-                var rolledBack = true
-                if proxyApplied {
+                if touchedSystemProxy {
+                    var rolledBack = true
                     if let snap = self.snapshot {
                         do { try self.systemProxyManager.restore(snapshot: snap) }
                         catch {
@@ -313,31 +409,52 @@ final class AppModel: ObservableObject {
                         self.guiEnvInjector.remove()
                         self.appliedGuiEnv = false
                     }
-                }
-                if rolledBack {
-                    self.snapshot = nil
-                    self.configStore.clearSnapshot()
-                    self.appliedPort = 0
-                    self.appliedBindHost = ""
-                    UserDefaults.standard.set(false, forKey: self.wasOnKey)
-                    WatchdogController.disarm()
-                    self.proxyServer.stop()
-                    self.endProxyActivity()
-                    self.setState(.off)
-                } else {
-                    // Recovery state must survive: keep the snapshot on disk and
-                    // the watchdog armed, and keep the listener running so the
-                    // machine still has connectivity. The watchdog repairs the
-                    // dangling proxy when this process exits.
-                    // Never persist an empty snapshot: the watchdog treats "no
-                    // usable snapshot" as nothing to restore, which would leave
-                    // the proxy dangling after this process exits.
-                    if let snap = self.snapshot {
-                        self.configStore.saveSnapshot(snap)
+                    if rolledBack {
+                        self.clearSnapshotBestEffort()
+                        self.appliedPort = 0
+                        self.appliedBindHost = ""
+                        UserDefaults.standard.set(false, forKey: self.wasOnKey)
+                        WatchdogController.disarm()
+                        self.proxyServer.stop()
+                        self.endProxyActivity()
+                        self.setState(.off)
                     } else {
-                        Log.app.error("enable(): rollback has no snapshot to persist")
+                        // Recovery state must survive: keep the snapshot on disk and
+                        // the watchdog armed, and keep the listener running so the
+                        // machine still has connectivity. The watchdog repairs the
+                        // dangling proxy when this process exits.
+                        // Never persist an empty snapshot: the watchdog treats "no
+                        // usable snapshot" as nothing to restore, which would leave
+                        // the proxy dangling after this process exits.
+                        if let snap = self.snapshot, !snap.isEmpty {
+                            if !self.configStore.saveSnapshot(snap) {
+                                Log.app.error("enable(): could not persist the recovery snapshot after a failed rollback")
+                            }
+                        } else {
+                            Log.app.error("enable(): rollback has no snapshot to persist")
+                        }
+                        // Leave the intent set so the next launch auto-enables and
+                        // repairs the still-dangling proxy.
+                        UserDefaults.standard.set(true, forKey: self.wasOnKey)
+                        self.setState(.degraded)
                     }
-                    self.setState(.degraded)
+                } else {
+                    // This call never touched the system proxy, so any recovery
+                    // state left by an earlier crash/instance is still the only
+                    // way to restore it: never clear the snapshot, disarm the
+                    // watchdog, or clear the launch intent here.
+                    if self.snapshot == nil, let persisted = self.configStore.loadSnapshot(), !persisted.isEmpty {
+                        self.snapshot = persisted
+                    }
+                    let hasRecoverySnapshot = !(self.snapshot?.isEmpty ?? true)
+                    if !hasRecoverySnapshot {
+                        if startedListener { self.proxyServer.stop() }
+                        self.endProxyActivity()
+                    }
+                    // A listener kept alive here may be serving a dangling proxy
+                    // from a previous crash, so report degraded rather than off.
+                    self.setState(hasRecoverySnapshot ? .degraded : .off)
+                    Log.app.error("enable(): failed before touching the system proxy; recovery state preserved")
                 }
                 self.setLastError(error.localizedDescription)
             }
@@ -352,15 +469,24 @@ final class AppModel: ObservableObject {
 
         workQueue.async { [weak self] in
             guard let self = self else { return }
-            let services = self.systemProxyManager.listServices()
+            let sweepPort = self.appliedPort != 0 ? self.appliedPort : cfg.proxy.port
             do {
                 if let snap = self.snapshot {
                     try self.systemProxyManager.restore(snapshot: snap)
+                    // A service that appeared after enable may have been proxied
+                    // without ever entering the snapshot; clear only those.
+                    self.systemProxyManager.clearUnsnapshottedLocalProxies(snapshot: snap, port: sweepPort)
                 } else {
+                    // Without a snapshot the only proof that nothing is left
+                    // behind is a successful read: an unreadable or empty list
+                    // must not count as "cleared".
+                    guard let services = self.systemProxyManager.listServicesChecked(), !services.isEmpty else {
+                        throw NSError(domain: "ProxyManager", code: 1,
+                                      userInfo: [NSLocalizedDescriptionKey: "cannot read the network service list; cannot confirm the system proxy was cleared"])
+                    }
                     try self.systemProxyManager.clearProxy(services: services)
                 }
-                self.snapshot = nil
-                self.configStore.clearSnapshot()
+                self.clearSnapshotBestEffort()
                 WatchdogController.disarm()
                 self.appliedPort = 0
                 self.appliedBindHost = ""
@@ -477,10 +603,18 @@ final class AppModel: ObservableObject {
         guard port != appliedPort || bindHost != appliedBindHost else { return }
         let oldPort = appliedPort
         let oldBindHost = appliedBindHost
+        // Read before stopping the old listener: an unreadable/empty list means
+        // we cannot move the system proxy, so leave everything as it is.
+        guard let services = systemProxyManager.listServicesChecked(), !services.isEmpty else {
+            let message = "cannot read the network service list; keeping \(oldBindHost):\(oldPort)"
+            setLastError("Failed to apply proxy change: \(message)")
+            Log.app.error("reapply: \(message)")
+            return
+        }
         do {
             proxyServer.stop()
             try proxyServer.start()
-            let services = systemProxyManager.listServices()
+            try ensureSnapshotCovers(services)
             // Re-arm with the new port before applying, so a crash mid-rebind is
             // still covered by the watchdog (it matches the configured port).
             if watchdog {
@@ -500,7 +634,10 @@ final class AppModel: ObservableObject {
             do {
                 try proxyServer.start()
                 if oldPort != 0 {
-                    try systemProxyManager.applyProxy(services: systemProxyManager.listServices(), port: oldPort)
+                    // Never apply an empty list: `services` was verified
+                    // non-empty before the rebind started.
+                    try ensureSnapshotCovers(services)
+                    try systemProxyManager.applyProxy(services: services, port: oldPort)
                     if watchdog { WatchdogController.arm(port: oldPort) }
                     appliedPort = oldPort
                     appliedBindHost = oldBindHost
@@ -767,6 +904,16 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// What quit should do with the system proxy / recovery state. Chosen
+    /// before touching anything so a stale snapshot can never be restored over
+    /// the user's current settings (LC-08).
+    private enum QuitAction {
+        case restore
+        case discardStale
+        case keepRecovery
+        case nothing
+    }
+
     /// Best-effort restore invoked on quit. Uses the persisted snapshot (disk)
     /// so it is correct even if quit races the background enable/disable.
     ///
@@ -780,32 +927,70 @@ final class AppModel: ObservableObject {
         // clear the real app's watchdog marker).
         if DemoMode.isEnabled { return }
         workQueue.sync {
-            let snap = configStore.loadSnapshot()
-            guard snap != nil || proxyServer.isRunning else {
-                WatchdogController.disarm()
-                sshTunnel.stopNow()
-                telemetry.flushNow()
-                return
-            }
-            Log.app.notice("shutdownForQuit(): restoring system proxy")
-            // `restoreOnQuit` only controls the synchronous quit-path restore;
-            // the armed watchdog restores moments after exit when it is enabled.
-            // If the watchdog is disabled, skipping the restore here would leave
-            // the machine pointing at a dead 127.0.0.1 — so always restore then.
-            let canDelegateToWatchdog = config.system.crashWatchdog
-            var restored = false
-            if config.system.restoreOnQuit || !canDelegateToWatchdog {
-                do {
-                    if let snap = snap {
-                        try systemProxyManager.restore(snapshot: snap)
-                    } else {
-                        try systemProxyManager.clearProxy(services: systemProxyManager.listServices())
-                    }
-                    restored = true
-                } catch {
-                    Log.app.error("shutdownForQuit(): restore failed: \(error.localizedDescription)")
+            var snap = configStore.loadSnapshot() ?? snapshot
+            if snap?.isEmpty == true { snap = nil }
+            let appliedThisSession = appliedPort != 0
+            // Never delegate to a watchdog that was never installed (LC-12).
+            let canDelegateToWatchdog = config.system.crashWatchdog && WatchdogController.isInstalled
+
+            // Decide ownership *before* touching anything: only this session's
+            // apply, or a proxy that provably points at us, justifies a restore.
+            let action: QuitAction
+            if appliedThisSession {
+                action = .restore
+            } else if snap != nil {
+                switch systemProxyManager.proxyCheck(port: 0) {
+                case .ours:
+                    action = .restore
+                    Log.app.notice("shutdownForQuit(): found our proxy from an earlier session; recovering")
+                case .clean:
+                    action = .discardStale
+                    Log.app.notice("shutdownForQuit(): proxy is clean and this session never applied routing; discarding the stale snapshot")
+                case .unknown:
+                    action = .keepRecovery
+                    Log.app.error("shutdownForQuit(): cannot determine the system proxy state; keeping snapshot + watchdog armed")
+                }
+            } else {
+                switch systemProxyManager.proxyCheck(port: 0) {
+                case .clean:
+                    action = .nothing
+                case .ours, .unknown:
+                    // No snapshot to restore from; leave recovery to the
+                    // watchdog rather than touching a possible user proxy.
+                    action = .keepRecovery
+                    Log.app.notice("shutdownForQuit(): local/unknown proxy without a snapshot; leaving the watchdog armed")
                 }
             }
+
+            var restored = false
+            if case .restore = action {
+                // `restoreOnQuit` only controls the synchronous quit-path
+                // restore; an installed watchdog restores moments after exit.
+                // Without one, skipping the restore would leave the machine
+                // pointing at a dead 127.0.0.1.
+                if config.system.restoreOnQuit || !canDelegateToWatchdog {
+                    Log.app.notice("shutdownForQuit(): restoring system proxy")
+                    do {
+                        if let snap {
+                            // Prompt-free: no admin dialog during quit/logout.
+                            try systemProxyManager.restoreWithoutPrompt(snapshot: snap)
+                            let sweepPort = appliedPort != 0 ? appliedPort : config.proxy.port
+                            systemProxyManager.clearUnsnapshottedLocalProxies(snapshot: snap, port: sweepPort)
+                            restored = true
+                        } else if let services = systemProxyManager.listServicesChecked(), !services.isEmpty {
+                            try systemProxyManager.clearWithoutPrompt(services: services)
+                            restored = true
+                        } else {
+                            Log.app.error("shutdownForQuit(): cannot read the network service list; not clearing the system proxy")
+                        }
+                    } catch {
+                        Log.app.error("shutdownForQuit(): restore failed; keeping snapshot + watchdog armed: \(error.localizedDescription)")
+                    }
+                } else {
+                    Log.app.notice("shutdownForQuit(): delegating restore to the installed watchdog")
+                }
+            }
+
             if config.system.injectShellEnv {
                 shellEnvInjector.remove(rcFiles: config.system.managedShellRcs)
                 shellEnvInjector.removeEnvFile()
@@ -814,18 +999,31 @@ final class AppModel: ObservableObject {
             // clobber a proxy env we did not publish.
             guiEnvInjector.remove()
             appliedGuiEnv = false
-            if restored {
-                configStore.clearSnapshot()
+
+            switch action {
+            case .restore where restored:
+                clearSnapshotBestEffort()
                 WatchdogController.disarm()
                 // Keep `wasOnKey` so the next launch re-enables routing if it was
                 // on when we quit. Only an explicit `disable()` clears it.
                 proxyServer.stop()
-            } else {
-                // restoreOnQuit is off (and the watchdog is enabled), or the
-                // restore failed: leave the snapshot and the armed watchdog so
-                // the proxy is restored moments after this process exits.
-                Log.app.notice("shutdownForQuit(): leaving watchdog armed to restore")
+            case .restore:
+                // Restore failed, or it was delegated: leave the snapshot and
+                // the armed watchdog so the proxy is repaired after exit.
+                if snap != nil { UserDefaults.standard.set(true, forKey: self.wasOnKey) }
+                Log.app.notice("shutdownForQuit(): leaving snapshot + watchdog armed to restore")
+            case .discardStale, .nothing:
+                // The proxy is provably clean (or nothing was applied): the old
+                // "original" must not survive to overwrite a later user change.
+                clearSnapshotBestEffort()
+                WatchdogController.disarm()
+                UserDefaults.standard.set(false, forKey: self.wasOnKey)
+                proxyServer.stop()
+            case .keepRecovery:
+                if snap != nil { UserDefaults.standard.set(true, forKey: self.wasOnKey) }
+                Log.app.notice("shutdownForQuit(): keeping recovery state; leaving watchdog armed")
             }
+
             telemetry.flushNow()
             sshTunnel.stopNow()
         }
@@ -855,7 +1053,7 @@ final class AppModel: ObservableObject {
         if enabled {
             if state.isActive {
                 WatchdogController.installIfNeeded()
-                WatchdogController.arm(port: config.proxy.port)
+                WatchdogController.arm(port: appliedPort != 0 ? appliedPort : config.proxy.port)
             }
         } else {
             WatchdogController.uninstall()

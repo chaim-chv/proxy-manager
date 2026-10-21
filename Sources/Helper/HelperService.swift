@@ -23,7 +23,7 @@ final class HelperService: NSObject, ProxyManagerHelperProtocol {
             reply(false, "no valid network services")
             return
         }
-        let result = run(NetworksetupCommands.clearProxy(services: valid))
+        let result = run(NetworksetupCommands.clearProxy(services: valid), tolerateMissingServices: true)
         reply(result.0, result.1)
     }
 
@@ -49,16 +49,30 @@ final class HelperService: NSObject, ProxyManagerHelperProtocol {
             reply(false, "no valid network services")
             return
         }
-        let result = run(commands)
+        let result = run(commands, tolerateMissingServices: true)
         reply(result.0, result.1)
     }
 
-    /// Runs a list of `networksetup` argv arrays. Stops at the first failure.
-    private func run(_ commands: [[String]]) -> (Bool, String?) {
+    /// Runs a list of `networksetup` argv arrays.
+    ///
+    /// With `tolerateMissingServices`, services that no longer exist are skipped
+    /// so one deleted USB/dock/VPN service cannot make the whole restore fail.
+    /// The first real error is returned after attempting the rest; if every
+    /// failure was a missing service, the result is success (nothing to
+    /// restore). Apply stays intolerant (the default).
+    private func run(_ commands: [[String]], tolerateMissingServices: Bool = false) -> (Bool, String?) {
+        var firstRealError: String?
         for args in commands {
             let result = runOne(args)
-            if !result.0 { return result }
+            guard !result.0 else { continue }
+            let message = result.1 ?? "networksetup failed"
+            if tolerateMissingServices && NetworksetupCommands.isMissingServiceError(message) {
+                continue
+            }
+            if !tolerateMissingServices { return (false, message) }
+            if firstRealError == nil { firstRealError = message }
         }
+        if let firstRealError { return (false, firstRealError) }
         return (true, nil)
     }
 

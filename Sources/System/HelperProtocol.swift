@@ -134,7 +134,10 @@ enum NetworksetupCommands {
 
     static func restore(snapshot: SystemProxySnapshot) -> [[String]] {
         var cmds: [[String]] = []
-        for (svc, state) in snapshot {
+        // Sorted so command order is deterministic: snapshot is a dictionary,
+        // and a stale service must not make restore behave differently per run.
+        for svc in snapshot.keys.sorted() {
+            guard let state = snapshot[svc] else { continue }
             if !state.webServer.isEmpty, validPort(state.webPort) {
                 cmds.append(["-setwebproxy", svc, state.webServer, state.webPort])
                 cmds.append(["-setwebproxystate", svc, state.webEnabled ? "on" : "off"])
@@ -156,6 +159,31 @@ enum NetworksetupCommands {
             }
         }
         return cmds
+    }
+
+    /// `networksetup`'s message when a command names a service that no longer
+    /// exists (deleted/renamed USB, dock, or VPN service). Restore must skip
+    /// these instead of aborting the whole snapshot and escalating to admin.
+    static func isMissingServiceError(_ text: String) -> Bool {
+        text.lowercased().contains("unable to find item in network database")
+    }
+
+    /// Strips the `*` that `networksetup -listallnetworkservices` prefixes to
+    /// disabled services. A temporarily disabled service still exists and its
+    /// original proxy state must not be silently dropped from a restore.
+    static func normalizeServiceName(_ service: String) -> String {
+        var s = service.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("*") { s.removeFirst() }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Pure filter for restore: keep only snapshot entries whose service still
+    /// exists. `services` may include `*`-disabled names (normalized here). An
+    /// empty result means every snapshotted service is gone — nothing to
+    /// restore, which is a success, not a failure.
+    static func filterSnapshot(_ snapshot: SystemProxySnapshot, toExisting services: [String]) -> SystemProxySnapshot {
+        let existing = Set(services.map(normalizeServiceName).filter { !$0.isEmpty })
+        return snapshot.filter { existing.contains($0.key) }
     }
 
     static func validPort(_ p: String) -> Bool {

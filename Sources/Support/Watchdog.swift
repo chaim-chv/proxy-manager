@@ -117,6 +117,16 @@ enum WatchdogController {
         Log.app.notice("watchdog: LaunchAgent uninstalled")
     }
 
+    /// Whether a watchdog is installed **and** armed for this process. A plist
+    /// alone is not enough: a failed/stale bootstrap leaves the file behind
+    /// while no agent is running, and an armed state owned by another pid is
+    /// stale from another instance. Quit must not delegate to either (LC-12).
+    static var isInstalled: Bool {
+        guard FileManager.default.fileExists(atPath: WatchdogPaths.plistFile.path) else { return false }
+        let state = WatchdogPaths.readArmedState()
+        return state.armed && state.pid == getpid()
+    }
+
     /// Marks routing active for `port`; the watchdog will restore on crash.
     static func arm(port: UInt16) {
         writeArmedState(WatchdogArmedState(armed: true, pid: getpid(), port: port,
@@ -192,9 +202,15 @@ enum WatchdogController {
 struct WatchdogHooks {
     var readState: () -> WatchdogArmedState
     var isAlive: (pid_t) -> Bool
-    var proxyPointsAtLocalhost: (UInt16) -> Bool
+    /// Tri-state so a failed `networksetup` read can never masquerade as clean.
+    var proxyCheck: (UInt16) -> ProxyCheck
     var loadSnapshot: () -> SystemProxySnapshot?
     var restore: (SystemProxySnapshot) throws -> Void
+    /// Clears only services provably pointing at our local proxy (no snapshot).
+    var clearLocalProxy: (UInt16) throws -> Void
+    /// Removes the persisted recovery snapshot once it is no longer needed.
+    /// Called only after a proven clean state or a successful restore.
+    var clearSnapshot: () -> Void
     var removeEnv: () -> Void
     var disarm: () -> Void
     var log: (String) -> Void
@@ -224,37 +240,65 @@ final class WatchdogEngine {
     }
 
     private func performRestore(port: UInt16) -> Bool {
+        // Probe ANY local port, not merely the armed one: a failed re-apply or
+        // an in-flight port change can leave the old port applied while the
+        // watchdog was armed for the new one (LC-07). `.unknown` means at least
+        // one read failed, so it is never evidence of a clean machine (LC-05).
+        switch hooks.proxyCheck(0) {
+        case .unknown:
+            noteRetry("cannot determine system proxy state")
+            return false
+        case .clean:
+            hooks.log("system proxy already clean; disarming")
+            hooks.clearSnapshot()
+            hooks.disarm()
+            attempts = 0
+            return false
+        case .ours:
+            break
+        }
+
         // A snapshot only exists while routing is (or was) applied, so it is
         // safe evidence that we — not the user — set the current proxy.
-        guard let snapshot = hooks.loadSnapshot() else {
-            hooks.log("no snapshot; nothing to restore")
-            hooks.disarm()
-            attempts = 0
-            return false
+        if let snapshot = hooks.loadSnapshot() {
+            do {
+                try hooks.restore(snapshot)
+                hooks.removeEnv()
+                hooks.clearSnapshot()
+                hooks.disarm()
+                attempts = 0
+                hooks.log("restored system proxy after app exit (armed port \(port))")
+                return true
+            } catch {
+                noteRetry("restore failed: \(error.localizedDescription)")
+                return false
+            }
         }
-        guard hooks.proxyPointsAtLocalhost(port) else {
-            hooks.log("system proxy already clean; disarming")
-            hooks.disarm()
-            attempts = 0
-            return false
-        }
+
+        // No snapshot: we can still recover, but only by clearing services that
+        // provably point at our local proxy. Keep armed on any read/clear error.
         do {
-            try hooks.restore(snapshot)
+            try hooks.clearLocalProxy(0)
             hooks.removeEnv()
+            hooks.clearSnapshot()
             hooks.disarm()
             attempts = 0
-            hooks.log("restored system proxy after app exit (port \(port))")
+            hooks.log("no snapshot; cleared local system proxy after app exit")
             return true
         } catch {
-            attempts += 1
-            hooks.log("restore failed (attempt \(attempts)): \(error.localizedDescription)")
-            if attempts >= maxAttempts {
-                // Do NOT disarm: the machine is still broken, so keep retrying on
-                // the next safety tick rather than giving up permanently.
-                attempts = 0
-                hooks.log("restore still failing after \(maxAttempts) attempts; will keep retrying (run ./revert.sh to fix manually)")
-            }
+            noteRetry("no snapshot; clearing local proxy failed: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// Counts a transient failure but never gives up permanently: the machine is
+    /// still broken, so the next safety tick must try again.
+    private func noteRetry(_ what: String) {
+        attempts += 1
+        hooks.log("\(what) (attempt \(attempts))")
+        if attempts >= maxAttempts {
+            attempts = 0
+            hooks.log("\(what) still failing after \(maxAttempts) attempts; will keep retrying (run ./revert.sh to fix manually)")
         }
     }
 
@@ -357,9 +401,17 @@ enum Watchdog {
         return WatchdogHooks(
             readState: { WatchdogPaths.readArmedState() },
             isAlive: { isAppAlive($0) },
-            proxyPointsAtLocalhost: { proxy.currentProxyPointsAtLocalhost(port: $0) },
+            proxyCheck: { proxy.proxyCheck(port: $0) },
             loadSnapshot: { store.loadSnapshot() },
             restore: { try proxy.restoreWithoutPrompt(snapshot: $0) },
+            clearLocalProxy: { try proxy.clearLocalProxies(port: $0) },
+            clearSnapshot: {
+                // Best effort: if the file cannot be removed, move it aside so
+                // a later enable cannot load it as the user's original state.
+                if !store.clearSnapshot() {
+                    _ = store.quarantineSnapshot()
+                }
+            },
             removeEnv: {
                 if store.config.system.injectShellEnv {
                     let injector = ShellEnvInjector(configStore: store)

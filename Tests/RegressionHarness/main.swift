@@ -413,6 +413,48 @@ check("old snapshot (no bypassDomains) decodes", oldDecoded != nil)
 check("old snapshot PAC '(null)' normalized to empty", oldDecoded?["Wi-Fi"]?.pacURL == "")
 check("old snapshot bypass defaults empty", oldDecoded?["Wi-Fi"]?.bypassDomains.isEmpty == true)
 
+print("== Missing-service tolerance ==")
+// A deleted USB/dock/VPN service makes `networksetup` exit 8 with this text.
+// Treating it as a real failure aborts the whole restore and escalates to an
+// admin prompt, so disable/quit/watchdog can never repair the proxy.
+check("missing service error positive", NetworksetupCommands.isMissingServiceError("Unable to find item in network database"))
+check("missing service error case-insensitive", NetworksetupCommands.isMissingServiceError("ERROR: UNABLE TO FIND ITEM IN NETWORK DATABASE"))
+check("permission error is not missing service", !NetworksetupCommands.isMissingServiceError("You must be root to run this tool."))
+check("timeout is not missing service", !NetworksetupCommands.isMissingServiceError("networksetup timed out"))
+check("empty error is not missing service", !NetworksetupCommands.isMissingServiceError(""))
+
+// Restore iterates a dictionary; command order must be deterministic so one
+// stale service cannot change which services get restored on each attempt.
+var zetaState = ServiceProxyState()
+zetaState.webEnabled = true
+zetaState.webServer = "proxy.corp"
+zetaState.webPort = "3128"
+let twoServiceSnapshot: SystemProxySnapshot = ["Zeta": zetaState, "Alpha": ServiceProxyState()]
+let orderedRestore = NetworksetupCommands.restore(snapshot: twoServiceSnapshot)
+check("restore deterministic: Alpha commands first",
+      orderedRestore.prefix(3).map { $0.count > 1 ? $0[1] : "" } == ["Alpha", "Alpha", "Alpha"])
+check("restore deterministic: Zeta follows Alpha",
+      orderedRestore.count > 3 && orderedRestore[3].count > 1 && orderedRestore[3][1] == "Zeta")
+
+// Filtering to still-existing services must keep a disabled service (the `*`
+// prefix from -listallnetworkservices is cosmetic) and drop a deleted one.
+var filterState = ServiceProxyState()
+filterState.webEnabled = true
+filterState.webServer = "proxy.corp"
+filterState.webPort = "3128"
+let filterInput: SystemProxySnapshot = [
+    "Wi-Fi": filterState,
+    "USB 10/100/1000 LAN": filterState,
+    "Deleted Dock": filterState,
+]
+let filtered = NetworksetupCommands.filterSnapshot(filterInput, toExisting: ["Wi-Fi", "*USB 10/100/1000 LAN"])
+check("filter keeps existing service", filtered["Wi-Fi"] != nil)
+check("filter keeps `*`-disabled service", filtered["USB 10/100/1000 LAN"] != nil)
+check("filter drops deleted service", filtered["Deleted Dock"] == nil)
+check("filter drops nothing else", filtered.count == 2)
+check("filter empty when no service exists",
+      NetworksetupCommands.filterSnapshot(filterInput, toExisting: []).isEmpty)
+
 print("")
 if failures == 0 {
     print("PASS: \(checks) checks")
