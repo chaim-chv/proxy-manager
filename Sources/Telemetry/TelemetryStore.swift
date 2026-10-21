@@ -156,6 +156,11 @@ final class TelemetryStore: ObservableObject {
     private var activeCount = 0
     private var lastPurgeMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
 
+    /// Bumped by `purge()` under `lock`. Work captured before the bump (UI
+    /// blocks, insert batches, completion appends) is stale: applying it after
+    /// the clear would resurrect rows/stats the user asked to delete.
+    private var generation: UInt64 = 0
+
     // Failed batches stay queued (bounded) instead of being dropped on a
     // transient lock. Guarded by `lock`; SQLite work never runs under it.
     private var retryBatches: [[RequestEvent]] = []
@@ -345,13 +350,19 @@ final class TelemetryStore: ObservableObject {
     /// completed request (persisted + counted exactly like `record`).
     func endSession(_ id: UUID, _ event: RequestEvent) {
         lock.lock()
+        // A session removed by `purge()` was explicitly discarded: don't append
+        // its completion (or a finish the main block would have to undo).
+        let existed = sessions.removeValue(forKey: id) != nil
         if let idx = sessionOrder.firstIndex(of: id) {
             sessionOrder.remove(at: idx)
         }
-        sessions.removeValue(forKey: id)
-        pendingFinishes.append(id)
+        if existed {
+            pendingFinishes.append(id)
+        }
         lock.unlock()
-        appendCompletion(event)
+        if existed {
+            appendCompletion(event)
+        }
     }
 
     private func appendCompletion(_ event: RequestEvent) {
@@ -385,6 +396,7 @@ final class TelemetryStore: ObservableObject {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let canRetry = retriesDue(nowMs: nowMs)
         lock.lock()
+        let gen = generation
         let batch = pending
         let delta = pendingDelta
         let active = activeCount
@@ -422,13 +434,13 @@ final class TelemetryStore: ObservableObject {
         if hasUIWork {
             DispatchQueue.main.async { [weak self] in
                 self?.applyToUI(starts: starts, updates: updates, finishes: finishes,
-                                batch: batch, delta: delta, active: active)
+                                batch: batch, delta: delta, active: active, generation: gen)
             }
         }
 
         if flushDB {
             dbQueue.async { [weak self] in
-                self?.insertBatch(dbBatch)
+                self?.insertBatch(dbBatch, generation: gen)
             }
         }
 
@@ -437,7 +449,15 @@ final class TelemetryStore: ObservableObject {
 
     private func applyToUI(starts: [RequestEvent], updates: [RequestEvent],
                            finishes: [UUID], batch: [RequestEvent],
-                           delta: StatsSnapshot, active: Int) {
+                           delta: StatsSnapshot, active: Int, generation: UInt64) {
+        // A flush that snapshotted pre-purge state may have enqueued this block
+        // before `purge()` enqueued its clear. Dropping it prevents the old
+        // rows/stats from reappearing after "Clear".
+        lock.lock()
+        let current = self.generation
+        lock.unlock()
+        guard generation == current else { return }
+
         // A connection that began AND ended inside one flush tick must not
         // leave a ghost live row behind.
         let finished = Set(finishes)
@@ -491,14 +511,23 @@ final class TelemetryStore: ObservableObject {
 
     // MARK: - SQLite (batched)
 
-    private func insertBatch(_ events: [RequestEvent]) {
+    private func insertBatch(_ events: [RequestEvent], generation: UInt64) {
+        // Purge invalidates any batch captured before it. If this work is still
+        // queued, drop it instead of re-inserting rows the DELETE removed. An
+        // already-running batch is ordered before the purge DELETE on this same
+        // serial `dbQueue`, so it cannot land after the delete.
+        lock.lock()
+        let current = self.generation
+        lock.unlock()
+        guard generation == current else { return }
+
         var batches = takeRetries()
         if !events.isEmpty { batches.append(events) }
         guard !batches.isEmpty else { return }
         guard let db = db, let stmt = insertStmt else {
             let queued = batches.reduce(0) { $0 + $1.count }
             noteDatabaseFailure("telemetry unavailable (db=\(db != nil), insertStmt=\(insertStmt != nil)); \(queued) event(s) queued for retry")
-            requeue(batches)
+            requeue(batches, generation: generation)
             return
         }
         var index = 0
@@ -506,7 +535,7 @@ final class TelemetryStore: ObservableObject {
             if insertTransaction(batches[index], db: db, stmt: stmt) {
                 index += 1
             } else {
-                requeue(Array(batches[index...]))
+                requeue(Array(batches[index...]), generation: generation)
                 return
             }
         }
@@ -612,11 +641,17 @@ final class TelemetryStore: ObservableObject {
         return batches
     }
 
-    private func requeue(_ batches: [[RequestEvent]]) {
+    private func requeue(_ batches: [[RequestEvent]], generation: UInt64) {
         let incoming = batches.filter { !$0.isEmpty }
         guard !incoming.isEmpty else { return }
         var dropped = 0
         lock.lock()
+        // A failed pre-purge batch must not sit in the retry queue and get
+        // written by the next flush after `purge()` cleared everything.
+        guard generation == self.generation else {
+            lock.unlock()
+            return
+        }
         retryBatches.append(contentsOf: incoming)
         for batch in incoming { retryEventCount += batch.count }
         while retryBatches.count > Self.maxRetryBatches || retryEventCount > Self.maxRetryEvents {
@@ -835,6 +870,7 @@ final class TelemetryStore: ObservableObject {
     /// sub-second of telemetry is not lost.
     func flushNow() {
         lock.lock()
+        let gen = generation
         let accumulated = dbAccumulator
         let buffered = pending
         dbAccumulator.removeAll(keepingCapacity: true)
@@ -842,7 +878,7 @@ final class TelemetryStore: ObservableObject {
         lock.unlock()
         let all = accumulated + buffered
         dbQueue.sync {
-            insertBatch(all)
+            insertBatch(all, generation: gen)
             if let db = db {
                 checkpointTruncate(db, "quit")
             }
@@ -851,6 +887,12 @@ final class TelemetryStore: ObservableObject {
 
     func purge() {
         lock.lock()
+        generation &+= 1
+        let gen = generation
+        // `activeCount` tracks accepted connections; live telemetry sessions
+        // begin slightly later. Preserve the higher of the two so "Active"
+        // survives Clear while those connections are still streaming.
+        let liveCount = max(activeCount, sessions.count)
         pending.removeAll()
         dbAccumulator.removeAll()
         pendingDelta = StatsSnapshot()
@@ -862,14 +904,28 @@ final class TelemetryStore: ObservableObject {
         retryEventCount = 0
         retryAfterMs = 0
         retryDropReported = false
-        lock.unlock()
+        // Enqueue the UI clear and the DELETE while still holding the lock, so
+        // no post-purge flush can enqueue work ahead of them (which would then
+        // be wiped from the UI or re-inserted after the delete). `async` does
+        // not block, so holding the lock here cannot deadlock.
         DispatchQueue.main.async { [weak self] in
-            self?.recentRequests = []
-            self?.liveRequests = []
-            self?.stats = StatsSnapshot()
+            guard let self = self else { return }
+            self.lock.lock()
+            let stillCurrent = self.generation == gen
+            self.lock.unlock()
+            guard stillCurrent else { return }
+            self.recentRequests = []
+            self.liveRequests = []
+            var cleared = StatsSnapshot()
+            cleared.activeConnections = liveCount
+            self.stats = cleared
         }
         dbQueue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
+            self.lock.lock()
+            let stillCurrent = self.generation == gen
+            self.lock.unlock()
+            guard stillCurrent else { return }
             guard self.execChecked(db, "DELETE FROM requests;", "history purge") else { return }
             self.checkpointTruncate(db, "history purge")
             // `DELETE` only frees pages for reuse; `VACUUM` is what returns the
@@ -879,6 +935,7 @@ final class TelemetryStore: ObservableObject {
                 self.checkpointTruncate(db, "history vacuum")
             }
         }
+        lock.unlock()
     }
 
     // MARK: - Queries (charts)

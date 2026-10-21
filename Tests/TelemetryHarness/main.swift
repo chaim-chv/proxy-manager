@@ -21,6 +21,26 @@ func check(_ name: String, _ condition: Bool) {
     else { failures += 1; print("  FAIL \(name)") }
 }
 
+/// Pumps the main run loop in short slices until `condition` holds or the
+/// timeout expires. The telemetry store hops UI work onto the main queue and
+/// runs its 10 Hz flusher on a global queue, so a plain `Thread.sleep` would
+/// neither run `applyToUI` nor be deterministic.
+func pumpMain(timeout: TimeInterval = 5, until condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+}
+
+/// Pumps the main queue for a bounded slice so at least one 10 Hz flush tick
+/// (0.1 s) is guaranteed to have completed, then returns.
+func pumpMain(seconds: TimeInterval) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+}
+
 func openDB(_ path: String) -> OpaquePointer? {
     var db: OpaquePointer?
     guard sqlite3_open(path, &db) == SQLITE_OK else { return nil }
@@ -319,7 +339,73 @@ let clamped = liveCapStore.currentLimits()
 check("setLimits clamps maxRows to 0...10,000,000", clamped.maxRows == 0)
 check("setLimits clamps retentionDays to 1...3650", clamped.retentionDays == 3650)
 
-for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath] {
+print("== purge drops an in-flight session instead of resurrecting it ==")
+let purgePath = tmpDir + "pm-telemetry-purge-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: purgePath)
+let purgeStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgePath), maxRows: 1000, retentionDays: 1)
+let purgedSession = purgeStore.beginSession(RequestEvent(host: "purged-live.example", route: .tunnel))
+purgeStore.record(RequestEvent(host: "purged-pending.example", route: .direct))
+purgeStore.purge()
+purgeStore.endSession(purgedSession, RequestEvent(host: "purged-live.example", route: .tunnel))
+// A post-purge live session forces a flush tick to publish UI work, proving
+// that the stale completion above was not merely waiting in `pending`.
+let markerSession = purgeStore.beginSession(RequestEvent(host: "marker-live.example", route: .tunnel))
+pumpMain { purgeStore.liveRequests.contains { $0.host == "marker-live.example" } }
+check("purged live session is not published as a completed row",
+      purgeStore.recentRequests.isEmpty)
+check("purged live row is not in the feed",
+      !purgeStore.liveRequests.contains { $0.host == "purged-live.example" })
+purgeStore.flushNow()
+if let db = openDB(purgePath) {
+    check("purged in-flight session never reaches SQLite",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='purged-live.example'") == 0)
+    check("pre-purge pending event never reaches SQLite",
+          queryInt(db, "SELECT COUNT(*) FROM requests") == 0)
+    sqlite3_close(db)
+} else {
+    check("open purge DB", false)
+}
+purgeStore.endSession(markerSession, RequestEvent(host: "marker-live.example", route: .tunnel))
+
+print("== purge + flushNow cannot re-insert a pre-purge batch ==")
+let purgeBatchPath = tmpDir + "pm-telemetry-purge-batch-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: purgeBatchPath)
+let purgeBatchStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgeBatchPath), maxRows: 1000, retentionDays: 1)
+for i in 0..<1_200 {
+    purgeBatchStore.record(RequestEvent(host: "purge-batch\(i).example", route: .direct))
+}
+purgeBatchStore.purge()
+purgeBatchStore.flushNow()
+if let db = openDB(purgeBatchPath) {
+    check("flushNow after purge writes zero rows", queryInt(db, "SELECT COUNT(*) FROM requests") == 0)
+    sqlite3_close(db)
+} else {
+    check("open purge-batch DB", false)
+}
+
+print("== purge preserves live active connections and clears stats ==")
+let purgeStatsPath = tmpDir + "pm-telemetry-purge-stats-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: purgeStatsPath)
+let purgeStatsStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgeStatsPath), maxRows: 1000, retentionDays: 1)
+let liveSession = purgeStatsStore.beginSession(RequestEvent(host: "stats-live.example", route: .tunnel))
+purgeStatsStore.record(RequestEvent(host: "stats-pre.example", route: .tunnel,
+                                    bytesIn: 10, bytesOut: 20))
+purgeStatsStore.purge()
+pumpMain { purgeStatsStore.stats.activeConnections >= 1 }
+check("purge keeps activeConnections for a live session",
+      purgeStatsStore.stats.activeConnections >= 1)
+check("purge zeroes request counters", purgeStatsStore.stats.totalRequests == 0)
+check("purge zeroes byte counters",
+      purgeStatsStore.stats.bytesIn == 0 && purgeStatsStore.stats.bytesOut == 0)
+check("purge clears the live feed row",
+      !purgeStatsStore.liveRequests.contains { $0.host == "stats-live.example" })
+purgeStatsStore.endSession(liveSession, RequestEvent(host: "stats-live.example", route: .tunnel))
+pumpMain(seconds: 0.3)
+check("a purged session that ends later does not return to the feed",
+      !purgeStatsStore.recentRequests.contains { $0.host == "stats-live.example" })
+
+for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
+             purgePath, purgeBatchPath, purgeStatsPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")
