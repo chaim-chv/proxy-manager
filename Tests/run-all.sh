@@ -73,10 +73,12 @@ run_harness WindowTrackerHarness \
   Tests/WindowTrackerHarness/main.swift
 
 run_harness RegressionHarness \
-  Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
+  Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
+  Sources/Routing/RoutingEngine.swift \
   Sources/Routing/AppIdentity.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
   Sources/Proxy/HostClassifier.swift \
+  Sources/Support/Log.swift \
   Sources/System/HelperProtocol.swift \
   Tests/RegressionHarness/main.swift
 

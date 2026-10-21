@@ -277,6 +277,98 @@ let weirdDecoded = try? JSONDecoder().decode(AppConfig.self, from: weirdApp)
 check("unknown app enum values do not wipe config", weirdDecoded != nil)
 check("unknown app enum keeps other data", weirdDecoded?.targets.count == 1)
 check("unknown app mode falls back to targets", weirdDecoded?.apps.rules.first?.mode == .targets)
+check("unknown app routing disables the rule", weirdDecoded?.apps.rules.first?.enabled == false)
+
+print("== Tolerant config decode (TC-01) ==")
+func decodeConfig(_ json: String) -> AppConfig? {
+    try? JSONDecoder().decode(AppConfig.self, from: Data(json.utf8))
+}
+
+// One bad value must never wipe every other setting. This fixture combines an
+// unknown enum, a wrong JSON type, an out-of-range port, a malformed UUID and a
+// malformed array entry.
+let hostileJSON = """
+{
+  "version": 1,
+  "proxy": {"bindHost": 123, "port": 70000},
+  "tunnel": {
+    "mode": "FUTURE",
+    "host": 42,
+    "port": -1,
+    "managed": {"sshPort": 0, "socksPort": "abc", "auth": "FUTURE", "sshHost": 7}
+  },
+  "policy": {"failClosedWhenTunnelDown": "yes"},
+  "system": {
+    "appearanceMode": "FUTURE",
+    "iconMode": "FUTURE",
+    "managedShellRcs": "nope",
+    "crashWatchdog": "yes",
+    "injectShellEnv": 1
+  },
+  "monitor": {"retentionDays": 99999, "maxRows": -5},
+  "targets": [
+    {"id": "not-a-uuid", "pattern": "keep.example.com"},
+    {"id": "00000000-0000-0000-0000-000000000002", "pattern": 123},
+    "not-an-object",
+    {"id": "00000000-0000-0000-0000-000000000003", "pattern": "keep2.example.com", "enabled": "yes"}
+  ],
+  "apps": {
+    "enabled": true,
+    "defaultMode": "FUTURE",
+    "rules": [
+      {"id": "bad", "key": "com.example.future", "keyKind": "FUTURE", "mode": "FUTURE"},
+      {"key": "/usr/bin/ok", "keyKind": "EXECUTABLE", "mode": "DIRECT"},
+      {"key": 123, "keyKind": "BUNDLE", "mode": "TUNNEL"},
+      "junk"
+    ]
+  },
+  "unknownTopLevel": {"x": 1}
+}
+"""
+let hostile = decodeConfig(hostileJSON)
+check("hostile config decodes", hostile != nil)
+check("wrong-typed bindHost falls back", hostile?.proxy.bindHost == "127.0.0.1")
+check("port 70000 clamps to 65535", hostile?.proxy.port == 65535)
+check("unknown tunnel mode falls back to manual", hostile?.tunnel.mode == .manual)
+check("wrong-typed tunnel host falls back", hostile?.tunnel.host == "127.0.0.1")
+check("port -1 uses the documented default", hostile?.tunnel.port == 1080)
+check("ssh port 0 uses the documented default", hostile?.tunnel.managed.sshPort == 22)
+check("wrong-typed socks port uses the default", hostile?.tunnel.managed.socksPort == 1080)
+check("unknown SSH auth falls back to key", hostile?.tunnel.managed.auth == .key)
+check("wrong-typed sshHost falls back", hostile?.tunnel.managed.sshHost == "")
+check("unknown appearance mode falls back to system", hostile?.system.appearanceMode == .system)
+check("unknown icon mode falls back", hostile?.system.iconMode == .menuBarAndDock)
+check("wrong-typed managedShellRcs falls back", hostile?.system.managedShellRcs == ["~/.zshrc"])
+check("wrong-typed system bools fall back",
+      hostile?.system.crashWatchdog == true && hostile?.system.injectShellEnv == true)
+check("wrong-typed policy bool falls back", hostile?.policy.failClosedWhenTunnelDown == false)
+check("retentionDays clamps to 3650", hostile?.monitor.retentionDays == 3650)
+check("maxRows clamps to 0", hostile?.monitor.maxRows == 0)
+check("valid targets survive invalid entries",
+      hostile?.targets.map(\.pattern) == ["keep.example.com", "keep2.example.com"])
+check("malformed target UUID is regenerated", hostile?.targets.first?.id != nil)
+check("wrong-typed target enabled falls back", hostile?.targets.last?.enabled == true)
+check("unknown app defaultMode falls back", hostile?.apps.defaultMode == .targets)
+check("invalid app rules are skipped", hostile?.apps.rules.count == 2)
+check("unknown app routing keeps a disabled rule", hostile?.apps.rules.first?.enabled == false)
+check("unknown app routing rule keeps its key", hostile?.apps.rules.first?.key == "com.example.future")
+check("valid app rule survives",
+      hostile?.apps.rules.last?.key == "/usr/bin/ok" && hostile?.apps.rules.last?.mode == .direct)
+check("unknown top-level keys are ignored", hostile?.version == 1)
+
+let nullsJSON = """
+{"version": null, "proxy": null, "tunnel": null, "policy": null, "system": null,
+ "targets": null, "monitor": null, "lock": null, "apps": null}
+"""
+let nulls = decodeConfig(nullsJSON)
+check("null fields decode to defaults", nulls != nil)
+check("null proxy uses defaults", nulls?.proxy.port == 8888)
+check("null targets yields an empty allow-list", nulls?.targets.isEmpty == true)
+check("null apps block defaults off", nulls?.apps.enabled == false)
+check("null version defaults to 1", nulls?.version == 1)
+
+let negProxy = decodeConfig("{\"proxy\":{\"port\":-1}}")
+check("proxy port -1 uses the documented default", negProxy?.proxy.port == 8888)
 
 print("== Per-app routing precedence ==")
 func appIdentity(bundle: String? = nil, path: String = "/usr/bin/x",
@@ -510,6 +602,77 @@ check("filter drops deleted service", filtered["Deleted Dock"] == nil)
 check("filter drops nothing else", filtered.count == 2)
 check("filter empty when no service exists",
       NetworksetupCommands.filterSnapshot(filterInput, toExisting: []).isEmpty)
+
+print("== ConfigStore load states (TC-02) ==")
+let configFm = FileManager.default
+let configTmp = configFm.temporaryDirectory
+    .appendingPathComponent("pm-config-tests-\(UUID().uuidString)", isDirectory: true)
+try? configFm.createDirectory(at: configTmp, withIntermediateDirectories: true)
+
+// Isolation contract: PROXYMANAGER_SUPPORT_DIR redirects the default store so
+// a harness run can never touch the real Application Support directory.
+setenv("PROXYMANAGER_SUPPORT_DIR", configTmp.path, 1)
+let isolatedStore = ConfigStore()
+check("PROXYMANAGER_SUPPORT_DIR redirects the config path",
+      isolatedStore.configURL.path.hasPrefix(configTmp.path + "/"))
+check("missing config is created with defaults",
+      configFm.fileExists(atPath: isolatedStore.configURL.path)
+      && isolatedStore.config.targets.isEmpty)
+check("missing config is not a failed load", isolatedStore.loadFailed == false)
+let isolatedPerms = (try? configFm.attributesOfItem(atPath: isolatedStore.configURL.path))?[.posixPermissions] as? NSNumber
+check("created config is owner-only", isolatedPerms?.intValue == 0o600)
+unsetenv("PROXYMANAGER_SUPPORT_DIR")
+
+// Corrupt file -> timestamped backup, then defaults.
+let corruptDir = configTmp.appendingPathComponent("corrupt", isDirectory: true)
+try? configFm.createDirectory(at: corruptDir, withIntermediateDirectories: true)
+let corruptURL = corruptDir.appendingPathComponent("config.json")
+let garbage = Data("not json {{{".utf8)
+try? garbage.write(to: corruptURL)
+let corruptStore = ConfigStore(configURL: corruptURL)
+let corruptFiles = (try? configFm.contentsOfDirectory(atPath: corruptDir.path)) ?? []
+let backups = corruptFiles.filter { $0.hasPrefix("config.json.corrupt-") }
+check("corrupt config creates a timestamped backup", backups.count == 1)
+let backupBytes = backups.first.flatMap {
+    try? Data(contentsOf: corruptDir.appendingPathComponent($0))
+}
+check("corrupt backup preserves the original bytes", backupBytes == garbage)
+check("corrupt config starts from defaults",
+      corruptStore.config.targets.isEmpty && corruptStore.loadFailed == false)
+let replaced = try? JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: corruptURL))
+check("corrupt config is replaced by valid defaults", replaced != nil)
+
+let garbage2 = Data("also not json".utf8)
+try? garbage2.write(to: corruptURL)
+_ = ConfigStore(configURL: corruptURL)
+let afterSecond = (try? configFm.contentsOfDirectory(atPath: corruptDir.path)) ?? []
+check("a newer corrupt backup never replaces an older one",
+      afterSecond.filter { $0.hasPrefix("config.json.corrupt-") }.count == 2)
+
+// Unreadable file -> keep it, use in-memory defaults, refuse to save.
+let unreadableDir = configTmp.appendingPathComponent("unreadable", isDirectory: true)
+try? configFm.createDirectory(at: unreadableDir, withIntermediateDirectories: true)
+let unreadableURL = unreadableDir.appendingPathComponent("config.json")
+let originalConfig = Data("{\"targets\":[{\"pattern\":\"keep.me\"}]}".utf8)
+try? originalConfig.write(to: unreadableURL)
+try? configFm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadableURL.path)
+let unreadableStore = ConfigStore(configURL: unreadableURL)
+try? configFm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: unreadableURL.path)
+let preserved = try? Data(contentsOf: unreadableURL)
+check("unreadable config is not overwritten", preserved == originalConfig)
+check("unreadable config sets loadFailed", unreadableStore.loadFailed)
+check("unreadable config runs on in-memory defaults", unreadableStore.config.targets.isEmpty)
+unreadableStore.save(AppConfig())
+let afterSave = try? Data(contentsOf: unreadableURL)
+check("save refuses to overwrite an unreadable config", afterSave == originalConfig)
+unreadableStore.reset()
+let afterReset = try? Data(contentsOf: unreadableURL)
+check("reset clears the failed-load latch", unreadableStore.loadFailed == false)
+check("reset explicitly saves defaults",
+      afterReset != originalConfig
+      && (try? JSONDecoder().decode(AppConfig.self, from: afterReset ?? Data())) != nil)
+
+try? configFm.removeItem(at: configTmp)
 
 print("")
 if failures == 0 {

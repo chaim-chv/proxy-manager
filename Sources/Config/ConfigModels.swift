@@ -1,5 +1,60 @@
 import Foundation
 
+/// Non-throwing field decoding for config files. `decodeIfPresent` only covers
+/// a missing key; an unknown enum raw value, a wrong JSON type, an
+/// out-of-range integer or a malformed UUID still throws and would fail the
+/// whole `AppConfig` decode (TC-01).
+private extension KeyedDecodingContainer {
+    func tolerant<T: Decodable>(_ key: Key, _ fallback: T) -> T {
+        (try? decode(T.self, forKey: key)) ?? fallback
+    }
+
+    /// Ports are stored as `UInt16` but decoded through `Int` so 70000 clamps to
+    /// 65535 instead of throwing, and 0/negative fall back to the documented
+    /// default (a zero port is never a usable proxy/SOCKS/SSH port).
+    func tolerantPort(_ key: Key, _ fallback: UInt16) -> UInt16 {
+        guard let raw = try? decode(Int.self, forKey: key), raw > 0 else { return fallback }
+        return UInt16(clamping: raw)
+    }
+
+    func tolerantClampedInt(_ key: Key, _ fallback: Int, _ range: ClosedRange<Int>) -> Int {
+        guard let raw = try? decode(Int.self, forKey: key) else { return fallback }
+        return min(max(raw, range.lowerBound), range.upperBound)
+    }
+}
+
+/// Element-level wrapper so one malformed array entry (non-object, wrong field
+/// type) cannot reject the whole list; valid entries survive.
+private struct LenientTargetRule: Decodable {
+    private enum CodingKeys: String, CodingKey { case pattern }
+    let value: TargetRule?
+
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self),
+              let pattern = try? c.decode(String.self, forKey: .pattern),
+              !pattern.trimmingCharacters(in: .whitespaces).isEmpty else {
+            value = nil
+            return
+        }
+        value = try? TargetRule(from: decoder)
+    }
+}
+
+private struct LenientAppRule: Decodable {
+    private enum CodingKeys: String, CodingKey { case key }
+    let value: AppRule?
+
+    init(from decoder: Decoder) throws {
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self),
+              let key = try? c.decode(String.self, forKey: .key),
+              !key.trimmingCharacters(in: .whitespaces).isEmpty else {
+            value = nil
+            return
+        }
+        value = try? AppRule(from: decoder)
+    }
+}
+
 enum Route: String, Codable, CaseIterable, Identifiable {
     case tunnel = "TUNNEL"
     case direct = "DIRECT"
@@ -23,9 +78,9 @@ struct TargetRule: Identifiable, Codable, Equatable {
     // whole config load (see AppConfig).
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        pattern = try c.decodeIfPresent(String.self, forKey: .pattern) ?? ""
-        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        id = c.tolerant(.id, UUID())
+        pattern = c.tolerant(.pattern, "")
+        enabled = c.tolerant(.enabled, true)
     }
 }
 
@@ -85,11 +140,25 @@ struct AppRule: Identifiable, Codable, Equatable {
     // whole config load.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        key = try c.decodeIfPresent(String.self, forKey: .key) ?? ""
-        keyKind = (try? c.decode(AppRuleKeyKind.self, forKey: .keyKind)) ?? .bundle
-        mode = (try? c.decode(AppRoutingMode.self, forKey: .mode)) ?? .targets
-        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        id = c.tolerant(.id, UUID())
+        key = c.tolerant(.key, "")
+        keyKind = c.tolerant(.keyKind, .bundle)
+        mode = c.tolerant(.mode, .targets)
+        // An unknown/wrong-typed routing value must never silently take on a
+        // different meaning. Keep the rule (so it is visible/fixable) but
+        // disable it: that is the safe fallback (TC-01).
+        var unknownRouting = false
+        if c.contains(.keyKind),
+           (try? c.decode(String.self, forKey: .keyKind))
+               .flatMap(AppRuleKeyKind.init(rawValue:)) == nil {
+            unknownRouting = true
+        }
+        if c.contains(.mode),
+           (try? c.decode(String.self, forKey: .mode))
+               .flatMap(AppRoutingMode.init(rawValue:)) == nil {
+            unknownRouting = true
+        }
+        enabled = c.tolerant(.enabled, true) && !unknownRouting
     }
 }
 
@@ -105,10 +174,14 @@ struct AppSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
-        defaultMode = (try? c.decode(AppRoutingMode.self, forKey: .defaultMode)) ?? .targets
-        recordInTelemetry = try c.decodeIfPresent(Bool.self, forKey: .recordInTelemetry) ?? true
-        rules = try c.decodeIfPresent([AppRule].self, forKey: .rules) ?? []
+        enabled = c.tolerant(.enabled, false)
+        defaultMode = c.tolerant(.defaultMode, .targets)
+        recordInTelemetry = c.tolerant(.recordInTelemetry, true)
+        if let wrapped = try? c.decode([LenientAppRule].self, forKey: .rules) {
+            rules = wrapped.compactMap(\.value)
+        } else {
+            rules = []
+        }
     }
 }
 
@@ -120,8 +193,8 @@ struct ProxySettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        bindHost = try c.decodeIfPresent(String.self, forKey: .bindHost) ?? "127.0.0.1"
-        port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? 8888
+        bindHost = c.tolerant(.bindHost, "127.0.0.1")
+        port = c.tolerantPort(.port, 8888)
     }
 }
 
@@ -153,13 +226,13 @@ struct ManagedTunnelSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
-        sshPort = try c.decodeIfPresent(UInt16.self, forKey: .sshPort) ?? 22
-        username = try c.decodeIfPresent(String.self, forKey: .username) ?? ""
-        auth = try c.decodeIfPresent(SSHAuthMethod.self, forKey: .auth) ?? .key
-        keyPath = try c.decodeIfPresent(String.self, forKey: .keyPath) ?? ""
-        socksHost = try c.decodeIfPresent(String.self, forKey: .socksHost) ?? "127.0.0.1"
-        socksPort = try c.decodeIfPresent(UInt16.self, forKey: .socksPort) ?? 1080
+        sshHost = c.tolerant(.sshHost, "")
+        sshPort = c.tolerantPort(.sshPort, 22)
+        username = c.tolerant(.username, "")
+        auth = c.tolerant(.auth, .key)
+        keyPath = c.tolerant(.keyPath, "")
+        socksHost = c.tolerant(.socksHost, "127.0.0.1")
+        socksPort = c.tolerantPort(.socksPort, 1080)
     }
 }
 
@@ -185,12 +258,12 @@ struct TunnelSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        mode = try c.decodeIfPresent(TunnelMode.self, forKey: .mode) ?? .manual
-        host = try c.decodeIfPresent(String.self, forKey: .host) ?? "127.0.0.1"
-        port = try c.decodeIfPresent(UInt16.self, forKey: .port) ?? 1080
-        supervised = try c.decodeIfPresent(Bool.self, forKey: .supervised) ?? false
-        launchdLabel = try c.decodeIfPresent(String.self, forKey: .launchdLabel) ?? ""
-        managed = try c.decodeIfPresent(ManagedTunnelSettings.self, forKey: .managed) ?? ManagedTunnelSettings()
+        mode = c.tolerant(.mode, .manual)
+        host = c.tolerant(.host, "127.0.0.1")
+        port = c.tolerantPort(.port, 1080)
+        supervised = c.tolerant(.supervised, false)
+        launchdLabel = c.tolerant(.launchdLabel, "")
+        managed = c.tolerant(.managed, ManagedTunnelSettings())
     }
 
     func encode(to encoder: Encoder) throws {
@@ -211,7 +284,7 @@ struct PolicySettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        failClosedWhenTunnelDown = try c.decodeIfPresent(Bool.self, forKey: .failClosedWhenTunnelDown) ?? false
+        failClosedWhenTunnelDown = c.tolerant(.failClosedWhenTunnelDown, false)
     }
 }
 
@@ -293,15 +366,15 @@ struct SystemSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        injectShellEnv = try c.decodeIfPresent(Bool.self, forKey: .injectShellEnv) ?? true
-        injectGuiEnv = try c.decodeIfPresent(Bool.self, forKey: .injectGuiEnv) ?? true
-        launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
-        restoreOnQuit = try c.decodeIfPresent(Bool.self, forKey: .restoreOnQuit) ?? true
-        colorizeMenuIcon = try c.decodeIfPresent(Bool.self, forKey: .colorizeMenuIcon) ?? true
-        appearanceMode = try c.decodeIfPresent(AppearanceMode.self, forKey: .appearanceMode) ?? .system
-        iconMode = try c.decodeIfPresent(AppIconMode.self, forKey: .iconMode) ?? .menuBarAndDock
-        managedShellRcs = try c.decodeIfPresent([String].self, forKey: .managedShellRcs) ?? ["~/.zshrc"]
-        crashWatchdog = try c.decodeIfPresent(Bool.self, forKey: .crashWatchdog) ?? true
+        injectShellEnv = c.tolerant(.injectShellEnv, true)
+        injectGuiEnv = c.tolerant(.injectGuiEnv, true)
+        launchAtLogin = c.tolerant(.launchAtLogin, false)
+        restoreOnQuit = c.tolerant(.restoreOnQuit, true)
+        colorizeMenuIcon = c.tolerant(.colorizeMenuIcon, true)
+        appearanceMode = c.tolerant(.appearanceMode, .system)
+        iconMode = c.tolerant(.iconMode, .menuBarAndDock)
+        managedShellRcs = c.tolerant(.managedShellRcs, ["~/.zshrc"])
+        crashWatchdog = c.tolerant(.crashWatchdog, true)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -327,11 +400,9 @@ struct MonitorSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let decodedRetention = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 7
-        retentionDays = min(max(decodedRetention, 1), 3_650)
-        let decodedMaxRows = try c.decodeIfPresent(Int.self, forKey: .maxRows) ?? 500_000
-        maxRows = min(max(decodedMaxRows, 0), 10_000_000)
-        recordPaths = try c.decodeIfPresent(Bool.self, forKey: .recordPaths) ?? true
+        retentionDays = c.tolerantClampedInt(.retentionDays, 7, 1...3_650)
+        maxRows = c.tolerantClampedInt(.maxRows, 500_000, 0...10_000_000)
+        recordPaths = c.tolerant(.recordPaths, true)
     }
 }
 
@@ -344,7 +415,7 @@ struct LockSettings: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        enabled = c.tolerant(.enabled, false)
     }
 }
 
@@ -366,15 +437,19 @@ struct AppConfig: Codable, Equatable {
     // config (including the user's target list) to be wiped on upgrade.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
-        proxy = try c.decodeIfPresent(ProxySettings.self, forKey: .proxy) ?? ProxySettings()
-        tunnel = try c.decodeIfPresent(TunnelSettings.self, forKey: .tunnel) ?? TunnelSettings()
-        policy = try c.decodeIfPresent(PolicySettings.self, forKey: .policy) ?? PolicySettings()
-        system = try c.decodeIfPresent(SystemSettings.self, forKey: .system) ?? SystemSettings()
-        targets = try c.decodeIfPresent([TargetRule].self, forKey: .targets) ?? AppConfig.defaultTargets()
-        monitor = try c.decodeIfPresent(MonitorSettings.self, forKey: .monitor) ?? MonitorSettings()
-        lock = try c.decodeIfPresent(LockSettings.self, forKey: .lock) ?? LockSettings()
-        apps = try c.decodeIfPresent(AppSettings.self, forKey: .apps) ?? AppSettings()
+        version = c.tolerant(.version, 1)
+        proxy = c.tolerant(.proxy, ProxySettings())
+        tunnel = c.tolerant(.tunnel, TunnelSettings())
+        policy = c.tolerant(.policy, PolicySettings())
+        system = c.tolerant(.system, SystemSettings())
+        if let wrapped = try? c.decode([LenientTargetRule].self, forKey: .targets) {
+            targets = wrapped.compactMap(\.value)
+        } else {
+            targets = AppConfig.defaultTargets()
+        }
+        monitor = c.tolerant(.monitor, MonitorSettings())
+        lock = c.tolerant(.lock, LockSettings())
+        apps = c.tolerant(.apps, AppSettings())
     }
 
     // The app is generic: no domains are assumed. Users pick their own targets
