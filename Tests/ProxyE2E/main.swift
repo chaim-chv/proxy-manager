@@ -136,14 +136,19 @@ final class MockOrigin {
     let fd: Int32
     let port: UInt16
     let body: [UInt8]
+    /// Delay between seeing the client's FIN and writing the body. Used by the
+    /// half-close regression: an origin slower than the old 3 s close grace must
+    /// still get its whole response delivered.
+    let delay: TimeInterval
     private let stopLock = NSLock()
     private var stopped = false
 
-    init(body: String = "HELLO-FROM-ORIGIN") {
+    init(body: String = "HELLO-FROM-ORIGIN", delay: TimeInterval = 0) {
         let l = tcpListen()
         self.fd = l.fd
         self.port = l.port
         self.body = Array(body.utf8)
+        self.delay = delay
         Thread.detachNewThread { [weak self] in self?.acceptLoop() }
     }
 
@@ -155,10 +160,71 @@ final class MockOrigin {
             Thread.detachNewThread { [weak self] in
                 guard let self else { close(c); return }
                 _ = recvAll(c) // read request through EOF
+                if self.delay > 0 { Thread.sleep(forTimeInterval: self.delay) }
                 sendAll(c, self.body)
                 close(c)
             }
         }
+    }
+}
+
+// MARK: - Chatty origin
+
+/// Writes 16 KB every 1 ms until the peer stops reading, counting every byte it
+/// manages to send. The dead-peer regression: after a client RST the relay must
+/// stop reading this stream immediately instead of draining it at line rate.
+final class MockChattyOrigin {
+    let fd: Int32
+    let port: UInt16
+    private let lock = NSLock()
+    private var total: Int64 = 0
+    private var stopped = false
+
+    var bytesSent: Int64 {
+        lock.lock(); defer { lock.unlock() }
+        return total
+    }
+
+    init() {
+        let l = tcpListen()
+        self.fd = l.fd
+        self.port = l.port
+        Thread.detachNewThread { [weak self] in self?.acceptLoop() }
+    }
+
+    private func acceptLoop() {
+        while true {
+            let c = accept(fd, nil, nil)
+            if c < 0 { break }
+            noSIGPIPE(c)
+            // A blocked send must not keep the mock alive forever after `stop()`.
+            var tv = timeval(tv_sec: 1, tv_usec: 0)
+            setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            lock.lock(); let isStopped = stopped; lock.unlock()
+            if isStopped { close(c); break }
+            Thread.detachNewThread { [weak self] in self?.handle(c) }
+        }
+    }
+
+    private func handle(_ c: Int32) {
+        defer { close(c) }
+        let chunk = [UInt8](repeating: 0x42, count: 16_384)
+        while true {
+            lock.lock(); let isStopped = stopped; lock.unlock()
+            if isStopped { return }
+            let n = chunk.withUnsafeBytes { Darwin.send(c, $0.baseAddress!, chunk.count, 0) }
+            if n <= 0 {
+                if n < 0 && errno == EINTR { continue }
+                return
+            }
+            lock.lock(); total += Int64(n); lock.unlock()
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+    }
+
+    func stop() {
+        lock.lock(); stopped = true; lock.unlock()
+        close(fd)
     }
 }
 
@@ -509,6 +575,56 @@ do {
     sendAll(c2, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\n\r\n".utf8))
     let n2 = recv(c2, &buf, buf.count, 0)
     check("proxy still serves after dead-peer test", String(decoding: buf[0..<max(0, n2)], as: UTF8.self).contains("200"))
+    close(c2)
+    origin.stop()
+}
+
+print("== E2E: delayed origin after client half-close (no grace truncation) ==")
+do {
+    // Origin waits 4 s after seeing the client's FIN before replying. The old
+    // blanket 3 s half-close grace silently truncated this response.
+    let origin = MockOrigin(body: "LATE-BODY", delay: 4)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 10) // > 6 s: a premature grace close shows up as a short body
+    sendAll(c, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+    var buf = [UInt8](repeating: 0, count: 1024)
+    let n = recv(c, &buf, buf.count, 0)
+    check("delayed half-close CONNECT returns 200",
+          String(decoding: buf[0..<max(0, n)], as: UTF8.self).contains("200"))
+    Darwin.shutdown(c, Int32(SHUT_WR))
+    let resp = String(decoding: recvAll(c), as: UTF8.self)
+    check("delayed half-close delivers the full body", resp.contains("LATE-BODY"))
+}
+
+print("== E2E: chatty origin teardown after client RST ==")
+do {
+    let origin = MockChattyOrigin()
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    sendAll(c, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+    var buf = [UInt8](repeating: 0, count: 1024)
+    let n = recv(c, &buf, buf.count, 0)
+    check("chatty CONNECT returns 200",
+          String(decoding: buf[0..<max(0, n)], as: UTF8.self).contains("200"))
+    // Reset the client. A relay that conflates this with a graceful FIN keeps
+    // draining the origin at line rate (~16 MB/s here) forever.
+    var l = linger(l_onoff: 1, l_linger: 0)
+    setsockopt(c, SOL_SOCKET, SO_LINGER, &l, socklen_t(MemoryLayout<linger>.size))
+    close(c) // RST
+    let afterRST = origin.bytesSent
+    Thread.sleep(forTimeInterval: 1.0)
+    let delta = origin.bytesSent - afterRST
+    check("chatty origin stops after client RST (delta \(delta) bytes)", delta < 2_000_000)
+    // The relay permit must be released: a fresh CONNECT still succeeds.
+    guard let c2 = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("proxy died after chatty RST") }
+    sendAll(c2, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\n\r\n".utf8))
+    let n2 = recv(c2, &buf, buf.count, 0)
+    check("proxy still serves after chatty RST",
+          String(decoding: buf[0..<max(0, n2)], as: UTF8.self).contains("200"))
     close(c2)
     origin.stop()
 }

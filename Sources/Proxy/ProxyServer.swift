@@ -406,8 +406,14 @@ final class ProxyServer {
         var u2c = [UInt8]()
         var c2uTotal: Int64 = 0
         var u2cTotal: Int64 = 0
+        // Read-done is graceful EOF only (`recv() == 0`): the peer can no longer
+        // send but may still receive. `Gone` is a hard failure (POLLERR/POLLNVAL,
+        // fatal recv/send errno): the peer can neither send nor receive, so the
+        // relay must stop immediately instead of draining the other side.
         var clientReadDone = false
         var upstreamReadDone = false
+        var clientGone = false
+        var upstreamGone = false
         var clientFinPropagated = false
         var upstreamFinPropagated = false
 
@@ -415,7 +421,6 @@ final class ProxyServer {
         let maxBuf = 256 * 1024
         let grace: TimeInterval = 3
         var readBuf = [UInt8](repeating: 0, count: chunk)
-        var halfClosed = false
 
         while true {
             // Propagate half-close (FIN) only once the corresponding buffer is
@@ -449,7 +454,12 @@ final class ProxyServer {
 
             if clientEvents == 0 && upstreamEvents == 0 { break }
 
-            let timeout = halfClosed ? grace : idle
+            // The close grace is only for the final state: the server side is
+            // fully done and delivered, and we are merely waiting for the client
+            // to close. A client FIN waiting on a slow origin, and an origin FIN
+            // still draining to a slow client, keep the full idle budget.
+            let waitingForPeerClose = upstreamReadDone && u2c.isEmpty && !clientReadDone
+            let timeout = waitingForPeerClose ? grace : idle
             var clientRevents: Int16 = 0
             var upstreamRevents: Int16 = 0
             let rc: Int32 = withUnsafeTemporaryAllocation(of: pollfd.self, capacity: 2) { buf in
@@ -483,84 +493,109 @@ final class ProxyServer {
             let iterC2u = c2uTotal
             let iterU2c = u2cTotal
 
-            // Client socket: hard error → client gone (drop undeliverable u2c).
-            if clientRevents & Int16(POLLERR | POLLNVAL) != 0 {
-                clientReadDone = true
-                u2c.removeAll()
-            }
-            // client → upstream. Only recv while we haven't seen the client's
-            // EOF; after that POLLHUP just re-fires the level-triggered hangup
-            // and recv returns 0/EAGAIN forever (a busy-spin) if we keep asking.
-            if !clientReadDone && (clientRevents & Int16(POLLIN | POLLHUP) != 0) {
-                let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
-                    Darwin.recv(client, b.baseAddress!, chunk, 0)
+            if !clientGone {
+                // POLLERR/POLLNVAL means the socket is unusable: no more send
+                // or receive can succeed, so teardown is immediate.
+                if clientRevents & Int16(POLLERR | POLLNVAL) != 0 {
+                    clientGone = true
                 }
-                if n > 0 {
-                    c2u.append(contentsOf: readBuf[0..<n])
-                    c2uTotal += Int64(n)
-                } else if n == 0 {
-                    clientReadDone = true
-                } else if errno != EAGAIN && errno != EWOULDBLOCK {
-                    clientReadDone = true
-                }
-            }
-            if !u2c.isEmpty {
-                if clientRevents & Int16(POLLOUT) != 0 {
-                    let n = u2c.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
-                        Darwin.send(client, b.baseAddress!, u2c.count, 0)
+                // client → upstream. Only recv while we haven't seen the
+                // client's EOF; after that POLLHUP just re-fires the
+                // level-triggered hangup and recv returns 0/EAGAIN forever
+                // (a busy-spin) if we keep asking.
+                if !clientGone && !clientReadDone && (clientRevents & Int16(POLLIN | POLLHUP) != 0) {
+                    let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
+                        Darwin.recv(client, b.baseAddress!, chunk, 0)
                     }
                     if n > 0 {
-                        u2c.removeFirst(n)
-                    } else if n < 0 && errno != EAGAIN && errno != EWOULDBLOCK {
+                        c2u.append(contentsOf: readBuf[0..<n])
+                        c2uTotal += Int64(n)
+                    } else if n == 0 {
                         clientReadDone = true
+                    } else if errno == EINTR {
+                        // Retry on the next poll iteration (the fd stays readable).
+                    } else if errno != EAGAIN && errno != EWOULDBLOCK {
+                        clientGone = true
+                    }
+                }
+                if !clientGone && !u2c.isEmpty {
+                    if clientRevents & Int16(POLLOUT) != 0 {
+                        let n = u2c.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
+                            Darwin.send(client, b.baseAddress!, u2c.count, 0)
+                        }
+                        if n > 0 {
+                            u2c.removeFirst(n)
+                        } else if n < 0 {
+                            if errno == EINTR {
+                                // Retry on the next poll iteration.
+                            } else if errno != EAGAIN && errno != EWOULDBLOCK {
+                                // EPIPE/ECONNRESET: the peer is gone, and its
+                                // read side is gone too. Stop now.
+                                clientGone = true
+                            }
+                        }
+                    } else if clientRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                        // Client hung up and is not writable (POLLHUP is mutually
+                        // exclusive with POLLOUT once the peer is gone): buffered
+                        // data is undeliverable. Leaving it would make poll()
+                        // return instantly forever (level-triggered POLLHUP) →
+                        // 100% CPU spin.
                         u2c.removeAll()
                     }
-                } else if clientRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
-                    // Client hung up and is not writable (POLLHUP is mutually
-                    // exclusive with POLLOUT once the peer is gone): buffered
-                    // data is undeliverable. Leaving it would make poll() return
-                    // instantly forever (level-triggered POLLHUP) → 100% CPU spin.
-                    u2c.removeAll()
                 }
             }
 
-            // Upstream socket: hard error → upstream gone (drop undeliverable c2u).
-            if upstreamRevents & Int16(POLLERR | POLLNVAL) != 0 {
-                upstreamReadDone = true
-                c2u.removeAll()
-            }
-            // upstream → client (POLLHUP means peer closed; recv returns 0).
-            if !upstreamReadDone && (upstreamRevents & Int16(POLLIN | POLLHUP) != 0) {
-                let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
-                    Darwin.recv(upstream, b.baseAddress!, chunk, 0)
+            if !clientGone && !upstreamGone {
+                if upstreamRevents & Int16(POLLERR | POLLNVAL) != 0 {
+                    upstreamGone = true
                 }
-                if n > 0 {
-                    u2c.append(contentsOf: readBuf[0..<n])
-                    u2cTotal += Int64(n)
-                } else if n == 0 {
-                    upstreamReadDone = true
-                } else if errno != EAGAIN && errno != EWOULDBLOCK {
-                    upstreamReadDone = true
-                }
-            }
-            if !c2u.isEmpty {
-                if upstreamRevents & Int16(POLLOUT) != 0 {
-                    let n = c2u.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
-                        Darwin.send(upstream, b.baseAddress!, c2u.count, 0)
+                // upstream → client (POLLHUP means peer closed; recv returns 0).
+                if !upstreamGone && !upstreamReadDone && (upstreamRevents & Int16(POLLIN | POLLHUP) != 0) {
+                    let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
+                        Darwin.recv(upstream, b.baseAddress!, chunk, 0)
                     }
                     if n > 0 {
-                        c2u.removeFirst(n)
-                    } else if n < 0 && errno != EAGAIN && errno != EWOULDBLOCK {
+                        u2c.append(contentsOf: readBuf[0..<n])
+                        u2cTotal += Int64(n)
+                    } else if n == 0 {
                         upstreamReadDone = true
+                    } else if errno == EINTR {
+                        // Retry on the next poll iteration.
+                    } else if errno != EAGAIN && errno != EWOULDBLOCK {
+                        upstreamGone = true
+                    }
+                }
+                if !upstreamGone && !c2u.isEmpty {
+                    if upstreamRevents & Int16(POLLOUT) != 0 {
+                        let n = c2u.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
+                            Darwin.send(upstream, b.baseAddress!, c2u.count, 0)
+                        }
+                        if n > 0 {
+                            c2u.removeFirst(n)
+                        } else if n < 0 {
+                            if errno == EINTR {
+                                // Retry on the next poll iteration.
+                            } else if errno != EAGAIN && errno != EWOULDBLOCK {
+                                // The origin is gone; its read side cannot deliver
+                                // anything more to the client either.
+                                upstreamGone = true
+                            }
+                        }
+                    } else if upstreamRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                        // Symmetric to the client: undeliverable → drop to avoid spin.
                         c2u.removeAll()
                     }
-                } else if upstreamRevents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
-                    // Symmetric to the client: undeliverable → drop to avoid spin.
-                    c2u.removeAll()
                 }
             }
 
-            if clientReadDone || upstreamReadDone { halfClosed = true }
+            // Hard-gone means neither direction can make progress: discard the
+            // buffers and exit. Still report this iteration's moved bytes first
+            // so live telemetry accounts for the bytes that actually moved.
+            let teardown = clientGone || upstreamGone
+            if teardown {
+                c2u.removeAll()
+                u2c.removeAll()
+            }
 
             if let progress {
                 let bytesIn = u2cTotal - iterU2c
@@ -569,6 +604,7 @@ final class ProxyServer {
                     progress(bytesIn, bytesOut)
                 }
             }
+            if teardown { break }
         }
 
         return (c2uTotal, u2cTotal)
