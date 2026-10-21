@@ -95,11 +95,11 @@ run_probe CrashProbe_oversized_port \
   Tests/CrashProbes/oversized_port/main.swift
 
 run_probe CrashProbe_sigpipe_send \
-  Sources/Socks/Socket.swift \
+  Sources/Proxy/HostClassifier.swift Sources/Socks/Socket.swift \
   Tests/CrashProbes/sigpipe_send/main.swift
 
 run_probe CrashProbe_dns_timeout \
-  Sources/Socks/Socket.swift \
+  Sources/Proxy/HostClassifier.swift Sources/Socks/Socket.swift \
   Tests/CrashProbes/dns_timeout/main.swift
 
 run_harness AppIdentityHarness \
@@ -127,7 +127,7 @@ run_harness WatchdogHarness \
   Sources/System/HelperProtocol.swift Sources/System/HelperXPCClient.swift \
   Sources/System/SystemProxyManager.swift Sources/System/ShellEnvInjector.swift \
   Sources/System/GuiEnvInjector.swift \
-  Sources/Socks/Socket.swift \
+  Sources/Proxy/HostClassifier.swift Sources/Socks/Socket.swift \
   Tests/WatchdogHarness/main.swift
 
 echo ""

@@ -114,11 +114,28 @@ enum Socket {
 
     /// Resolve `host`/`port` and open a connected TCP socket, returning its file
     /// descriptor. `timeout` is an overall budget for DNS + all connect attempts.
-    static func connect(host: String, port: UInt16, timeout: TimeInterval = 10) throws -> Int32 {
+    ///
+    /// `allowPrivate == false` rejects the connection when **any** resolved
+    /// candidate is loopback/private, before connecting to any of them. The
+    /// check uses the same `addrinfo` list as the connect loop, so a DNS answer
+    /// cannot change between the policy decision and the connection.
+    static func connect(host: String, port: UInt16, timeout: TimeInterval = 10,
+                        allowPrivate: Bool = true) throws -> Int32 {
         let budget = max(0.1, timeout)
         let deadline = Date().addingTimeInterval(budget)
         let info = try resolve(host: host, port: port, timeout: budget)
         defer { freeaddrinfo(info); Socket.liveResolutions.dec() }
+
+        if !allowPrivate {
+            var candidate: UnsafeMutablePointer<addrinfo>? = info
+            while let entry = candidate {
+                if let sa = entry.pointee.ai_addr,
+                   HostClassifier.isPrivateOrLoopback(sa, entry.pointee.ai_addrlen) {
+                    throw SocketError.message("blocked_private_destination")
+                }
+                candidate = entry.pointee.ai_next
+            }
+        }
 
         var lastError = "no addresses"
         var ptr: UnsafeMutablePointer<addrinfo>? = info

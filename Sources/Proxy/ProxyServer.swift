@@ -247,7 +247,8 @@ final class ProxyServer {
 
             let upstream: Int32
             do {
-                upstream = try connectUpstream(host: host, port: port, route: route, settings: s)
+                upstream = try connectUpstream(host: host, port: port, route: route, settings: s,
+                                               clientIsLoopback: clientIsLoopback)
             } catch {
                 status = 502
                 errMsg = "connect_failed: \(error.localizedDescription)"
@@ -337,14 +338,23 @@ final class ProxyServer {
                                bytesIn: bytesIn, bytesOut: bytesOut, app: app, appBundle: appBundle))
     }
 
-    private func connectUpstream(host: String, port: UInt16, route: Route, settings: ProxyRuntimeSettings) throws -> Int32 {
+    private func connectUpstream(host: String, port: UInt16, route: Route, settings: ProxyRuntimeSettings,
+                                 clientIsLoopback: Bool) throws -> Int32 {
         if route == .tunnel {
+            // Residual SSRF risk: the tunnel sends the hostname to the SOCKS5
+            // server (ATYP=0x03), so DNS resolves on the far side and this
+            // process cannot verify the destination address. The string guard
+            // above is the only local check for non-loopback clients.
             var client = SOCKS5Client(serverHost: settings.tunnelHost, serverPort: settings.tunnelPort)
             client.connectTimeout = settings.connectTimeout
             client.handshakeTimeout = 5
             return try client.connect(targetHost: host, targetPort: port)
         }
-        let fd = try Socket.connect(host: host, port: port, timeout: settings.connectTimeout)
+        // Re-check the resolved address for non-loopback clients: numeric and
+        // DNS forms (`127.1`, `2130706433`, `localhost.`) bypass the string
+        // guard, but the address that actually gets connected cannot.
+        let fd = try Socket.connect(host: host, port: port, timeout: settings.connectTimeout,
+                                    allowPrivate: clientIsLoopback)
         // The direct path has no SOCKS5 handshake to set timeouts, so a
         // forwarded request to a stalled upstream could block forever.
         Socket.setTimeouts(fd, receive: settings.idleTimeout, send: settings.idleTimeout)

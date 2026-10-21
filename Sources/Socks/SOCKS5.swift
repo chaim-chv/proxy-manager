@@ -16,7 +16,8 @@ struct SOCKS5Client {
     /// Opens a TCP connection to the SOCKS5 server and establishes a tunnel to
     /// `targetHost:targetPort`, returning the connected socket fd.
     func connect(targetHost: String, targetPort: UInt16) throws -> Int32 {
-        let fd = try Socket.connect(host: serverHost, port: serverPort, timeout: connectTimeout)
+        let fd = try Socket.connect(host: serverHost, port: serverPort, timeout: connectTimeout,
+                                    allowPrivate: true)
         Socket.setTimeouts(fd, receive: handshakeTimeout, send: handshakeTimeout)
         do {
             try handshake(fd: fd, targetHost: targetHost, targetPort: targetPort)
@@ -29,7 +30,8 @@ struct SOCKS5Client {
 
     /// Lightweight synchronous health probe (greeting + no-auth reply).
     static func probe(serverHost: String, serverPort: UInt16) throws {
-        let fd = try Socket.connect(host: serverHost, port: serverPort, timeout: 5)
+        let fd = try Socket.connect(host: serverHost, port: serverPort, timeout: 5,
+                                    allowPrivate: true)
         defer { close(fd) }
         Socket.setTimeouts(fd, receive: 5, send: 5)
         try Socket.sendAll(fd, [0x05, 0x01, 0x00])

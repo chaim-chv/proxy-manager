@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // Standalone regression harness (no XCTest / SPM).
 //
@@ -68,6 +69,61 @@ for host in ["127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.1.1"
 for host in ["example.com", "fcdn.example.com", "fdroid.org", "fc.example.com",
              "8.8.8.8", "172.32.0.1", "172.15.0.1", "11.0.0.1", "169.253.0.1"] {
     check("not private: \(host)", !HostClassifier.isPrivateOrLoopback(host))
+}
+// String normalization: a single trailing dot must not defeat the guard, and
+// numeric IPv6 (bracketed or not) is classified, including IPv4-mapped forms.
+for host in ["localhost.", "  LOCALHOST.  ", "foo.localhost.", "[::1]", "::1",
+             "::ffff:127.0.0.1", "fe80::1"] {
+    check("private (normalized): \(host)", HostClassifier.isPrivateOrLoopback(host))
+}
+for host in ["example.com.", "[2001:4860:4860::8888]", "::ffff:8.8.8.8"] {
+    check("not private (normalized): \(host)", !HostClassifier.isPrivateOrLoopback(host))
+}
+
+// Address-based classification is the authoritative check: the proxy resolves,
+// then inspects every candidate sockaddr before connecting.
+func classifyIPv4(_ s: String) -> Bool {
+    var a = sockaddr_in()
+    a.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    a.sin_family = sa_family_t(AF_INET)
+    _ = inet_pton(AF_INET, s, &a.sin_addr)
+    return withUnsafePointer(to: &a) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            HostClassifier.isPrivateOrLoopback($0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+    }
+}
+func classifyIPv6(_ s: String) -> Bool {
+    var a = sockaddr_in6()
+    a.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+    a.sin6_family = sa_family_t(AF_INET6)
+    _ = inet_pton(AF_INET6, s, &a.sin6_addr)
+    return withUnsafePointer(to: &a) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+            HostClassifier.isPrivateOrLoopback($0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+        }
+    }
+}
+
+print("== SSRF resolved-address classification ==")
+for ip in ["0.0.0.0", "0.1.2.3", "10.0.0.1", "100.64.0.1", "100.127.255.255",
+           "127.0.0.1", "127.255.255.255", "169.254.1.1", "172.16.0.1", "172.31.255.255",
+           "192.0.0.1", "192.0.2.1", "192.168.1.1", "198.18.0.1", "198.19.255.255",
+           "198.51.100.1", "203.0.113.1", "224.0.0.1", "239.255.255.255", "240.0.0.1",
+           "255.255.255.255"] {
+    check("addr private v4: \(ip)", classifyIPv4(ip))
+}
+for ip in ["8.8.8.8", "1.1.1.1", "11.0.0.1", "100.63.255.255", "100.128.0.1",
+           "169.253.0.1", "172.15.0.1", "172.32.0.1", "198.17.255.255", "198.20.0.1",
+           "223.255.255.255"] {
+    check("addr public v4: \(ip)", !classifyIPv4(ip))
+}
+for ip in ["::", "::1", "fe80::1", "fc00::1", "fd00::1", "ff02::1",
+           "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:192.168.0.1"] {
+    check("addr private v6: \(ip)", classifyIPv6(ip))
+}
+for ip in ["2001:4860:4860::8888", "2606:4700::1111", "::ffff:8.8.8.8"] {
+    check("addr public v6: \(ip)", !classifyIPv6(ip))
 }
 
 print("== HTTP parser safety ==")

@@ -739,6 +739,40 @@ do {
     check("app Tunnel all did not go direct", !tunnelResp.contains("DIRECT-APP"))
 }
 
+// SSRF: the policy must use the resolved address, not the host string. The
+// listener is on loopback and never accepts; a completed TCP handshake only
+// needs the listen backlog.
+do {
+    print("")
+    print("== SSRF resolved-address guard ==")
+    let (listener, listenerPort) = tcpListen()
+    defer { close(listener) }
+
+    func connectOutcome(_ host: String, allowPrivate: Bool) -> String? {
+        do {
+            let fd = try Socket.connect(host: host, port: listenerPort, timeout: 1,
+                                        allowPrivate: allowPrivate)
+            close(fd)
+            return nil
+        } catch {
+            return String(describing: error)
+        }
+    }
+
+    let blocked = connectOutcome("127.0.0.1", allowPrivate: false)
+    check("allowPrivate: false blocks 127.0.0.1", blocked?.contains("blocked_private_destination") == true)
+    check("allowPrivate: true reaches 127.0.0.1", connectOutcome("127.0.0.1", allowPrivate: true) == nil)
+
+    for host in ["localhost.", "127.1"] {
+        guard connectOutcome(host, allowPrivate: true) == nil else {
+            print("  skip \(host) (not resolved locally)")
+            continue
+        }
+        let result = connectOutcome(host, allowPrivate: false)
+        check("allowPrivate: false blocks \(host)", result?.contains("blocked_private_destination") == true)
+    }
+}
+
 print("")
 if failures == 0 { print("PASS: proxy e2e"); exit(0) }
 else { print("FAIL: \(failures) e2e check(s) failed"); exit(1) }
