@@ -7,7 +7,8 @@ import Darwin
 /// its stderr asynchronously (so the pipe never deadlocks), and restarts it
 /// with exponential backoff when it dies for a non-fatal reason (network flap).
 /// Auth failures / bad host keys / bad key files / port conflicts are treated as
-/// fatal (no retry) and surfaced to the UI.
+/// fatal (no retry) and surfaced to the UI. Settings changes are coalesced so a
+/// typed hostname produces one spawn (and one auth attempt), not one per key.
 ///
 /// Passwords are read from the Keychain and fed to ssh via an `SSH_ASKPASS`
 /// helper + `SSH_ASKPASS_REQUIRE=force` — never argv or env. The helper deletes
@@ -27,6 +28,16 @@ final class SSHTunnelRunner: ObservableObject {
     private var startTime: Date?
     private var tempDir: URL?
 
+    // Keystroke bursts are coalesced into one spawn. All of these are touched
+    // only on `queue`.
+    private var pendingApply: DispatchWorkItem?
+    private var retryWorkItem: DispatchWorkItem?
+    private var lastRequestedSettings: ManagedTunnelSettings?
+    private var lastSpawnSettings: ManagedTunnelSettings?
+    /// The settings whose child exited fatally; sticky until they change or an
+    /// explicit restart, so unrelated config commits cannot retry auth.
+    private var fatalSettings: ManagedTunnelSettings?
+
     /// Thread-safe read for the app (e.g. AppModel lifecycle).
     var isRunning: Bool {
         stateLock.lock(); defer { stateLock.unlock() }; return runningValue
@@ -42,14 +53,41 @@ final class SSHTunnelRunner: ObservableObject {
 
     // MARK: - Public API
 
-    /// Idempotent: (re)starts the tunnel only if settings changed or it's not
-    /// running. Called whenever managed-tunnel settings change.
+    /// Settings changes are debounced for 500 ms so typing a host or
+    /// port spawns (and authenticates) once, after the burst. Identical
+    /// requests are ignored while already running, retrying, or while the same
+    /// settings are in a sticky fatal state.
     func apply(_ settings: ManagedTunnelSettings) {
         queue.async { [weak self] in
             guard let self else { return }
-            if self.runningValue && self.currentSettings == settings { return }
-            self.currentSettings = settings
-            self.spawn()
+
+            // Same intent, still pending or already settled: no new work.
+            if self.lastRequestedSettings == settings, self.pendingApply != nil { return }
+            if self.lastRequestedSettings == settings, !self.shouldSpawn(settings) { return }
+
+            if self.lastRequestedSettings != settings {
+                // A changed setting is new intent: it supersedes a fatal exit
+                // and the retry scheduled for the old settings.
+                self.fatalSettings = nil
+                self.retryWorkItem?.cancel()
+                self.retryWorkItem = nil
+            }
+            self.lastRequestedSettings = settings
+            self.pendingApply?.cancel()
+
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.pendingApply = nil
+                // A stop()/restart()/newer apply() cancels this item; re-check
+                // the intent because the child's own exit handler may have run
+                // in the meantime (it must not win over newer settings).
+                guard self.lastRequestedSettings == settings else { return }
+                self.currentSettings = settings
+                guard self.shouldSpawn(settings) else { return }
+                self.spawn()
+            }
+            self.pendingApply = item
+            self.queue.asyncAfter(deadline: .now() + 0.5, execute: item)
         }
     }
 
@@ -64,9 +102,19 @@ final class SSHTunnelRunner: ObservableObject {
     }
 
     /// Force restart with the current settings (used by the UI restart button).
+    /// Explicit restart is how a fatal state is left without changing settings.
     func restart() {
         queue.async { [weak self] in
-            guard let self, self.currentSettings != nil else { return }
+            guard let self else { return }
+            let settings = self.lastRequestedSettings ?? self.currentSettings
+            guard let settings else { return }
+            self.pendingApply?.cancel()
+            self.pendingApply = nil
+            self.retryWorkItem?.cancel()
+            self.retryWorkItem = nil
+            self.fatalSettings = nil
+            self.lastRequestedSettings = settings
+            self.currentSettings = settings
             self.spawn()
         }
     }
@@ -74,6 +122,13 @@ final class SSHTunnelRunner: ObservableObject {
     // MARK: - Internals (queue)
 
     private func stopLocked() {
+        pendingApply?.cancel()
+        pendingApply = nil
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
+        fatalSettings = nil
+        lastRequestedSettings = nil
+        lastSpawnSettings = nil
         generation += 1
         currentSettings = nil
         terminateProcess(process)
@@ -81,6 +136,16 @@ final class SSHTunnelRunner: ObservableObject {
         cleanupTemp()
         removePidFile()
         setRunning(false)
+    }
+
+    /// Spawn only when this is new intent: not the sticky fatal settings, not
+    /// waiting on the retry scheduled for those same settings, and not already
+    /// running them.
+    private func shouldSpawn(_ settings: ManagedTunnelSettings) -> Bool {
+        if fatalSettings == settings { return false }
+        if retryWorkItem != nil && lastSpawnSettings == settings { return false }
+        if runningValue && lastSpawnSettings == settings { return false }
+        return true
     }
 
     private func spawn() {
@@ -91,8 +156,18 @@ final class SSHTunnelRunner: ObservableObject {
             return
         }
 
+        // This spawn supersedes any pending retry; cancel it before adding a
+        // child so only one attempt (and one child) is ever in flight.
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
+        fatalSettings = nil
+        lastSpawnSettings = s
+
         generation += 1
         let gen = generation
+        // The replacement can fail before `run()` succeeds, so drop the old
+        // child's running state up front instead of inheriting it (TC-04).
+        setRunning(false)
         cleanupTemp()
         terminateProcess(process)
         process = nil
@@ -140,9 +215,35 @@ final class SSHTunnelRunner: ObservableObject {
             setRunning(true)
             setError(nil)
         } catch {
-            setError("Failed to start ssh: \(error.localizedDescription)")
+            process = nil
+            setRunning(false)
             cleanupTemp()
+            Log.tunnel.error("failed to start ssh: \(error.localizedDescription)")
+
+            guard lastRequestedSettings == s else {
+                setError("Failed to start ssh: \(error.localizedDescription)")
+                return
+            }
+            let delay = min(60.0, pow(2.0, Double(attempt)))
+            attempt += 1
+            setError("Failed to start ssh: \(error.localizedDescription) Retrying in \(Int(delay))s.")
+            scheduleRetry(after: delay, generation: gen)
         }
+    }
+
+    /// One cancelable retry per failed attempt. Cancelling the item before it
+    /// runs (stop/config change/restart) prevents a stopped tunnel reviving.
+    private func scheduleRetry(after delay: TimeInterval, generation gen: Int) {
+        retryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.retryWorkItem = nil
+            // Same generation guard as handleExit: stop()/apply() wins.
+            guard self.generation == gen, self.currentSettings != nil else { return }
+            self.spawn()
+        }
+        retryWorkItem = item
+        queue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
     private func handleExit(_ proc: Process, stderr: String, generation gen: Int) {
@@ -161,6 +262,9 @@ final class SSHTunnelRunner: ObservableObject {
 
         if isFatal(stderr, code: code) {
             attempt = 0
+            // Sticky until the settings change or an explicit restart, so an
+            // unrelated config commit cannot retry a failing auth.
+            fatalSettings = lastSpawnSettings
             setError(shortMessage(stderr) ?? "ssh exited with code \(code)")
             return
         }
@@ -168,13 +272,10 @@ final class SSHTunnelRunner: ObservableObject {
         setError(shortMessage(stderr) ?? "ssh exited with code \(code)")
         let delay = min(60.0, pow(2.0, Double(attempt)))
         attempt += 1
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
-            // Re-check on the serial queue so a stop()/mode change cannot be
-            // undone by an in-flight backoff restart.
-            self?.queue.async {
-                guard let self, self.generation == gen, self.currentSettings != nil else { return }
-                self.spawn()
-            }
+        // If the user changed the settings while this child was dying, the
+        // pending debounced apply owns the next spawn; don't race it.
+        if lastRequestedSettings == lastSpawnSettings {
+            scheduleRetry(after: delay, generation: gen)
         }
     }
 
