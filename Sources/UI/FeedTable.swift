@@ -90,32 +90,60 @@ struct FeedTable: NSViewRepresentable {
         private var lastRows: [FeedRow] = []
         private var lastIDs: [UUID] = []
         private var tableSelectionID: UUID?
+        /// Programmatic selection (and row updates) must not write back through
+        /// `onSelect`, or the binding would be cleared during a diff update.
+        private var isApplyingSelection = false
+
+        private struct ScrollAnchor {
+            let id: UUID
+            let offset: CGFloat
+        }
 
         func update(rows newRows: [FeedRow], selectedID: UUID?) {
             guard let table = table else { return }
-            rows = newRows
 
             // The owner cleared the selection (inspector dismissed): deselect.
             if selectedID == nil, tableSelectionID != nil {
                 tableSelectionID = nil
-                table.deselectAll(nil)
+                applySelection(nil, in: table)
+            }
+            if let selectedID {
+                tableSelectionID = selectedID
             }
 
             // Identity/order changed (new connection, finish, or filter) vs.
-            // just live values ticking — this decides full vs. partial reload.
+            // just live values ticking — this decides structural vs. partial reload.
+            let oldIDs = lastIDs
             let newIDs = newRows.map(\.id)
-            let identityChanged = newIDs != lastIDs
+            let identityChanged = newIDs != oldIDs
             let contentChanged = newRows != lastRows
+            guard contentChanged else { return }
+
+            // Capture the scroll anchor while `rows` still matches the table.
+            let anchor = identityChanged ? scrollAnchor(in: table) : nil
+            let wasAtTop = table.visibleRect.minY <= 0.5
+
+            rows = newRows
             lastRows = newRows
             lastIDs = newIDs
 
-            guard contentChanged else { return }
-
             if identityChanged {
-                table.reloadData()
-                // reloadData() drops the selection; restore the user's pick.
-                if let id = tableSelectionID, let idx = newRows.firstIndex(where: { $0.id == id }) {
-                    table.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+                let selectionID = selectedID ?? tableSelectionID
+                if let diff = FeedTableDiff.compute(old: oldIDs, new: newIDs) {
+                    apply(diff, in: table)
+                    if let id = selectionID,
+                       let idx = newRows.firstIndex(where: { $0.id == id }) {
+                        applySelection(idx, in: table)
+                    } else if selectionID != nil {
+                        applySelection(nil, in: table)
+                    }
+                    restoreScrollAnchor(anchor, wasAtTop: wasAtTop, in: table)
+                } else {
+                    table.reloadData()
+                    // reloadData() drops the selection; restore the user's pick.
+                    if let id = selectionID, let idx = newRows.firstIndex(where: { $0.id == id }) {
+                        applySelection(idx, in: table)
+                    }
                 }
             } else if !newRows.isEmpty {
                 // Same rows, same order (only bytes/duration ticked): refresh
@@ -128,6 +156,62 @@ struct FeedTable: NSViewRepresentable {
             }
         }
 
+        private func apply(_ diff: FeedTableDiff, in table: NSTableView) {
+            isApplyingSelection = true
+            defer { isApplyingSelection = false }
+            table.beginUpdates()
+            // AppKit applies single-row edits sequentially: old indexes must be
+            // removed descending, new indexes inserted ascending.
+            for index in diff.removed.reversed() {
+                table.removeRows(at: IndexSet(integer: index), withAnimation: [])
+            }
+            for index in diff.inserted {
+                table.insertRows(at: IndexSet(integer: index), withAnimation: [])
+            }
+            table.endUpdates()
+        }
+
+        private func applySelection(_ index: Int?, in table: NSTableView) {
+            isApplyingSelection = true
+            defer { isApplyingSelection = false }
+            if let index, index >= 0, index < rows.count {
+                table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            } else if table.selectedRow != -1 {
+                table.deselectAll(nil)
+            }
+        }
+
+        private func scrollAnchor(in table: NSTableView) -> ScrollAnchor? {
+            let range = table.rows(in: table.visibleRect)
+            guard range.length > 0,
+                  range.location >= 0,
+                  range.location < rows.count else { return nil }
+            let rowRect = table.rect(ofRow: range.location)
+            return ScrollAnchor(id: rows[range.location].id,
+                                offset: rowRect.minY - table.visibleRect.minY)
+        }
+
+        private func restoreScrollAnchor(_ anchor: ScrollAnchor?, wasAtTop: Bool,
+                                         in table: NSTableView) {
+            guard let scrollView = table.enclosingScrollView else { return }
+            let clipView = scrollView.contentView
+            let x = clipView.bounds.origin.x
+
+            if wasAtTop {
+                clipView.scroll(to: NSPoint(x: x, y: 0))
+                scrollView.reflectScrolledClipView(clipView)
+                return
+            }
+
+            guard let anchor,
+                  let index = rows.firstIndex(where: { $0.id == anchor.id }) else { return }
+            let rowRect = table.rect(ofRow: index)
+            let maxY = max(0, table.bounds.height - clipView.bounds.height)
+            let y = min(max(0, rowRect.minY - anchor.offset), maxY)
+            clipView.scroll(to: NSPoint(x: x, y: y))
+            scrollView.reflectScrolledClipView(clipView)
+        }
+
         // MARK: NSTableViewDataSource
 
         func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -135,7 +219,7 @@ struct FeedTable: NSViewRepresentable {
         // MARK: NSTableViewDelegate
 
         func tableViewSelectionDidChange(_ notification: Notification) {
-            guard let table = table else { return }
+            guard !isApplyingSelection, let table = table else { return }
             let row = table.selectedRow
             let id = (row >= 0 && row < rows.count) ? rows[row].event.id : nil
             tableSelectionID = id

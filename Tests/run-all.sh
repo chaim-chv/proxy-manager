@@ -64,7 +64,7 @@ run_probe() {
 
 run_harness UIHarness \
   -framework AppKit \
-  Sources/UI/TruncationDetector.swift \
+  Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \
   Tests/UIHarness/main.swift
 
 run_harness WindowTrackerHarness \

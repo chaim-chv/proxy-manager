@@ -71,6 +71,61 @@ check("clipped text yields the full value",
 check("one point short is not clipped",
       TruncationDetector.tooltip(text: long, availableWidth: longWidth, font: font) == nil)
 
+func uuid(_ n: Int) -> UUID {
+    UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+}
+
+// Applies a diff the way NSTableView does: removals descending, insertions
+// ascending. The result must equal the new snapshot.
+func apply(_ diff: FeedTableDiff, old: [UUID], new: [UUID]) -> [UUID] {
+    var result = old
+    for index in diff.removed.reversed() { result.remove(at: index) }
+    for index in diff.inserted { result.insert(new[index], at: index) }
+    return result
+}
+
+func checkDiff(_ name: String, old: [UUID], new: [UUID],
+               removed: [Int], inserted: [Int]) {
+    guard let diff = FeedTableDiff.compute(old: old, new: new) else {
+        check("\(name): diff exists", false)
+        return
+    }
+    check("\(name): removed \(removed)", Array(diff.removed) == removed)
+    check("\(name): inserted \(inserted)", Array(diff.inserted) == inserted)
+    check("\(name): applies to new", apply(diff, old: old, new: new) == new)
+    check("\(name): removals descending", Array(diff.removed.reversed())
+            == Array(diff.removed).sorted(by: >))
+    check("\(name): insertions ascending", Array(diff.inserted)
+            == Array(diff.inserted).sorted())
+}
+
+print("== Feed table diff ==")
+let a = uuid(1), b = uuid(2), c = uuid(3), d = uuid(4), x = uuid(5), y = uuid(6)
+
+checkDiff("insert at top", old: [a, b, c], new: [x, a, b, c],
+          removed: [], inserted: [0])
+checkDiff("remove at bottom", old: [a, b, c], new: [a, b],
+          removed: [2], inserted: [])
+checkDiff("insert and remove", old: [a, b, c], new: [x, a, c],
+          removed: [1], inserted: [0])
+checkDiff("insert and remove many", old: [a, b, c, d], new: [x, a, c, y],
+          removed: [1, 3], inserted: [0, 3])
+checkDiff("empty to non-empty", old: [], new: [a, b],
+          removed: [], inserted: [0, 1])
+checkDiff("non-empty to empty", old: [a, b], new: [],
+          removed: [0, 1], inserted: [])
+checkDiff("no common rows", old: [a, b], new: [x, y],
+          removed: [0, 1], inserted: [0, 1])
+
+check("reordered common ids falls back to reloadData",
+      FeedTableDiff.compute(old: [a, b, c], new: [c, b, a]) == nil)
+check("identical ids has no diff",
+      FeedTableDiff.compute(old: [a, b, c], new: [a, b, c]) == nil)
+check("identical empty has no diff",
+      FeedTableDiff.compute(old: [], new: []) == nil)
+check("partially reordered common ids falls back to reloadData",
+      FeedTableDiff.compute(old: [a, b, c], new: [b, a, c]) == nil)
+
 print("")
 print("== SUMMARY: \(checks - failures)/\(checks) passed ==")
 exit(failures == 0 ? 0 : 1)
