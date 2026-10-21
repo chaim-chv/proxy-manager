@@ -96,6 +96,12 @@ struct DashboardView: View {
     }
 
     var body: some View {
+        let baseRows = baseFeedRows()
+        let rows = paused ? pausedSnapshot : computeFeedRows(from: baseRows)
+        let appOptions = appFilterOptions(from: baseRows)
+        let points = seriesPoints
+        let tops = topItems
+
         VStack(spacing: 0) {
             header
             Divider()
@@ -104,18 +110,18 @@ struct DashboardView: View {
                 .padding(.vertical, 10)
             Divider()
             HStack(alignment: .top, spacing: 16) {
-                chartSection
-                topHostsSection
+                chartSection(points: points)
+                topHostsSection(items: tops)
                     .frame(width: 260)
             }
             .padding(16)
             .frame(height: 260)
             Divider()
-            feedArea
+            feedArea(rows: rows, appOptions: appOptions)
         }
         .frame(minWidth: 860, minHeight: 560)
         .onChange(of: paused) { _, isPaused in
-            if isPaused { pausedSnapshot = computeFeedRows() }
+            if isPaused { pausedSnapshot = computeFeedRows(from: baseRows) }
         }
         .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
         .onChange(of: topMetric) { _, _ in refreshLongRange(force: true) }
@@ -182,7 +188,7 @@ struct DashboardView: View {
 
     // MARK: - Chart
 
-    private var chartSection: some View {
+    private func chartSection(points: [SeriesPoint]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(chartTitle)
@@ -202,12 +208,12 @@ struct DashboardView: View {
                 .frame(width: 210)
             }
 
-            if seriesPoints.isEmpty {
+            if points.isEmpty {
                 Text("No data yet")
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                chart
+                chart(points)
             }
         }
         .padding(12)
@@ -264,8 +270,8 @@ struct DashboardView: View {
         }
     }
 
-    private var chart: some View {
-        Chart(seriesPoints) { point in
+    private func chart(_ points: [SeriesPoint]) -> some View {
+        Chart(points) { point in
             if metric == .bytes {
                 AreaMark(
                     x: .value("Time", point.bucket),
@@ -311,7 +317,7 @@ struct DashboardView: View {
 
     // MARK: - Top hosts
 
-    private var topHostsSection: some View {
+    private func topHostsSection(items: [TopItem]) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(topMetric == .hosts ? "Top tunneled hosts" : "Top apps")
@@ -324,7 +330,6 @@ struct DashboardView: View {
                 .labelsHidden()
                 .frame(width: 120)
             }
-            let items = topItems
             if items.isEmpty {
                 Text("No data yet")
                     .foregroundStyle(.secondary)
@@ -455,18 +460,18 @@ struct DashboardView: View {
 
     // MARK: - Feed + detail
 
-    private var feedArea: some View {
+    private func feedArea(rows: [FeedRow], appOptions: [AppFilterOption]) -> some View {
         HSplitView {
             VStack(spacing: 0) {
-                feedHeader
+                feedHeader(rows: rows, appOptions: appOptions)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                if feedRows.isEmpty {
+                if rows.isEmpty {
                     Text("No requests yet")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    FeedTable(rows: feedRows, selectedID: $selectedID)
+                    FeedTable(rows: rows, selectedID: $selectedID)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -486,7 +491,7 @@ struct DashboardView: View {
         return nil
     }
 
-    private var feedHeader: some View {
+    private func feedHeader(rows _: [FeedRow], appOptions: [AppFilterOption]) -> some View {
         HStack(spacing: 10) {
             Text("Request feed")
                 .font(.headline)
@@ -498,8 +503,8 @@ struct DashboardView: View {
             TextField("Filter host…", text: $hostFilter)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 170)
-            if !appFilterOptions.isEmpty {
-                AppFilterMenu(options: appFilterOptions, selection: $appFilterKey)
+            if !appOptions.isEmpty {
+                AppFilterMenu(options: appOptions, selection: $appFilterKey)
             }
             if paused {
                 Text("paused")
@@ -513,11 +518,6 @@ struct DashboardView: View {
         }
         .controlSize(.regular)
         .frame(height: 24)
-    }
-
-    private var feedRows: [FeedRow] {
-        if paused { return pausedSnapshot }
-        return computeFeedRows()
     }
 
     /// Live + recent rows before any filter, stable-sorted. Shared by the feed
@@ -539,8 +539,8 @@ struct DashboardView: View {
             .map(\.element)
     }
 
-    private func computeFeedRows() -> [FeedRow] {
-        var rows = baseFeedRows()
+    private func computeFeedRows(from baseRows: [FeedRow]) -> [FeedRow] {
+        var rows = baseRows
         switch routeFilter {
         case "Tunneled": rows = rows.filter { $0.event.route == .tunnel }
         case "Direct": rows = rows.filter { $0.event.route == .direct }
@@ -559,9 +559,9 @@ struct DashboardView: View {
     /// Apps present in the current feed, most-requested first (then A–Z), with
     /// their bundle id so the menu can show icons. Derived from the same rows the
     /// feed shows, so only apps actually in the feed are offered.
-    private var appFilterOptions: [AppFilterOption] {
+    private func appFilterOptions(from baseRows: [FeedRow]) -> [AppFilterOption] {
         var counts: [String: (name: String, bundle: String?, count: Int)] = [:]
-        for row in baseFeedRows() {
+        for row in baseRows {
             let event = row.event
             let bundle = (event.appBundle?.isEmpty == false) ? event.appBundle : nil
             guard let key = bundle ?? event.app, !key.isEmpty else { continue }
