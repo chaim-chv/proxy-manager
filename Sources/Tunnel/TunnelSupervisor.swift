@@ -75,20 +75,17 @@ final class TunnelSupervisor: ObservableObject {
         let job = cfg.tunnel.launchdLabel.trimmingCharacters(in: .whitespaces)
         guard cfg.tunnel.supervised, !job.isEmpty else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            process.arguments = ["kickstart", "-k", "gui/\(getuid())/\(job)"]
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-            } catch {
-                Log.tunnel.error("launchctl kickstart failed to launch: \(error.localizedDescription)")
+            let result = BoundedProcess.run(executable: "/bin/launchctl",
+                                            arguments: ["kickstart", "-k", "gui/\(getuid())/\(job)"],
+                                            timeout: 10)
+            if let error = result.launchError {
+                Log.tunnel.error("launchctl kickstart failed to launch: \(error)")
                 return
             }
-            process.waitUntilExit()
-            if process.terminationStatus != 0 {
-                Log.tunnel.error("launchctl kickstart exited \(process.terminationStatus)")
+            if result.timedOut {
+                Log.tunnel.error("launchctl kickstart timed out")
+            } else if result.status != 0 {
+                Log.tunnel.error("launchctl kickstart exited \(result.status)")
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
                 self?.probeNow()

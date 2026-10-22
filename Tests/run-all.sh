@@ -62,6 +62,10 @@ run_probe() {
   fi
 }
 
+run_harness ProcessRunnerHarness \
+  Sources/Support/BoundedProcess.swift \
+  Tests/ProcessRunnerHarness/main.swift
+
 run_harness UIHarness \
   -framework AppKit \
   Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \
@@ -118,14 +122,15 @@ run_harness TelemetryHarness \
 run_harness GuiEnvHarness \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/System/HelperProtocol.swift \
-  Sources/Support/Log.swift \
+  Sources/Support/Log.swift Sources/Support/BoundedProcess.swift \
   Sources/System/ShellEnvInjector.swift Sources/System/GuiEnvInjector.swift \
   Tests/GuiEnvHarness/main.swift
 
 run_harness WatchdogHarness \
   -framework AppKit -framework ServiceManagement \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
-  Sources/Support/Log.swift Sources/Support/Watchdog.swift \
+  Sources/Support/Log.swift Sources/Support/BoundedProcess.swift \
+  Sources/Support/Watchdog.swift \
   Sources/System/HelperProtocol.swift Sources/System/HelperXPCClient.swift \
   Sources/System/SystemProxyManager.swift Sources/System/ShellEnvInjector.swift \
   Sources/System/GuiEnvInjector.swift \

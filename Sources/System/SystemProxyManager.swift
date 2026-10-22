@@ -381,23 +381,17 @@ final class SystemProxyManager {
         }
         var firstRealError: String?
         for args in commands {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-            process.arguments = args
-            let errPipe = Pipe()
-            process.standardOutput = Pipe()
-            process.standardError = errPipe
-            do {
-                try process.run()
-            } catch {
-                throw SocketError.message("networksetup launch failed: \(error.localizedDescription)")
+            let result = BoundedProcess.run(executable: "/usr/sbin/networksetup",
+                                            arguments: args,
+                                            timeout: 20)
+            if let error = result.launchError {
+                throw SocketError.message("networksetup launch failed: \(error)")
             }
-            guard waitForExit(process, timeout: 20) else {
+            if result.timedOut {
                 throw SocketError.message("networksetup timed out")
             }
-            if process.terminationStatus != 0 {
-                let data = errPipe.fileHandleForReading.readDataToEndOfFile()
-                let text = String(data: data, encoding: .utf8) ?? "networksetup failed"
+            if result.status != 0 {
+                let text = String(data: result.stderrData, encoding: .utf8) ?? "networksetup failed"
                 let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if tolerateMissingServices && NetworksetupCommands.isMissingServiceError(message) {
                     Log.system.notice("networksetup: skipping missing service \(args.count > 1 ? args[1] : "?")")
@@ -420,56 +414,15 @@ final class SystemProxyManager {
     // MARK: - Helpers
 
     private func runRead(_ args: [String]) -> [String]? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/networksetup")
-        process.arguments = args
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        // Discard stderr so it cannot fill its pipe and stall the child while we
-        // wait for it to exit.
-        process.standardError = FileHandle.nullDevice
-        let readQueue = DispatchQueue(label: "com.proxymanager.networksetup.read")
-        let lock = NSLock()
-        var output = Data()
-        let readDone = DispatchSemaphore(value: 0)
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        // Drain stdout while the child runs: reading only after exit can
-        // deadlock until the timeout when the output is larger than the pipe.
-        readQueue.async {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            lock.lock()
-            output = data
-            lock.unlock()
-            readDone.signal()
-        }
-        guard waitForExit(process, timeout: 20) else { return nil }
-        // The child has exited, so the pipe must reach EOF promptly.
-        guard readDone.wait(timeout: .now() + 5) == .success else { return nil }
-        // A non-zero exit is a failed read, not an empty result: treating it
-        // as data would let a safety check mistake a broken read for "clean".
-        guard process.terminationStatus == 0 else { return nil }
-        lock.lock()
-        let data = output
-        lock.unlock()
-        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        let result = BoundedProcess.run(executable: "/usr/sbin/networksetup",
+                                        arguments: args,
+                                        timeout: 20)
+        // Launch failure, timeout, and a non-zero exit are all failed reads,
+        // not empty results: treating them as data would let a safety check
+        // mistake a broken read for "clean".
+        guard result.launchError == nil, !result.timedOut, result.status == 0,
+              let text = String(data: result.stdoutData, encoding: .utf8) else { return nil }
         return text.components(separatedBy: .newlines)
-    }
-
-    /// Bounded wait so a hung `networksetup` cannot block the app (or quit).
-    private func waitForExit(_ process: Process, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        if process.isRunning {
-            process.terminate()
-            return false
-        }
-        return true
     }
 
     /// Runs the commands as root via `osascript`. The script is passed inline
@@ -480,31 +433,23 @@ final class SystemProxyManager {
         // `set -e` so any individual networksetup failure fails the whole run.
         let shellLine = "set -e; " + commands.joined(separator: "; ")
         let appleScript = "do shell script \"\(appleScriptEscape(shellLine))\" with administrator privileges"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", appleScript]
-        let errPipe = Pipe()
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = errPipe
-        do {
-            try process.run()
-        } catch {
-            throw SocketError.message("osascript launch failed: \(error.localizedDescription)")
+        // On timeout, kill osascript's whole tree: `do shell script` runs a
+        // shell, which in turn spawns `networksetup`. Killing only osascript
+        // would let the remaining commands finish (and mutate) in the
+        // background after we have already reported the failure.
+        let result = BoundedProcess.run(executable: "/usr/bin/osascript",
+                                        arguments: ["-e", appleScript],
+                                        timeout: 180,
+                                        killTreeOnTimeout: true)
+        if let error = result.launchError {
+            throw SocketError.message("osascript launch failed: \(error)")
         }
-
-        // Bound the wait so a stuck admin prompt can't hang the app (or quit).
-        let deadline = Date().addingTimeInterval(180)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if process.isRunning {
-            process.terminate()
+        if result.timedOut {
             throw SocketError.message("osascript timed out")
         }
 
-        guard process.terminationStatus == 0 else {
-            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-            let errText = String(data: errData, encoding: .utf8) ?? "unknown error"
+        guard result.status == 0 else {
+            let errText = String(data: result.stderrData, encoding: .utf8) ?? "unknown error"
             throw SocketError.message(errText.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }

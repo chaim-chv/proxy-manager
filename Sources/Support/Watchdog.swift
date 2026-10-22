@@ -180,18 +180,11 @@ enum WatchdogController {
 
     @discardableResult
     private static func launchctl(_ args: [String]) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = args
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-        process.waitUntilExit()
-        return process.terminationStatus == 0
+        let result = BoundedProcess.run(executable: "/bin/launchctl",
+                                        arguments: args,
+                                        timeout: 10)
+        guard result.launchError == nil, !result.timedOut else { return false }
+        return result.status == 0
     }
 }
 

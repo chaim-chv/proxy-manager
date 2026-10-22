@@ -147,21 +147,17 @@ final class GuiEnvInjector {
     // MARK: - launchctl
 
     static func launchctlRunner(_ args: [String]) -> LaunchctlResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = args
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            Log.system.error("gui env: launchctl \(args.first ?? "") failed to launch: \(error.localizedDescription)")
+        let result = BoundedProcess.run(executable: "/bin/launchctl",
+                                        arguments: args,
+                                        timeout: 10)
+        if let error = result.launchError {
+            Log.system.error("gui env: launchctl \(args.first ?? "") failed to launch: \(error)")
             return LaunchctlResult(status: -1, stdout: "")
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return LaunchctlResult(status: process.terminationStatus,
-                               stdout: String(data: data, encoding: .utf8) ?? "")
+        if result.timedOut {
+            Log.system.error("gui env: launchctl \(args.first ?? "") timed out")
+            return LaunchctlResult(status: -1, stdout: result.stdout)
+        }
+        return LaunchctlResult(status: result.status, stdout: result.stdout)
     }
 }
