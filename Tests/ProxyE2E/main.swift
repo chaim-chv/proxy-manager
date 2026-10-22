@@ -937,5 +937,71 @@ do {
 }
 
 print("")
+print("== Socket timeout timeval boundaries (PS-09) ==")
+do {
+    let zero = Socket.timeval(for: 0)
+    check("timeval(0) keeps a non-zero microsecond floor", zero.tv_sec == 0 && zero.tv_usec >= 1)
+    let tiny = Socket.timeval(for: 0.000_000_5)
+    check("timeval(sub-microsecond) keeps a non-zero microsecond floor",
+          tiny.tv_sec == 0 && tiny.tv_usec >= 1)
+    let oneAndHalf = Socket.timeval(for: 1.5)
+    check("timeval(1.5) is 1 s + 500000 us", oneAndHalf.tv_sec == 1 && oneAndHalf.tv_usec == 500_000)
+    let huge = Socket.timeval(for: 1e300)
+    check("timeval(1e300) clamps to 24 h", huge.tv_sec == 86_400 && huge.tv_usec == 0)
+    let infinite = Socket.timeval(for: .infinity)
+    check("timeval(infinity) keeps a non-zero microsecond floor",
+          infinite.tv_sec == 0 && infinite.tv_usec >= 1)
+
+    // A zero/short deadline must not install an infinite SO_RCVTIMEO: a
+    // blocking recv on a connected-but-idle socketpair has to return EAGAIN.
+    var pair: [Int32] = [-1, -1]
+    if socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 {
+        defer { close(pair[0]); close(pair[1]) }
+        Socket.setTimeouts(pair[0], receive: 0, send: 0)
+        let start = DispatchTime.now()
+        var byte: UInt8 = 0
+        let n = recv(pair[0], &byte, 1, 0)
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
+        check("setTimeouts(receive: 0) returns instead of blocking forever",
+              n < 0 && elapsed < 1 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    } else {
+        check("socketpair for the zero-timeout probe", false)
+    }
+}
+
+print("")
+print("== RelayBuffer read-offset queue (PS-07) ==")
+do {
+    func unread(_ buffer: RelayBuffer) -> [UInt8] {
+        buffer.withUnsafeUnreadBytes { Array($0) }
+    }
+
+    var buffer = RelayBuffer(reservingCapacity: 1024)
+    buffer.append(contentsOf: [1, 2, 3])
+    buffer.append(contentsOf: [4, 5])
+    check("available tracks appended bytes", buffer.available == 5)
+    check("isEmpty is false while bytes are queued", !buffer.isEmpty)
+    buffer.consume(2)
+    check("consume advances available", buffer.available == 3)
+    check("consume preserves order", unread(buffer) == [3, 4, 5])
+    buffer.consume(99)
+    check("consume-all resets the queue",
+          buffer.isEmpty && buffer.available == 0 && unread(buffer).isEmpty)
+    buffer.append(contentsOf: [9, 8])
+    check("append after consume-all keeps working", unread(buffer) == [9, 8])
+
+    let payload = (0..<(200 * 1024)).map { UInt8($0 % 251) }
+    var big = RelayBuffer(reservingCapacity: 300_000)
+    big.append(contentsOf: payload)
+    big.consume(100 * 1024)
+    check("compaction past 64 KB leaves the exact tail",
+          unread(big) == Array(payload[(100 * 1024)...]))
+    check("available is correct after compaction", big.available == 100 * 1024)
+    big.consume(100 * 1024)
+    check("compaction plus consume-all empties the queue",
+          big.isEmpty && unread(big).isEmpty)
+}
+
+print("")
 if failures == 0 { print("PASS: proxy e2e"); exit(0) }
 else { print("FAIL: \(failures) e2e check(s) failed"); exit(1) }

@@ -15,6 +15,74 @@ struct ProxyRuntimeSettings {
     var recordAppInTelemetry: Bool = false
 }
 
+/// Sliding byte buffer for one relay direction.
+///
+/// `Array.removeFirst(_:)` memmoves the whole tail, so draining a near-full
+/// 256 KB buffer in 16 KB sends shifts ~240 KB per delivered chunk. Consuming
+/// only advances a read offset instead; the storage is compacted when the
+/// offset reaches 64 KB (or reset when fully consumed), which is amortized
+/// O(1) per byte and keeps the hot path free of large moves.
+struct RelayBuffer {
+    private static let compactThreshold = 64 * 1024
+
+    private var storage: [UInt8]
+    private var readOffset = 0
+
+    init(reservingCapacity: Int = 0) {
+        storage = []
+        storage.reserveCapacity(reservingCapacity)
+    }
+
+    init(_ bytes: [UInt8], reservingCapacity: Int) {
+        storage = bytes
+        storage.reserveCapacity(max(reservingCapacity, bytes.count))
+    }
+
+    /// Unread bytes still queued for the peer.
+    var available: Int { storage.count - readOffset }
+
+    var isEmpty: Bool { available == 0 }
+
+    mutating func append<S: Sequence>(contentsOf bytes: S) where S.Element == UInt8 {
+        storage.append(contentsOf: bytes)
+    }
+
+    /// Marks the first `n` unread bytes as written. Compacts only once the read
+    /// offset grows past the threshold, so per-send cost stays O(1).
+    mutating func consume(_ n: Int) {
+        guard n > 0 else { return }
+        readOffset = min(storage.count, readOffset + n)
+        if readOffset == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            readOffset = 0
+        } else if readOffset >= Self.compactThreshold {
+            storage.removeFirst(readOffset)
+            readOffset = 0
+        }
+    }
+
+    mutating func removeAll() {
+        storage.removeAll(keepingCapacity: true)
+        readOffset = 0
+    }
+
+    /// Exposes the unread slice so callers (and tests) never copy just to read.
+    func withUnsafeUnreadBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
+        try storage.withUnsafeBytes { full in
+            let start = full.baseAddress.map { $0.advanced(by: readOffset) }
+            return try body(UnsafeRawBufferPointer(start: start, count: available))
+        }
+    }
+
+    /// Sends the unread slice and consumes exactly the bytes the kernel took.
+    mutating func send(to fd: Int32) -> Int {
+        guard !isEmpty else { return 0 }
+        let n = withUnsafeUnreadBytes { Darwin.send(fd, $0.baseAddress!, $0.count, 0) }
+        if n > 0 { consume(n) }
+        return n
+    }
+}
+
 /// Domain-aware HTTP CONNECT / forward proxy.
 ///
 /// Performance model:
@@ -192,7 +260,8 @@ final class ProxyServer {
         defer { close(cfd) }
 
         do {
-            let (header, leftover) = try readHeader(cfd, maxBytes: 65_536, deadline: Date().addingTimeInterval(15))
+            let (header, leftover) = try readHeader(cfd, maxBytes: 65_536,
+                                                    deadline: DispatchTime.now() + .seconds(15))
             guard let request = HTTPParser.parse(header) else {
                 throw SocketError.message("malformed request")
             }
@@ -375,14 +444,16 @@ final class ProxyServer {
         return fd
     }
 
-    private func readHeader(_ fd: Int32, maxBytes: Int, deadline: Date) throws -> ([UInt8], [UInt8]) {
+    private func readHeader(_ fd: Int32, maxBytes: Int, deadline: DispatchTime) throws -> ([UInt8], [UInt8]) {
         var buffer: [UInt8] = []
         var chunk = [UInt8](repeating: 0, count: 4096)
         while buffer.count < maxBytes {
             // `SO_RCVTIMEO` is per-call, so a slowloris client could otherwise
-            // hold a thread + semaphore permit forever. Bound the whole header.
-            let remaining = deadline.timeIntervalSinceNow
-            if remaining <= 0 { throw SocketError.message("header read timeout") }
+            // hold a thread + semaphore permit forever. Bound the whole header
+            // by the monotonic clock: a wall-clock step must not extend it.
+            let now = DispatchTime.now()
+            if now >= deadline { throw SocketError.message("header read timeout") }
+            let remaining = Double(deadline.uptimeNanoseconds - now.uptimeNanoseconds) / 1_000_000_000
             Socket.setTimeouts(fd, receive: min(remaining, 5), send: min(remaining, 5))
             // Never read past the cap: a single `recv` of the full chunk could
             // otherwise overshoot `maxBytes` by up to `chunk.count - 1`.
@@ -426,8 +497,10 @@ final class ProxyServer {
             return (0, 0)
         }
 
-        var c2u = initial
-        var u2c = [UInt8]()
+        let chunk = 16_384
+        let maxBuf = 256 * 1024
+        var c2u = RelayBuffer(initial, reservingCapacity: maxBuf + chunk)
+        var u2c = RelayBuffer(reservingCapacity: maxBuf + chunk)
         var c2uTotal: Int64 = 0
         var u2cTotal: Int64 = 0
         // Read-done is graceful EOF only (`recv() == 0`): the peer can no longer
@@ -441,8 +514,6 @@ final class ProxyServer {
         var clientFinPropagated = false
         var upstreamFinPropagated = false
 
-        let chunk = 16_384
-        let maxBuf = 256 * 1024
         let grace: TimeInterval = 3
         var readBuf = [UInt8](repeating: 0, count: chunk)
 
@@ -471,9 +542,9 @@ final class ProxyServer {
             // portable-correct form and avoids a per-iteration heap array.
             var clientEvents: Int16 = 0
             var upstreamEvents: Int16 = 0
-            if !clientReadDone && c2u.count < maxBuf { clientEvents |= Int16(POLLIN) }
+            if !clientReadDone && c2u.available < maxBuf { clientEvents |= Int16(POLLIN) }
             if !u2c.isEmpty { clientEvents |= Int16(POLLOUT) }
-            if !upstreamReadDone && u2c.count < maxBuf { upstreamEvents |= Int16(POLLIN) }
+            if !upstreamReadDone && u2c.available < maxBuf { upstreamEvents |= Int16(POLLIN) }
             if !c2u.isEmpty { upstreamEvents |= Int16(POLLOUT) }
 
             if clientEvents == 0 && upstreamEvents == 0 { break }
@@ -544,12 +615,8 @@ final class ProxyServer {
                 }
                 if !clientGone && !u2c.isEmpty {
                     if clientRevents & Int16(POLLOUT) != 0 {
-                        let n = u2c.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
-                            Darwin.send(client, b.baseAddress!, u2c.count, 0)
-                        }
-                        if n > 0 {
-                            u2c.removeFirst(n)
-                        } else if n < 0 {
+                        let n = u2c.send(to: client)
+                        if n < 0 {
                             if errno == EINTR {
                                 // Retry on the next poll iteration.
                             } else if errno != EAGAIN && errno != EWOULDBLOCK {
@@ -591,12 +658,8 @@ final class ProxyServer {
                 }
                 if !upstreamGone && !c2u.isEmpty {
                     if upstreamRevents & Int16(POLLOUT) != 0 {
-                        let n = c2u.withUnsafeBytes { (b: UnsafeRawBufferPointer) -> Int in
-                            Darwin.send(upstream, b.baseAddress!, c2u.count, 0)
-                        }
-                        if n > 0 {
-                            c2u.removeFirst(n)
-                        } else if n < 0 {
+                        let n = c2u.send(to: upstream)
+                        if n < 0 {
                             if errno == EINTR {
                                 // Retry on the next poll iteration.
                             } else if errno != EAGAIN && errno != EWOULDBLOCK {

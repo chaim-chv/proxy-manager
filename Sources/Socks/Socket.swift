@@ -373,14 +373,26 @@ enum Socket {
         }
     }
 
+    /// Builds a `timeval` for `SO_RCVTIMEO`/`SO_SNDTIMEO`.
+    ///
+    /// On macOS `{0,0}` means "block forever", not "return immediately", so a
+    /// short positive budget must never collapse to it: anything at or below
+    /// one microsecond becomes a 1 µs floor. Values are clamped *before* the
+    /// `Int` conversion so a huge finite `TimeInterval` cannot trap, and a
+    /// non-finite value falls back to the floor rather than an infinite wait.
+    static func timeval(for timeout: TimeInterval) -> timeval {
+        let maxSeconds: TimeInterval = 86_400
+        let clamped = timeout.isFinite ? min(max(timeout, 0), maxSeconds) : 0
+        let sec = Int(clamped)
+        var usec = Int32(((clamped - Double(sec)) * 1_000_000).rounded(.down))
+        if usec > 999_999 { usec = 999_999 }
+        if sec == 0 && usec == 0 { usec = 1 }
+        return Darwin.timeval(tv_sec: sec, tv_usec: usec)
+    }
+
     static func setTimeouts(_ fd: Int32, receive: TimeInterval, send: TimeInterval) {
-        func makeTimeval(_ t: TimeInterval) -> timeval {
-            let clamped = t.isFinite ? max(0, t) : 0
-            let sec = Int(clamped)
-            let usec = Int32((clamped - Double(sec)) * 1_000_000)
-            return timeval(tv_sec: sec, tv_usec: usec)
-        }
-        var r = makeTimeval(receive); var s = makeTimeval(send)
+        var r = timeval(for: receive)
+        var s = timeval(for: send)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &r, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &s, socklen_t(MemoryLayout<timeval>.size))
     }
