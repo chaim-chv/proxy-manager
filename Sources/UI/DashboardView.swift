@@ -35,6 +35,17 @@ private enum TimeRange: String, CaseIterable, Identifiable {
         }
     }
 
+    /// How often this range re-queries SQLite. The 5 m chart is bucketed from
+    /// live memory, so it never touches the database.
+    var queryCadence: TimeInterval? {
+        switch self {
+        case .m5: return nil
+        case .h1: return 5
+        case .h24: return 15
+        case .d7: return 60
+        }
+    }
+
     var axisComponent: Calendar.Component {
         switch self {
         case .m5, .h1: return .minute
@@ -82,11 +93,19 @@ struct DashboardView: View {
     @State private var selectedID: UUID?
     @State private var windowVisible = true
 
-    // Long-range chart/top-hosts data, loaded from SQLite on a 2 s cadence.
+    // Long-range chart/top-hosts data, loaded from SQLite. The 2 s timer below
+    // only drives a load once the range's cadence has elapsed; one chart + one
+    // top query pair may be in flight, and completions are tagged with the
+    // generation they were requested under so a stale pair (after a range/top
+    // metric change or a window restore) can never paint over newer data.
     @State private var dbSeries: [ChartBucket] = []
     @State private var dbTopHosts: [(host: String, count: Int)] = []
     @State private var dbTopApps: [(app: String, bundle: String?, count: Int)] = []
     @State private var lastDBLoad: Int64 = 0
+    @State private var dbPendingCount = 0
+    @State private var dbLoading = false
+    @State private var dbGeneration = 0
+    @State private var dbRefreshPending = false
 
     private let routeOptions = ["All", "Tunneled", "Direct", "Blocked"]
     private let seriesTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
@@ -106,8 +125,14 @@ struct DashboardView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 560)
-        .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
-        .onChange(of: topMetric) { _, _ in refreshLongRange(force: true) }
+        .onChange(of: timeRange) { _, _ in
+            clearLongRangeData()
+            refreshLongRange(force: true)
+        }
+        .onChange(of: topMetric) { _, _ in
+            clearLongRangeData()
+            refreshLongRange(force: true)
+        }
         .onChange(of: windowVisible) { _, visible in
             guard visible else { return }
             reconcileSelection()
@@ -635,20 +660,88 @@ struct DashboardView: View {
 
     // MARK: - Long-range loading
 
+    private func clearLongRangeData() {
+        dbSeries = []
+        dbTopHosts = []
+        dbTopApps = []
+    }
+
+    /// Called by the 2 s timer, and forced on a range/top-metric change or when
+    /// the window becomes visible again (UI-08). The timer itself is cheap; the
+    /// database pair runs at the range's cadence, at most one pair at a time.
     private func refreshLongRange(force: Bool = false) {
         // No DB work while nothing is on screen; `.onChange(of: windowVisible)`
         // does one forced load when the window comes back (UI-08).
         guard windowVisible else { return }
-        guard timeRange != .m5 else { return }
+        // The 5 m chart is in-memory. A forced switch still invalidates an
+        // outstanding long-range pair so its completion cannot repopulate
+        // `dbSeries` behind the in-memory chart.
+        guard let cadence = timeRange.queryCadence else {
+            if force { dbGeneration &+= 1 }
+            dbRefreshPending = false
+            return
+        }
+
         let now = Int64(Date().timeIntervalSince1970 * 1000)
-        guard force || now - lastDBLoad >= 1500 else { return }
-        lastDBLoad = now
-        let range = timeRange.seconds
-        telemetry.chartSeries(rangeSeconds: range, bucketMs: timeRange.bucketMs) { dbSeries = $0 }
-        if topMetric == .apps {
-            telemetry.topApps(rangeSeconds: range, limit: 6) { dbTopApps = $0 }
+        if force {
+            // Any completion already in flight was requested for the old range
+            // and/or old top metric (UI-06).
+            dbGeneration &+= 1
         } else {
-            telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
+            guard now - lastDBLoad >= Int64(cadence * 1000) else { return }
+        }
+
+        // Only one chart + top pair may be outstanding. A forced change asks
+        // for a fresh pair as soon as the current one finishes; a plain tick
+        // just rides the query that is already running.
+        guard dbPendingCount == 0 else {
+            if force { dbRefreshPending = true }
+            return
+        }
+        beginLongRangeLoad(now: now)
+    }
+
+    private func beginLongRangeLoad(now: Int64) {
+        guard windowVisible, timeRange.queryCadence != nil else {
+            dbRefreshPending = false
+            return
+        }
+        dbRefreshPending = false
+        dbGeneration &+= 1
+        let generation = dbGeneration
+        let range = timeRange.seconds
+        let wantsApps = topMetric == .apps
+
+        lastDBLoad = now
+        dbPendingCount = 2
+        dbLoading = true
+
+        telemetry.chartSeries(rangeSeconds: range, bucketMs: timeRange.bucketMs) { series in
+            if generation == dbGeneration { dbSeries = series }
+            longRangeQueryCompleted()
+        }
+        if wantsApps {
+            telemetry.topApps(rangeSeconds: range, limit: 6) { apps in
+                if generation == dbGeneration { dbTopApps = apps }
+                longRangeQueryCompleted()
+            }
+        } else {
+            telemetry.topHosts(rangeSeconds: range, limit: 6) { hosts in
+                if generation == dbGeneration { dbTopHosts = hosts }
+                longRangeQueryCompleted()
+            }
+        }
+    }
+
+    /// Completions arrive on main. Both halves must report back before the pair
+    /// is considered done, even when their results were stale and dropped.
+    private func longRangeQueryCompleted() {
+        dbPendingCount = max(0, dbPendingCount - 1)
+        guard dbPendingCount == 0 else { return }
+        dbLoading = false
+        if dbRefreshPending {
+            dbRefreshPending = false
+            beginLongRangeLoad(now: Int64(Date().timeIntervalSince1970 * 1000))
         }
     }
 }
