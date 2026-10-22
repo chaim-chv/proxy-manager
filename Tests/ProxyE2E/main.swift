@@ -912,9 +912,19 @@ do {
         }
     }
 
+    let startsBefore = Socket.resolverStarts.value
     let blocked = connectOutcome("127.0.0.1", allowPrivate: false)
     check("allowPrivate: false blocks 127.0.0.1", blocked?.contains("blocked_private_destination") == true)
     check("allowPrivate: true reaches 127.0.0.1", connectOutcome("127.0.0.1", allowPrivate: true) == nil)
+    check("numeric IPv4 connect starts no resolver thread", Socket.resolverStarts.value == startsBefore)
+
+    // Bracketed IPv6 literal: the policy check must run on the parsed address
+    // (no DNS attempted). `::1` is rejected before any socket is opened.
+    let v6Starts = Socket.resolverStarts.value
+    let blockedV6 = connectOutcome("[::1]", allowPrivate: false)
+    check("allowPrivate: false blocks numeric [::1]",
+          blockedV6?.contains("blocked_private_destination") == true)
+    check("bracketed IPv6 connect starts no resolver thread", Socket.resolverStarts.value == v6Starts)
 
     for host in ["localhost.", "127.1"] {
         guard connectOutcome(host, allowPrivate: true) == nil else {

@@ -5,9 +5,10 @@ enum SocketError: Error {
     case message(String)
 }
 
-/// Thread-safe counter used only by the DNS-timeout regression probe to prove
-/// that timed-out lookups do not leak `addrinfo` lists. Production code only
-/// increments/decrements it; nothing reads it except the probe.
+/// Thread-safe counter for the resolver diagnostics: the DNS-timeout regression
+/// probe uses it to prove that timed-out lookups neither leak `addrinfo` lists
+/// nor leave unbounded resolver threads behind. Production code only increments
+/// or decrements it; nothing reads it outside the probes.
 final class SocketResolutionCounter {
     private let lock = NSLock()
     private var count = 0
@@ -21,6 +22,21 @@ enum Socket {
     /// allocated by `resolve` and not yet freed. Returns to 0 once every
     /// resolver thread and caller has drained.
     static let liveResolutions = SocketResolutionCounter()
+
+    /// Resolver threads currently inside `getaddrinfo` (or the test `delay`
+    /// seam). Bounded by `maxResolverThreads`; a timed-out caller returns while
+    /// the orphan finishes, so this is the value that must stay bounded.
+    static let liveResolverThreads = SocketResolutionCounter()
+
+    /// Monotonic count of resolver threads actually spawned. The numeric fast
+    /// path never touches it, so the E2E harness can prove a literal IP opens a
+    /// socket without paying for `getaddrinfo`.
+    static let resolverStarts = SocketResolutionCounter()
+
+    /// Bound on concurrent `getaddrinfo` calls. Without it a blackholed resolver
+    /// lets timed-out callers spawn detached threads without limit.
+    private static let maxResolverThreads = 8
+    private static let resolverSemaphore = DispatchSemaphore(value: maxResolverThreads)
 
     /// macOS has no `MSG_NOSIGNAL`; `SO_NOSIGPIPE` is the per-socket equivalent.
     /// Without it a `send()` to a reset peer raises SIGPIPE and kills the app.
@@ -82,10 +98,21 @@ enum Socket {
     /// caller timeout deterministically (production always passes 0).
     static func resolve(host: String, port: UInt16, timeout: TimeInterval,
                         delay: TimeInterval = 0) throws -> UnsafeMutablePointer<addrinfo> {
+        guard resolverSemaphore.wait(timeout: .now() + 0.05) == .success else {
+            throw SocketError.message("resolver busy: \(maxResolverThreads) lookups already in flight")
+        }
         let box = ResolutionBox()
         let sem = DispatchSemaphore(value: 0)
         let portStr = String(port)
+        liveResolverThreads.inc()
+        resolverStarts.inc()
         Thread.detachNewThread {
+            // Release exactly once when getaddrinfo finishes, even if the caller
+            // timed out and already returned.
+            defer {
+                Socket.liveResolverThreads.dec()
+                Socket.resolverSemaphore.signal()
+            }
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             var hints = addrinfo()
             hints.ai_family = AF_UNSPEC
@@ -123,6 +150,25 @@ enum Socket {
                         allowPrivate: Bool = true) throws -> Int32 {
         let budget = max(0.1, timeout)
         let deadline = Date().addingTimeInterval(budget)
+
+        // A literal IPv4/IPv6 address needs no DNS. Building the sockaddr here
+        // avoids both a detached resolver thread and the `getaddrinfo` syscall,
+        // which is most tunneled connections in practice.
+        if let numeric = numericAddress(host: host, port: port) {
+            do {
+                return try numeric.withSockaddr { address, length in
+                    if !allowPrivate, HostClassifier.isPrivateOrLoopback(address, length) {
+                        throw SocketError.message("blocked_private_destination")
+                    }
+                    return try connectSocket(family: numeric.family, socktype: SOCK_STREAM,
+                                             proto: IPPROTO_TCP, address: address,
+                                             length: length, deadline: deadline)
+                }
+            } catch let e as ConnectAttemptError {
+                throw SocketError.message("connect(\(host):\(port)) failed: \(e.message)")
+            }
+        }
+
         let info = try resolve(host: host, port: port, timeout: budget)
         defer { freeaddrinfo(info); Socket.liveResolutions.dec() }
 
@@ -140,47 +186,147 @@ enum Socket {
         var lastError = "no addresses"
         var ptr: UnsafeMutablePointer<addrinfo>? = info
         while let addr = ptr {
-            let fd = socket(addr.pointee.ai_family, addr.pointee.ai_socktype, addr.pointee.ai_protocol)
-            if fd >= 0 {
-                setNoSIGPIPE(fd)
-                if !setNonBlocking(fd, on: true) {
-                    close(fd)
-                    lastError = "could not set non-blocking"
-                    ptr = addr.pointee.ai_next
-                    continue
+            let next = addr.pointee.ai_next
+            if let sa = addr.pointee.ai_addr {
+                do {
+                    return try connectSocket(family: addr.pointee.ai_family,
+                                             socktype: addr.pointee.ai_socktype,
+                                             proto: addr.pointee.ai_protocol,
+                                             address: sa,
+                                             length: addr.pointee.ai_addrlen,
+                                             deadline: deadline)
+                } catch let e as ConnectAttemptError {
+                    lastError = e.message
                 }
-                var res: Int32 = -1
-                repeat {
-                    res = Darwin.connect(fd, addr.pointee.ai_addr, addr.pointee.ai_addrlen)
-                } while res != 0 && errno == EINTR
-                if res != 0 {
-                    if errno == EINPROGRESS {
-                        let remaining = max(0.1, deadline.timeIntervalSinceNow)
-                        if waitForWritable(fd, timeout: remaining) {
-                            var optval: Int32 = 0
-                            var optlen = socklen_t(MemoryLayout<Int32>.size)
-                            if getsockopt(fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0, optval == 0 {
-                                res = 0
-                            } else {
-                                lastError = optval != 0 ? String(cString: strerror(optval))
-                                                        : String(cString: strerror(errno))
-                            }
-                        } else {
-                            lastError = "connect timed out"
-                        }
-                    } else {
-                        lastError = String(cString: strerror(errno))
-                    }
-                }
-                if res == 0, setNonBlocking(fd, on: false) {
-                    return fd
-                }
-                if res == 0 { lastError = "could not restore blocking mode" }
-                close(fd)
             }
-            ptr = addr.pointee.ai_next
+            ptr = next
         }
         throw SocketError.message("connect(\(host):\(port)) failed: \(lastError)")
+    }
+
+    /// One resolved/literal address, kept in a value so the socket call and the
+    /// SSRF check share the exact same bytes.
+    private enum NumericAddress {
+        case v4(sockaddr_in)
+        case v6(sockaddr_in6)
+
+        var family: Int32 {
+            switch self {
+            case .v4: return AF_INET
+            case .v6: return AF_INET6
+            }
+        }
+
+        var length: socklen_t {
+            switch self {
+            case .v4: return socklen_t(MemoryLayout<sockaddr_in>.size)
+            case .v6: return socklen_t(MemoryLayout<sockaddr_in6>.size)
+            }
+        }
+
+        func withSockaddr<T>(_ body: (UnsafePointer<sockaddr>, socklen_t) throws -> T) rethrows -> T {
+            switch self {
+            case .v4(var sa):
+                return try withUnsafePointer(to: &sa) { ptr in
+                    try ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        try body($0, length)
+                    }
+                }
+            case .v6(var sa):
+                return try withUnsafePointer(to: &sa) { ptr in
+                    try ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        try body($0, length)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Parse a numeric literal only (`inet_pton`), so shorthand/integer forms
+    /// such as `127.1` still go through `getaddrinfo` as before.
+    private static func numericAddress(host: String, port: UInt16) -> NumericAddress? {
+        var h = host
+        if h.hasPrefix("["), let close = h.firstIndex(of: "]") {
+            h = String(h[h.index(after: h.startIndex)..<close])
+        }
+        var v4 = in_addr()
+        if h.withCString({ inet_pton(AF_INET, $0, &v4) }) == 1 {
+            var sa = sockaddr_in()
+            sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            sa.sin_family = sa_family_t(AF_INET)
+            sa.sin_port = port.bigEndian
+            sa.sin_addr = v4
+            return .v4(sa)
+        }
+        var v6 = in6_addr()
+        if h.withCString({ inet_pton(AF_INET6, $0, &v6) }) == 1 {
+            var sa = sockaddr_in6()
+            sa.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            sa.sin6_family = sa_family_t(AF_INET6)
+            sa.sin6_port = port.bigEndian
+            sa.sin6_flowinfo = 0
+            sa.sin6_addr = v6
+            sa.sin6_scope_id = 0
+            return .v6(sa)
+        }
+        return nil
+    }
+
+    /// Failure for a single candidate address; the caller tries the next one and
+    /// reports the last message. Kept separate from `SocketError` so the connect
+    /// loop can distinguish a per-address failure from a policy rejection.
+    private struct ConnectAttemptError: Error {
+        let message: String
+    }
+
+    /// Non-blocking connect + poll + `SO_ERROR`, then restore blocking mode. The
+    /// descriptor is always closed on failure.
+    private static func connectSocket(family: Int32, socktype: Int32, proto: Int32,
+                                      address: UnsafePointer<sockaddr>, length: socklen_t,
+                                      deadline: Date) throws -> Int32 {
+        let fd = socket(family, socktype, proto)
+        guard fd >= 0 else {
+            throw ConnectAttemptError(message: String(cString: strerror(errno)))
+        }
+        setNoSIGPIPE(fd)
+        guard setNonBlocking(fd, on: true) else {
+            close(fd)
+            throw ConnectAttemptError(message: "could not set non-blocking")
+        }
+        var res: Int32 = -1
+        repeat {
+            res = Darwin.connect(fd, address, length)
+        } while res != 0 && errno == EINTR
+        if res != 0 {
+            if errno == EINPROGRESS {
+                let remaining = max(0.1, deadline.timeIntervalSinceNow)
+                if waitForWritable(fd, timeout: remaining) {
+                    var optval: Int32 = 0
+                    var optlen = socklen_t(MemoryLayout<Int32>.size)
+                    if getsockopt(fd, SOL_SOCKET, SO_ERROR, &optval, &optlen) == 0, optval == 0 {
+                        res = 0
+                    } else {
+                        let err = optval != 0 ? optval : errno
+                        close(fd)
+                        throw ConnectAttemptError(message: String(cString: strerror(err)))
+                    }
+                } else {
+                    close(fd)
+                    throw ConnectAttemptError(message: "connect timed out")
+                }
+            } else {
+                let err = errno
+                close(fd)
+                throw ConnectAttemptError(message: String(cString: strerror(err)))
+            }
+        }
+        if res == 0 {
+            if setNonBlocking(fd, on: false) { return fd }
+            close(fd)
+            throw ConnectAttemptError(message: "could not restore blocking mode")
+        }
+        close(fd)
+        throw ConnectAttemptError(message: "connect failed")
     }
 
     @discardableResult
