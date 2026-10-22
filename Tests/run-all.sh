@@ -114,6 +114,12 @@ run_harness AppIdentityHarness \
   Sources/Support/Log.swift \
   Tests/AppIdentityHarness/main.swift
 
+run_harness AskpassHarness \
+  Sources/Config/ConfigModels.swift Sources/Support/Log.swift \
+  Sources/Support/BoundedProcess.swift \
+  Sources/Tunnel/SSHKeychain.swift Sources/Tunnel/SSHTunnelRunner.swift \
+  -framework Security Tests/AskpassHarness/main.swift
+
 run_harness TelemetryHarness \
   Sources/Config/ConfigModels.swift \
   Sources/Telemetry/TelemetryStore.swift \

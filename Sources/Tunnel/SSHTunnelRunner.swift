@@ -38,6 +38,13 @@ final class SSHTunnelRunner: ObservableObject {
     /// explicit restart, so unrelated config commits cannot retry auth.
     private var fatalSettings: ManagedTunnelSettings?
 
+    init() {
+        // A crash/force-quit before ssh ever prompted leaves the plaintext
+        // secret in the temp dir. Sweep old ones at startup so they don't
+        // accumulate (TC-08).
+        Self.sweepStaleAskpassDirs()
+    }
+
     /// Thread-safe read for the app (e.g. AppModel lifecycle).
     var isRunning: Bool {
         stateLock.lock(); defer { stateLock.unlock() }; return runningValue
@@ -168,6 +175,9 @@ final class SSHTunnelRunner: ObservableObject {
         // The replacement can fail before `run()` succeeds, so drop the old
         // child's running state up front instead of inheriting it (TC-04).
         setRunning(false)
+        // Sweep crash leftovers before creating this run's dir; never touch the
+        // dir this instance is still using (cleanupTemp removes it next).
+        Self.sweepStaleAskpassDirs(excluding: tempDir)
         cleanupTemp()
         terminateProcess(process)
         process = nil
@@ -184,7 +194,17 @@ final class SSHTunnelRunner: ObservableObject {
 
         var env = ProcessInfo.processInfo.environment
         if s.auth == .password, let pw = SSHKeychain.shared.load(), !pw.isEmpty {
-            setupAskpass(password: pw, env: &env)
+            do {
+                try setupAskpass(password: pw, env: &env)
+            } catch {
+                // Never launch ssh with an unusable askpass: it would hang or
+                // fail auth with no actionable error. Abort this spawn (TC-08).
+                cleanupTemp()
+                setRunning(false)
+                Log.tunnel.error("could not prepare the password helper: \(error.localizedDescription)")
+                setError("Could not prepare the password helper. \(error.localizedDescription)")
+                return
+            }
         }
         p.environment = env
 
@@ -354,29 +374,89 @@ final class SSHTunnelRunner: ObservableObject {
         return path
     }
 
+    private struct AskpassSetupError: LocalizedError {
+        let reason: String
+        var errorDescription: String? { reason }
+    }
+
     /// Writes a one-shot askpass helper (which cats a 0600 secret file and then
-    /// deletes it) and points `SSH_ASKPASS`/`SSH_ASKPASS_REQUIRE` at it.
-    private func setupAskpass(password: String, env: inout [String: String]) {
-        let dir = FileManager.default.temporaryDirectory
+    /// deletes it on any exit) and points `SSH_ASKPASS`/`SSH_ASKPASS_REQUIRE`
+    /// at it. Throws on any failure so the caller never launches ssh with a
+    /// half-built helper or a lingering partial temp dir.
+    private func setupAskpass(password: String, env: inout [String: String]) throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory
             .appendingPathComponent("proxymanager-ssh-\(UUID().uuidString)", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-        } catch { return }
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
 
-        let secret = dir.appendingPathComponent("secret")
-        try? password.write(to: secret, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secret.path)
+            let secret = dir.appendingPathComponent("secret")
+            try password.write(to: secret, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secret.path)
 
-        let helper = dir.appendingPathComponent("askpass.sh")
-        let quotedSecret = "'" + secret.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let script = "#!/bin/sh\n/bin/cat \(quotedSecret); /bin/rm -f \(quotedSecret)\n"
-        try? script.write(to: helper, atomically: true, encoding: .utf8)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+            let helper = dir.appendingPathComponent("askpass.sh")
+            try Self.askpassScript(secretPath: secret.path)
+                .write(to: helper, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
 
-        env["SSH_ASKPASS"] = helper.path
-        env["SSH_ASKPASS_REQUIRE"] = "force"
-        tempDir = dir
+            env["SSH_ASKPASS"] = helper.path
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            tempDir = dir
+        } catch {
+            try? fm.removeItem(at: dir)
+            throw AskpassSetupError(reason: error.localizedDescription)
+        }
+    }
+
+    /// POSIX-sh askpass script. The EXIT/INT/TERM trap removes the secret even
+    /// if `cat` fails or the shell is interrupted, so it can never outlive a
+    /// single prompt. The path is single-quote escaped for `sh`.
+    static func askpassScript(secretPath: String) -> String {
+        let quoted = "'" + secretPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return "#!/bin/sh\n"
+            + "secret=\(quoted)\n"
+            + "trap 'rm -f \"$secret\"' EXIT INT TERM\n"
+            + "/bin/cat \"$secret\"\n"
+    }
+
+    /// Removes askpass dirs left behind by a crash or force-quit: only entries
+    /// named `proxymanager-ssh-*` that are directories and older than
+    /// `olderThan` (so a live sibling's fresh dir is never touched). Unrelated
+    /// temp entries and the currently active dir (`excluding`) are skipped.
+    static func sweepStaleAskpassDirs(olderThan: TimeInterval = 300,
+                                      in root: URL = FileManager.default.temporaryDirectory,
+                                      excluding: URL? = nil) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let excludedPath = excluding?.standardizedFileURL.path
+        let cutoff = Date().addingTimeInterval(-olderThan)
+        var removed = 0
+        for entry in entries where entry.lastPathComponent.hasPrefix("proxymanager-ssh-") {
+            if let excludedPath, entry.standardizedFileURL.path == excludedPath { continue }
+            guard let values = try? entry.resourceValues(
+                forKeys: [.isDirectoryKey, .contentModificationDateKey]
+            ), values.isDirectory == true,
+                  let modified = values.contentModificationDate, modified < cutoff else {
+                continue
+            }
+            do {
+                try fm.removeItem(at: entry)
+                removed += 1
+            } catch {
+                Log.tunnel.error("failed to remove stale askpass dir \(entry.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        if removed > 0 {
+            Log.tunnel.notice("removed \(removed) stale askpass dir(s)")
+        } else {
+            Log.tunnel.debug("askpass sweep found no stale dirs")
+        }
     }
 
     private func cleanupTemp() {
@@ -421,16 +501,11 @@ final class SSHTunnelRunner: ObservableObject {
     }
 
     private func isSSHProcess(_ pid: Int32) -> Bool {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-p", String(pid), "-o", "comm="]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return false }
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let comm = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let result = BoundedProcess.run(executable: "/bin/ps",
+                                        arguments: ["-p", String(pid), "-o", "comm="],
+                                        timeout: 5)
+        guard result.launchError == nil, !result.timedOut, result.status == 0 else { return false }
+        let comm = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return comm.hasSuffix("/ssh") || comm == "ssh"
     }
 
