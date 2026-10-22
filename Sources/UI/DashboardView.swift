@@ -160,7 +160,9 @@ struct DashboardView: View {
         let appOptions = appFilterOptions(from: baseRows)
         let appOptionIds = appOptions.map(\.id)
         let appKey = validatedAppFilterKey(appOptions)
-        let rows = paused ? pausedSnapshot : computeFeedRows(from: baseRows, appKey: appKey)
+        // Pause freezes the unfiltered base rows, not the filtered result, so the
+        // route/host/app filters keep working on the frozen data (UI-15).
+        let rows = computeFeedRows(from: paused ? pausedSnapshot : baseRows, appKey: appKey)
         let points = seriesPoints
         let tops = topItems
 
@@ -182,7 +184,7 @@ struct DashboardView: View {
             feedArea(rows: rows, appOptions: appOptions)
         }
         .onChange(of: paused) { _, isPaused in
-            if isPaused { pausedSnapshot = computeFeedRows(from: baseRows, appKey: appKey) }
+            if isPaused { pausedSnapshot = baseRows }
         }
         // The app filter menu is hidden when no apps are in the feed, so a
         // selected app that ages out (or is purged) would otherwise silently

@@ -84,7 +84,7 @@ run_harness SingleInstanceHarness \
 run_harness UIHarness \
   -framework AppKit \
   Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \
-  Sources/UI/AppIcon.swift \
+  Sources/UI/AppIcon.swift Sources/UI/TooltipMetrics.swift \
   Tests/UIHarness/main.swift
 
 run_harness WindowTrackerHarness \

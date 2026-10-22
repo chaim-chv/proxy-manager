@@ -61,6 +61,7 @@ private struct TooltipTrackingView: NSViewRepresentable {
 
         override func viewWillMove(toWindow newWindow: NSWindow?) {
             if newWindow == nil { TooltipWindow.shared.hide() }
+            super.viewWillMove(toWindow: newWindow)
         }
     }
 }
@@ -114,10 +115,12 @@ private final class TooltipWindow {
         let maxTextWidth: CGFloat = 268
         let paddingX: CGFloat = 6
         let paddingY: CGFloat = 4
+        label.preferredMaxLayoutWidth = maxTextWidth
 
-        let textSize = (text as NSString).boundingRect(
-            with: NSSize(width: maxTextWidth, height: 40),
-            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        let textSize = TooltipMetrics.size(
+            text: text,
+            font: label.font ?? .systemFont(ofSize: 10),
+            maxWidth: maxTextWidth
         )
         let w = ceil(textSize.width) + paddingX * 2
         let h = ceil(textSize.height) + paddingY * 2

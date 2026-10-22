@@ -662,6 +662,15 @@ struct SystemSettingsView: View {
 
     @State private var newRc = ""
 
+    /// Unique rc paths in configured order, first occurrence wins. The config is
+    /// append-only and earlier builds did not check for duplicates, so legacy
+    /// configs can repeat a path; `ForEach(id: \.self)` with duplicate ids is
+    /// undefined SwiftUI behavior (rows can edit/remove the wrong entry).
+    private var uniqueRCs: [String] {
+        var seen = Set<String>()
+        return model.config.system.managedShellRcs.filter { seen.insert($0).inserted }
+    }
+
     var body: some View {
         SettingsPage(title: SettingsSection.system.title, summary: SettingsSection.system.summary) {
             SettingsContent {
@@ -675,12 +684,12 @@ struct SystemSettingsView: View {
                     help: "Files like `~/.zshrc` that new terminal sessions read. The app adds one guarded source line to each, and removes it when shell env injection is turned off."
                 ) {
                     VStack(spacing: 0) {
-                        if model.config.system.managedShellRcs.isEmpty {
+                        if uniqueRCs.isEmpty {
                             SettingsCaption(text: "No rc files yet.")
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
                         }
-                        ForEach(model.config.system.managedShellRcs, id: \.self) { rc in
+                        ForEach(uniqueRCs, id: \.self) { rc in
                             SettingsRow {
                                 Text(rc).foregroundStyle(.secondary)
                                 Spacer()
@@ -693,7 +702,7 @@ struct SystemSettingsView: View {
                                 .buttonStyle(.borderless)
                                 .foregroundStyle(.red)
                             }
-                            if rc != model.config.system.managedShellRcs.last {
+                            if rc != uniqueRCs.last {
                                 Divider()
                             }
                         }
@@ -703,7 +712,7 @@ struct SystemSettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                             Button("Add") {
                                 let v = newRc.trimmingCharacters(in: .whitespaces)
-                                guard !v.isEmpty else { return }
+                                guard !v.isEmpty, !uniqueRCs.contains(v) else { return }
                                 model.config.system.managedShellRcs.append(v)
                                 model.commitConfig()
                                 newRc = ""

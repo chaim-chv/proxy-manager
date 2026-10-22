@@ -166,6 +166,31 @@ check("positive cache calls the resolver once", hitCount == 1)
 AppIcon.resolver = defaultResolver
 AppIcon.clearCachesForTesting()
 
+print("== Tooltip metrics ==")
+let tooltipFont = NSFont.systemFont(ofSize: 10)
+let longTip = String(repeating: "a-very-long-application-name ", count: 8)
+let tipMaxWidth: CGFloat = 100
+let emptyTip = TooltipMetrics.size(text: "", font: tooltipFont, maxWidth: 268)
+let shortTip = TooltipMetrics.size(text: "short", font: tooltipFont, maxWidth: 268)
+let wrappedTip = TooltipMetrics.size(text: longTip, font: tooltipFont, maxWidth: tipMaxWidth)
+
+check("empty text measures non-negative",
+      emptyTip.width >= 0 && emptyTip.height >= 0)
+check("short text measures non-negative", shortTip.width > 0 && shortTip.height > 0)
+check("short text fits within the max width", shortTip.width <= 268)
+check("long text wraps within the max width", wrappedTip.width <= tipMaxWidth)
+check("long text is wider than a single short line", wrappedTip.width > shortTip.width)
+check("long text is taller than one line", wrappedTip.height > shortTip.height)
+check("long text wraps onto several lines", wrappedTip.height >= shortTip.height * 3)
+check("an unbreakable word never exceeds the max width",
+      TooltipMetrics.size(text: String(repeating: "x", count: 400),
+                          font: tooltipFont, maxWidth: 60).width <= 60)
+check("the label font affects the measured height",
+      TooltipMetrics.size(text: "short", font: NSFont.systemFont(ofSize: 20), maxWidth: 268).height
+        > shortTip.height)
+check("zero max width measures to zero",
+      TooltipMetrics.size(text: "short", font: tooltipFont, maxWidth: 0) == .zero)
+
 print("")
 print("== SUMMARY: \(checks - failures)/\(checks) passed ==")
 exit(failures == 0 ? 0 : 1)
