@@ -137,6 +137,13 @@ run_harness GuiEnvHarness \
   Sources/System/ShellEnvInjector.swift Sources/System/GuiEnvInjector.swift \
   Tests/GuiEnvHarness/main.swift
 
+run_harness ShellEnvHarness \
+  Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
+  Sources/System/HelperProtocol.swift \
+  Sources/Support/Log.swift \
+  Sources/System/ShellEnvInjector.swift \
+  Tests/ShellEnvHarness/main.swift
+
 run_harness WatchdogHarness \
   -framework AppKit -framework ServiceManagement -framework Security \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \

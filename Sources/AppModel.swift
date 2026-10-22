@@ -59,6 +59,10 @@ final class AppModel: ObservableObject {
     private var appliedBindHost: String = ""
     // WorkQueue-only: whether we have published proxy env to the GUI session.
     private var appliedGuiEnv = false
+    // WorkQueue-only: the rc files whose marker blocks we installed, and
+    // whether shell env was last applied at all (LC-15).
+    private var appliedShellRCFiles: [String] = []
+    private var appliedShellEnvEnabled = false
 
     private var saveDebounce: DispatchWorkItem?
     private let onboardingKey = "hasCompletedOnboarding"
@@ -386,12 +390,11 @@ final class AppModel: ObservableObject {
                 try self.systemProxyManager.applyProxy(services: services, port: port,
                                                        host: self.systemProxyHost(bindHost))
 
-                if cfg.system.injectShellEnv {
-                    self.shellEnvInjector.writeEnvFile(port: port, bindHost: bindHost, tunnelHost: cfg.tunnel.effectiveHost)
-                    self.shellEnvInjector.install(rcFiles: cfg.system.managedShellRcs)
-                }
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
+                self.syncShellEnv(tunnelHost: cfg.tunnel.effectiveHost,
+                                  injectEnabled: cfg.system.injectShellEnv,
+                                  rcFiles: cfg.system.managedShellRcs)
                 self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
                 self.setState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded)
                 Log.app.notice("enable(): routing enabled (tunnelUp=\(self.tunnelSupervisor.isTunnelUp))")
@@ -413,10 +416,7 @@ final class AppModel: ObservableObject {
                             Log.app.error("enable() rollback clear failed: \(error.localizedDescription)")
                         }
                     }
-                    if cfg.system.injectShellEnv {
-                        self.shellEnvInjector.remove(rcFiles: cfg.system.managedShellRcs)
-                        self.shellEnvInjector.removeEnvFile()
-                    }
+                    self.removeAppliedShellEnv(currentRCFiles: cfg.system.managedShellRcs)
                     if self.appliedGuiEnv {
                         self.guiEnvInjector.remove()
                         self.appliedGuiEnv = false
@@ -502,10 +502,7 @@ final class AppModel: ObservableObject {
                 WatchdogController.disarm()
                 self.appliedPort = 0
                 self.appliedBindHost = ""
-                if cfg.system.injectShellEnv {
-                    self.shellEnvInjector.remove(rcFiles: cfg.system.managedShellRcs)
-                    self.shellEnvInjector.removeEnvFile()
-                }
+                self.removeAppliedShellEnv(currentRCFiles: cfg.system.managedShellRcs)
                 self.syncGuiEnv(enabled: false, tunnelHost: "")
                 UserDefaults.standard.set(false, forKey: self.wasOnKey)
                 self.proxyServer.stop()
@@ -541,10 +538,13 @@ final class AppModel: ObservableObject {
             let watchdog = config.system.crashWatchdog
             let guiEnabled = config.system.injectGuiEnv
             let tunnelHost = config.tunnel.effectiveHost
+            let shellEnabled = config.system.injectShellEnv
+            let shellRcs = config.system.managedShellRcs
             workQueue.async { [weak self] in
                 guard let self = self else { return }
                 self.reapplyIfPortChanged(port: port, bindHost: bindHost, watchdog: watchdog)
                 self.syncGuiEnv(enabled: guiEnabled, tunnelHost: tunnelHost)
+                self.syncShellEnv(tunnelHost: tunnelHost, injectEnabled: shellEnabled, rcFiles: shellRcs)
             }
         } else {
             // Retract any GUI env left behind by a degraded stop.
@@ -677,6 +677,51 @@ final class AppModel: ObservableObject {
             guiEnvInjector.remove()
             appliedGuiEnv = false
         }
+    }
+
+    /// Reconciles shell env with the live config. Runs on `workQueue`; the env
+    /// file always uses the *applied* port/host so a failed rebind cannot leave
+    /// CLI tools pointing at a dead listener. Removal is safe and unconditional
+    /// (LC-15): turning injection off, or a failed enable, must clean up every
+    /// file that may have been touched.
+    private func syncShellEnv(tunnelHost: String, injectEnabled: Bool, rcFiles: [String]) {
+        guard appliedPort != 0 else { return }
+        if injectEnabled {
+            shellEnvInjector.writeEnvFile(port: appliedPort, bindHost: appliedBindHost,
+                                          tunnelHost: tunnelHost)
+            shellEnvInjector.install(rcFiles: rcFiles)
+            let stale = appliedShellRCFiles.filter { !rcFiles.contains($0) }
+            if !stale.isEmpty {
+                shellEnvInjector.remove(rcFiles: stale)
+            }
+            if !appliedShellEnvEnabled {
+                Log.system.notice("shell env: applied to \(rcFiles.count) rc file(s)")
+            }
+            appliedShellRCFiles = rcFiles
+            appliedShellEnvEnabled = true
+        } else {
+            removeAppliedShellEnv(currentRCFiles: rcFiles)
+        }
+    }
+
+    /// Removes the env file and marker blocks from every rc file we may have
+    /// touched: the last applied list, the current list, and the shell default.
+    /// Runs on `workQueue`.
+    private func removeAppliedShellEnv(currentRCFiles: [String]) {
+        var rcFiles = appliedShellRCFiles
+        for rc in currentRCFiles where !rcFiles.contains(rc) {
+            rcFiles.append(rc)
+        }
+        for rc in ShellEnvInjector.defaultRCFiles where !rcFiles.contains(rc) {
+            rcFiles.append(rc)
+        }
+        shellEnvInjector.remove(rcFiles: rcFiles)
+        shellEnvInjector.removeEnvFile()
+        if appliedShellEnvEnabled || !appliedShellRCFiles.isEmpty {
+            Log.system.notice("shell env: removed")
+        }
+        appliedShellRCFiles = []
+        appliedShellEnvEnabled = false
     }
 
     func resetAll() {
@@ -1005,10 +1050,7 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            if config.system.injectShellEnv {
-                shellEnvInjector.remove(rcFiles: config.system.managedShellRcs)
-                shellEnvInjector.removeEnvFile()
-            }
+            self.removeAppliedShellEnv(currentRCFiles: config.system.managedShellRcs)
             // `remove()` is a no-op unless a snapshot exists, so it can never
             // clobber a proxy env we did not publish.
             guiEnvInjector.remove()
