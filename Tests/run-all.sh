@@ -62,6 +62,17 @@ run_probe() {
   fi
 }
 
+run_script_harness() {
+  local name="$1" script="$2"
+  echo ""
+  echo "=============================================================="
+  echo "HARNESS: $name"
+  echo "=============================================================="
+  bash "$script"
+  local rc=$?
+  if [ $rc -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); failures+=("$name (exit $rc)"); fi
+}
+
 run_harness ProcessRunnerHarness \
   Sources/Support/BoundedProcess.swift \
   Tests/ProcessRunnerHarness/main.swift
@@ -143,6 +154,10 @@ run_harness ShellEnvHarness \
   Sources/Support/Log.swift \
   Sources/System/ShellEnvInjector.swift \
   Tests/ShellEnvHarness/main.swift
+
+# revert.sh is the user's emergency lifeline; it is a shell script, so it has a
+# shell harness (fakes for networksetup/launchctl/defaults/pkill/ps + temp HOME).
+run_script_harness RevertHarness Tests/RevertHarness/run.sh
 
 run_harness WatchdogHarness \
   -framework AppKit -framework ServiceManagement -framework Security \
