@@ -71,9 +71,15 @@ final class AppModel: ObservableObject {
     private var activityToken: NSObjectProtocol?
     private let pathMonitor = NWPathMonitor()
     private var workspaceObservers: [NSObjectProtocol] = []
-    private let keychainStateLock = NSLock()
+    // Serializes managed-tunnel side effects (Keychain delete, SSH apply/stop)
+    // so concurrent callers cannot interleave an auth change with a spawn.
+    // Tunnel state below is owned by this queue only (LC-20).
+    private let tunnelSyncQueue = DispatchQueue(label: "com.proxymanager.tunnelsync")
     private var lastTunnelMode: TunnelMode?
     private var lastManagedAuth: SSHAuthMethod?
+    // Main-thread-only: the last recovery attempt (enable rollback / disable
+    // restore) failed, so `.degraded` must not be read as "tunnel down" (LC-21).
+    private var recoveryFailed = false
 
     init() {
         let store = ConfigStore.shared
@@ -124,7 +130,7 @@ final class AppModel: ObservableObject {
         // the Keychain, observe network changes, or auto-enable routing.
         if !DemoMode.isEnabled {
             tunnelSupervisor.start()
-            syncManagedTunnel()
+            syncManagedTunnel(config)
             observeSystemEvents()
 
             if UserDefaults.standard.bool(forKey: wasOnKey) {
@@ -181,11 +187,19 @@ final class AppModel: ObservableObject {
         workspaceObservers.append(wake)
         pathMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
-            self?.reapplyAfterSystemChange(reason: "network change")
+            // The monitor calls back on its own queue; hop to main so the
+            // reapply captures `state`/`config` on the thread that owns them.
+            DispatchQueue.main.async {
+                self?.reapplyAfterSystemChange(reason: "network change")
+            }
         }
         pathMonitor.start(queue: DispatchQueue(label: "com.proxymanager.pathmonitor"))
     }
 
+    /// Runs on main; everything the work item needs is captured here so the
+    /// item never touches `state` or `config` (LC-20). A `disable()` captured
+    /// later sets `.stopping` synchronously on main *before* enqueueing its
+    /// work item, so this capture cannot miss a stop that should have won.
     private func reapplyAfterSystemChange(reason: String) {
         guard state.isActive else { return }
         let port = config.proxy.port
@@ -193,7 +207,7 @@ final class AppModel: ObservableObject {
         let watchdog = config.system.crashWatchdog
         Log.app.notice("re-applying proxy after \(reason)")
         workQueue.async { [weak self] in
-            guard let self, self.state.isActive else { return }
+            guard let self else { return }
             guard let services = self.systemProxyManager.listServicesChecked(), !services.isEmpty else {
                 let message = "cannot read the network service list; keeping the current proxy state"
                 self.setLastError("Failed to re-apply proxy after \(reason): \(message)")
@@ -349,7 +363,7 @@ final class AppModel: ObservableObject {
 
         workQueue.async { [weak self] in
             guard let self = self else { return }
-            self.syncManagedTunnel()
+            self.syncManagedTunnel(cfg)
             var services: [String] = []
             var touchedSystemProxy = false
             var startedListener = false
@@ -396,7 +410,7 @@ final class AppModel: ObservableObject {
                                   injectEnabled: cfg.system.injectShellEnv,
                                   rcFiles: cfg.system.managedShellRcs)
                 self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
-                self.setState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded)
+                self.finalizeState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded, recoveryFailed: false)
                 Log.app.notice("enable(): routing enabled (tunnelUp=\(self.tunnelSupervisor.isTunnelUp))")
             } catch {
                 // Roll back so we never leave the system proxy dangling.
@@ -429,7 +443,9 @@ final class AppModel: ObservableObject {
                         WatchdogController.disarm()
                         self.proxyServer.stop()
                         self.endProxyActivity()
-                        self.setState(.off)
+                        // A successful rollback leaves the system proxy exactly
+                        // as we found it: nothing is left to recover.
+                        self.finalizeState(.off, recoveryFailed: false)
                     } else {
                         // Recovery state must survive: keep the snapshot on disk and
                         // the watchdog armed, and keep the listener running so the
@@ -448,7 +464,9 @@ final class AppModel: ObservableObject {
                         // Leave the intent set so the next launch auto-enables and
                         // repairs the still-dangling proxy.
                         UserDefaults.standard.set(true, forKey: self.wasOnKey)
-                        self.setState(.degraded)
+                        // The proxy may still point at us: record that the last
+                        // recovery failed so a tunnel flap cannot show ON (LC-21).
+                        self.finalizeState(.degraded, recoveryFailed: true)
                     }
                 } else {
                     // This call never touched the system proxy, so any recovery
@@ -465,7 +483,8 @@ final class AppModel: ObservableObject {
                     }
                     // A listener kept alive here may be serving a dangling proxy
                     // from a previous crash, so report degraded rather than off.
-                    self.setState(hasRecoverySnapshot ? .degraded : .off)
+                    // This call attempted no recovery, so the flag is untouched.
+                    self.finalizeState(hasRecoverySnapshot ? .degraded : .off)
                     Log.app.error("enable(): failed before touching the system proxy; recovery state preserved")
                 }
                 self.setLastError(error.localizedDescription)
@@ -507,13 +526,15 @@ final class AppModel: ObservableObject {
                 UserDefaults.standard.set(false, forKey: self.wasOnKey)
                 self.proxyServer.stop()
                 self.endProxyActivity()
-                self.setState(.off)
+                self.finalizeState(.off, recoveryFailed: false)
                 Log.app.notice("disable(): routing disabled")
             } catch {
                 // Restore failed: keep the proxy running, the snapshot, and the
                 // watchdog so the machine keeps working and can still recover.
                 self.setLastError(error.localizedDescription)
-                self.setState(.degraded)
+                // The system proxy may still point at us: a later tunnel flap
+                // must not promote this to ON (LC-21).
+                self.finalizeState(.degraded, recoveryFailed: true)
                 Log.app.error("disable() failed; keeping proxy + snapshot: \(error.localizedDescription)")
             }
         }
@@ -523,23 +544,26 @@ final class AppModel: ObservableObject {
 
     func commitConfig() {
         if DemoMode.isEnabled { return }
+        // One main-thread snapshot for the whole commit: the work items below
+        // must never read `config` themselves (LC-20).
+        let cfg = config
         syncProxySettings()
-        syncManagedTunnel()
+        syncManagedTunnel(cfg)
         scheduleSave()
         applyAppearance()
         applyIconMode()
-        if !config.system.crashWatchdog {
+        if !cfg.system.crashWatchdog {
             WatchdogController.uninstall()
         }
         // If routing is active and the bind port/host changed, re-apply live.
         if state.isActive {
-            let port = config.proxy.port
-            let bindHost = config.proxy.bindHost
-            let watchdog = config.system.crashWatchdog
-            let guiEnabled = config.system.injectGuiEnv
-            let tunnelHost = config.tunnel.effectiveHost
-            let shellEnabled = config.system.injectShellEnv
-            let shellRcs = config.system.managedShellRcs
+            let port = cfg.proxy.port
+            let bindHost = cfg.proxy.bindHost
+            let watchdog = cfg.system.crashWatchdog
+            let guiEnabled = cfg.system.injectGuiEnv
+            let tunnelHost = cfg.tunnel.effectiveHost
+            let shellEnabled = cfg.system.injectShellEnv
+            let shellRcs = cfg.system.managedShellRcs
             workQueue.async { [weak self] in
                 guard let self = self else { return }
                 self.reapplyIfPortChanged(port: port, bindHost: bindHost, watchdog: watchdog)
@@ -581,30 +605,37 @@ final class AppModel: ObservableObject {
                                          defaultMode: config.apps.defaultMode)
     }
 
-    /// Starts/stops the app-managed SSH tunnel to match the configured mode.
-    private func syncManagedTunnel() {
+    /// Starts/stops the app-managed SSH tunnel to match `cfg`.
+    ///
+    /// Called from main (`commitConfig`) and from `workQueue` (`enable`), so the
+    /// config is always a caller-captured snapshot and every side effect runs on
+    /// `tunnelSyncQueue`: two callers can no longer interleave "delete the
+    /// credential" with "spawn with it" (LC-20).
+    private func syncManagedTunnel(_ cfg: AppConfig) {
         if DemoMode.isEnabled { return }
-        let mode = config.tunnel.mode
-        let auth = config.tunnel.managed.auth
-        keychainStateLock.lock()
-        let modeChanged = lastTunnelMode != mode
-        let authChanged = lastManagedAuth != auth
-        lastTunnelMode = mode
-        lastManagedAuth = auth
-        keychainStateLock.unlock()
+        let mode = cfg.tunnel.mode
+        let auth = cfg.tunnel.managed.auth
+        let managed = cfg.tunnel.managed
+        tunnelSyncQueue.async { [weak self] in
+            guard let self else { return }
+            let modeChanged = self.lastTunnelMode != mode
+            let authChanged = self.lastManagedAuth != auth
+            self.lastTunnelMode = mode
+            self.lastManagedAuth = auth
 
-        if mode == .managed {
-            // Switching away from password auth must not leave the credential
-            // in the Keychain.
-            if auth == .key && (authChanged || modeChanged) {
-                SSHKeychain.shared.delete()
+            if mode == .managed {
+                // Switching away from password auth must not leave the credential
+                // in the Keychain.
+                if auth == .key && (authChanged || modeChanged) {
+                    SSHKeychain.shared.delete()
+                }
+                self.sshTunnel.apply(managed)
+            } else {
+                if modeChanged {
+                    SSHKeychain.shared.delete()
+                }
+                self.sshTunnel.stop()
             }
-            sshTunnel.apply(config.tunnel.managed)
-        } else {
-            if modeChanged {
-                SSHKeychain.shared.delete()
-            }
-            sshTunnel.stop()
         }
     }
 
@@ -985,12 +1016,26 @@ final class AppModel: ObservableObject {
         // or the SSH runner, so quit must not either (disarming here would
         // clear the real app's watchdog marker).
         if DemoMode.isEnabled { return }
+        // Flush the debounced config write before blocking main on
+        // `workQueue`: `scheduleSave`'s item runs on main, so the synchronous
+        // block below would otherwise strand an edit made in the last 500 ms
+        // and the process would exit with the previous config on disk (TC-18).
+        saveDebounce?.cancel()
+        saveDebounce = nil
+        if configStore.loadFailed {
+            let reason = configStore.loadError ?? "unknown error"
+            Log.app.error("shutdownForQuit(): config was not loaded successfully; the store will refuse to overwrite it: \(reason, privacy: .public)")
+        }
+        configStore.config = config
+        // Captured on main, before blocking on `workQueue`: main may mutate
+        // `config` while quit is in flight (LC-20).
+        let cfg = config
         workQueue.sync {
             var snap = configStore.loadSnapshot() ?? snapshot
             if snap?.isEmpty == true { snap = nil }
             let appliedThisSession = appliedPort != 0
             // Never delegate to a watchdog that was never installed (LC-12).
-            let canDelegateToWatchdog = config.system.crashWatchdog && WatchdogController.isInstalled
+            let canDelegateToWatchdog = cfg.system.crashWatchdog && WatchdogController.isInstalled
 
             // Decide ownership *before* touching anything: only this session's
             // apply, or a proxy that provably points at us, justifies a restore.
@@ -1027,13 +1072,13 @@ final class AppModel: ObservableObject {
                 // restore; an installed watchdog restores moments after exit.
                 // Without one, skipping the restore would leave the machine
                 // pointing at a dead 127.0.0.1.
-                if config.system.restoreOnQuit || !canDelegateToWatchdog {
+                if cfg.system.restoreOnQuit || !canDelegateToWatchdog {
                     Log.app.notice("shutdownForQuit(): restoring system proxy")
                     do {
                         if let snap {
                             // Prompt-free: no admin dialog during quit/logout.
                             try systemProxyManager.restoreWithoutPrompt(snapshot: snap)
-                            let sweepPort = appliedPort != 0 ? appliedPort : config.proxy.port
+                            let sweepPort = appliedPort != 0 ? appliedPort : cfg.proxy.port
                             systemProxyManager.clearUnsnapshottedLocalProxies(snapshot: snap, port: sweepPort)
                             restored = true
                         } else if let services = systemProxyManager.listServicesChecked(), !services.isEmpty {
@@ -1050,7 +1095,7 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            self.removeAppliedShellEnv(currentRCFiles: config.system.managedShellRcs)
+            self.removeAppliedShellEnv(currentRCFiles: cfg.system.managedShellRcs)
             // `remove()` is a no-op unless a snapshot exists, so it can never
             // clobber a proxy env we did not publish.
             guiEnvInjector.remove()
@@ -1081,6 +1126,9 @@ final class AppModel: ObservableObject {
             }
 
             telemetry.flushNow()
+            // Drain any queued tunnel reconcile before the synchronous stop, so a
+            // pending `apply` cannot respawn ssh after quit began (LC-20).
+            tunnelSyncQueue.sync {}
             sshTunnel.stopNow()
         }
     }
@@ -1119,22 +1167,48 @@ final class AppModel: ObservableObject {
 
     // MARK: - Internal
 
-    private func recomputeStateAfterTunnelChange(up: Bool) {
-        switch state {
+    /// Pure state transition for a tunnel up/down change.
+    ///
+    /// `.degraded` means one of two things: the tunnel is down, or a recovery
+    /// (enable rollback / disable restore) failed. Only the first may be
+    /// repaired by a tunnel flap; promoting a failed recovery to `.on` would
+    /// claim ON while the system proxy is still inconsistent (LC-21).
+    static func nextState(current: AppState, tunnelUp: Bool, recoveryFailed: Bool) -> AppState {
+        switch current {
         case .on:
-            if !up { setState(.degraded) }
+            return tunnelUp ? .on : .degraded
         case .degraded:
-            if up { setState(.on) }
+            return tunnelUp && !recoveryFailed ? .on : .degraded
         default:
-            break
+            return current
         }
     }
 
+    /// Main-thread-only: reads the published state and `recoveryFailed`
+    /// together. The sink in `init` already delivers on main.
+    private func recomputeStateAfterTunnelChange(up: Bool) {
+        let next = Self.nextState(current: state, tunnelUp: up, recoveryFailed: recoveryFailed)
+        if next != state { state = next }
+    }
+
     private func setState(_ newState: AppState) {
+        finalizeState(newState)
+    }
+
+    /// Publishes the state and (optionally) the recovery flag in one main-queue
+    /// item, so they are never observed half-updated. `recoveryFailed: nil`
+    /// keeps the current flag. Off-main callers are hopped to main; never use
+    /// `DispatchQueue.main.sync` here (quit can hold main inside `workQueue`).
+    private func finalizeState(_ newState: AppState, recoveryFailed: Bool? = nil) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            if let recoveryFailed { self.recoveryFailed = recoveryFailed }
+            self.state = newState
+        }
         if Thread.isMainThread {
-            state = newState
+            apply()
         } else {
-            DispatchQueue.main.async { [weak self] in self?.state = newState }
+            DispatchQueue.main.async(execute: apply)
         }
     }
 
