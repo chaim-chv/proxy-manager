@@ -89,6 +89,17 @@ func columns(_ db: OpaquePointer?) -> Set<String> {
     return out
 }
 
+func indexNames(_ db: OpaquePointer?) -> Set<String> {
+    var out = Set<String>()
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "PRAGMA index_list('requests');", -1, &stmt, nil) == SQLITE_OK else { return out }
+    defer { sqlite3_finalize(stmt) }
+    while sqlite3_step(stmt) == SQLITE_ROW {
+        if let c = sqlite3_column_text(stmt, 1) { out.insert(String(cString: c)) }
+    }
+    return out
+}
+
 let tmpDir = NSTemporaryDirectory()
 
 print("== fresh database writes app columns ==")
@@ -106,7 +117,9 @@ if let db = openDB(freshPath) {
     check("app stored", queryString(db, "SELECT app FROM requests WHERE host='a.example'") == "Google Chrome")
     check("app_bundle stored", queryString(db, "SELECT app_bundle FROM requests WHERE host='a.example'") == "com.google.Chrome")
     check("missing app_bundle stored as NULL",
-          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='b.example' AND app_bundle IS NULL") == 1)
+           queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='b.example' AND app_bundle IS NULL") == 1)
+    check("ts+route analytics index created (TM-04)",
+          indexNames(db).contains("idx_requests_ts_route"))
     sqlite3_close(db)
 } else {
     check("open fresh DB", false)
@@ -499,8 +512,120 @@ pumpMain(seconds: 0.3)
 check("a purged session that ends later does not return to the feed",
       !purgeStatsStore.recentRequests.contains { $0.host == "stats-live.example" })
 
+print("== analytics reads run on a read-only connection during a write lock (TM-04) ==")
+let analyticsPath = tmpDir + "pm-telemetry-analytics-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: analyticsPath)
+let analyticsStore = TelemetryStore(dbURL: URL(fileURLWithPath: analyticsPath),
+                                    maxRows: 1000, retentionDays: 1)
+for i in 0..<100 {
+    analyticsStore.record(RequestEvent(host: "analytics\(i % 4).example", route: .tunnel))
+}
+analyticsStore.record(RequestEvent(host: "direct.example", route: .direct))
+analyticsStore.flushNow()
+if let db = openDB(analyticsPath) {
+    check("analytics DB has the ts+route index", indexNames(db).contains("idx_requests_ts_route"))
+    check("analytics DB has all rows", queryInt(db, "SELECT COUNT(*) FROM requests") == 101)
+    sqlite3_close(db)
+} else {
+    check("open analytics DB", false)
+}
+
+// A second connection holds the write lock for the whole read. With WAL the
+// read-only analytics connection must still complete promptly; sharing
+// `dbQueue` with the writer would have serialised it behind pending inserts.
+let analyticsHolder = openDB(analyticsPath)
+check("analytics-held connection opened", analyticsHolder != nil)
+check("analytics-held connection holds BEGIN IMMEDIATE",
+      exec(analyticsHolder, "BEGIN IMMEDIATE;") == SQLITE_OK)
+
+var seriesDone = false
+var seriesResult: [ChartBucket] = []
+let seriesStart = Date()
+analyticsStore.chartSeries(rangeSeconds: 3600, bucketMs: 60_000) {
+    seriesResult = $0
+    seriesDone = true
+}
+pumpMain(timeout: 3) { seriesDone }
+let seriesElapsed = Date().timeIntervalSince(seriesStart)
+check("chartSeries completes while another connection holds the write lock", seriesDone)
+check(String(format: "chartSeries is not blocked by the writer lock (%.3fs)", seriesElapsed),
+      seriesElapsed < 2)
+check("chartSeries reads the tunneled rows",
+      seriesResult.contains { $0.route == .tunnel && $0.count == 100 })
+
+var hostsDone = false
+var hostsResult: [(host: String, count: Int)] = []
+let hostsStart = Date()
+analyticsStore.topHosts(rangeSeconds: 3600) {
+    hostsResult = $0
+    hostsDone = true
+}
+pumpMain(timeout: 3) { hostsDone }
+let hostsElapsed = Date().timeIntervalSince(hostsStart)
+check("topHosts completes while another connection holds the write lock", hostsDone)
+check(String(format: "topHosts is not blocked by the writer lock (%.3fs)", hostsElapsed),
+      hostsElapsed < 2)
+check("topHosts returns only tunneled hosts",
+      hostsResult.contains { $0.host == "analytics0.example" }
+        && !hostsResult.contains { $0.host == "direct.example" })
+
+exec(analyticsHolder, "ROLLBACK;")
+if let analyticsHolder { sqlite3_close(analyticsHolder) }
+
+var appsDone = false
+var appsResult: [(app: String, bundle: String?, count: Int)] = []
+analyticsStore.topApps(rangeSeconds: 3600) {
+    appsResult = $0
+    appsDone = true
+}
+pumpMain(timeout: 3) { appsDone }
+check("topApps still completes on the analytics path", appsDone)
+
+print("== 1,000 session begin/end cycles leave no bookkeeping behind (TM-05) ==")
+let churnPath = tmpDir + "pm-telemetry-churn-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: churnPath)
+let churnStore = TelemetryStore(dbURL: URL(fileURLWithPath: churnPath),
+                                maxRows: 1000, retentionDays: 1)
+var churnHandles: [TelemetryStore.SessionHandle] = []
+for i in 0..<1_000 {
+    churnHandles.append(churnStore.beginSession(
+        RequestEvent(host: "churn\(i).example", route: .tunnel)))
+}
+let begun = churnStore.liveSessionBookkeeping
+check("1,000 live sessions registered",
+      begun.sessions == 1_000 && begun.order == 1_000 && begun.index == 1_000)
+// 7,919 is coprime with 1,000, so this visits every index in a scrambled order
+// and exercises the swap-with-last removal instead of only the tail case.
+for k in 0..<1_000 {
+    let idx = (k * 7_919) % 1_000
+    let handle = churnHandles[idx]
+    churnStore.updateSession(handle, bytesIn: 1_024, bytesOut: 2_048)
+    churnStore.endSession(handle, RequestEvent(id: handle.id, host: "churn\(idx).example",
+                                               route: .tunnel, bytesIn: 1_024, bytesOut: 2_048))
+    if (k + 1) % 250 == 0 {
+        let current = churnStore.liveSessionBookkeeping
+        check("bookkeeping consistent after \(k + 1) swapped removals",
+              current.sessions == current.order
+                && current.order == current.index
+                && current.sessions == 1_000 - (k + 1))
+    }
+}
+let churnEnd = churnStore.liveSessionBookkeeping
+check("all sessions unregistered after churn", churnEnd.sessions == 0)
+check("session order is empty after churn", churnEnd.order == 0)
+check("session index is empty after churn", churnEnd.index == 0)
+churnStore.flushNow()
+if let db = openDB(churnPath) {
+    check("every churned session completed exactly once",
+          queryInt(db, "SELECT COUNT(*) FROM requests") == 1_000)
+    sqlite3_close(db)
+} else {
+    check("open churn DB", false)
+}
+
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
-             purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath] {
+             purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath,
+             analyticsPath, churnPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")

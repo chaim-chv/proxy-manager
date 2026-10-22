@@ -280,15 +280,15 @@ final class ProxyServer {
                 // The tunnel is now established: surface it in the live feed
                 // immediately instead of only when the connection closes
                 // minutes later (keep-alive / streaming).
-                let sessionId = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
-                                                             scheme: scheme, method: method, host: host, port: port,
-                                                             path: path, route: route, status: status, error: nil,
-                                                             app: appName, appBundle: appBundle))
+                let session = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
+                                                           scheme: scheme, method: method, host: host, port: port,
+                                                           path: path, route: route, status: status, error: nil,
+                                                           app: appName, appBundle: appBundle))
                 let counts = relay(cfd, upstream, initial: leftover, idle: s.idleTimeout,
-                                   progress: { [weak self] in self?.telemetry.updateSession(sessionId, bytesIn: $0, bytesOut: $1) })
+                                   progress: { [weak self] in self?.telemetry.updateSession(session, bytesIn: $0, bytesOut: $1) })
                 bytesOut = counts.0
                 bytesIn = counts.1
-                telemetry.endSession(sessionId, event(id: sessionId, startTs: startTs, srcPort: srcPort,
+                telemetry.endSession(session, event(id: session.id, startTs: startTs, srcPort: srcPort,
                                                       scheme: scheme, method: method, host: host, port: port,
                                                       path: path, route: route, status: status, error: errMsg,
                                                       bytesIn: bytesIn, bytesOut: bytesOut,
@@ -301,15 +301,15 @@ final class ProxyServer {
                     try Socket.sendAll(upstream, leftover)
                 }
                 status = 0
-                let sessionId = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
-                                                             scheme: scheme, method: method, host: host, port: port,
-                                                             path: path, route: route, status: 0, error: nil,
-                                                             app: appName, appBundle: appBundle))
+                let session = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
+                                                           scheme: scheme, method: method, host: host, port: port,
+                                                           path: path, route: route, status: 0, error: nil,
+                                                           app: appName, appBundle: appBundle))
                 let counts = relay(cfd, upstream, initial: [], idle: s.idleTimeout,
-                                   progress: { [weak self] in self?.telemetry.updateSession(sessionId, bytesIn: $0, bytesOut: $1) })
+                                   progress: { [weak self] in self?.telemetry.updateSession(session, bytesIn: $0, bytesOut: $1) })
                 bytesOut = counts.0
                 bytesIn = counts.1
-                telemetry.endSession(sessionId, event(id: sessionId, startTs: startTs, srcPort: srcPort,
+                telemetry.endSession(session, event(id: session.id, startTs: startTs, srcPort: srcPort,
                                                       scheme: scheme, method: method, host: host, port: port,
                                                       path: path, route: route, status: 0, error: errMsg,
                                                       bytesIn: bytesIn, bytesOut: bytesOut,

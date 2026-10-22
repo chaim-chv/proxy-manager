@@ -131,7 +131,7 @@ final class TelemetryStore: ObservableObject {
 
     /// A connection currently in the relay. `bytes` is written by the owning
     /// relay thread and read by the 10 Hz flusher.
-    private final class LiveSession {
+    fileprivate final class LiveSession {
         let event: RequestEvent
         let lock = NSLock()
         var bytesIn: Int64 = 0
@@ -140,6 +140,18 @@ final class TelemetryStore: ObservableObject {
         var publishedOut: Int64 = 0
         var lastPublishMs: Int64 = 0
         init(event: RequestEvent) { self.event = event }
+    }
+
+    /// Token returned by `beginSession`. Holding it lets the relay update and
+    /// finish only its own session: `updateSession` takes the session's lock
+    /// alone, never the store-wide `lock` (TM-05).
+    final class SessionHandle {
+        let id: UUID
+        fileprivate let session: LiveSession
+        fileprivate init(session: LiveSession) {
+            self.session = session
+            self.id = session.event.id
+        }
     }
 
     @Published var recentRequests: [RequestEvent] = []
@@ -159,6 +171,10 @@ final class TelemetryStore: ObservableObject {
     private var retentionDays: Int
     private var db: OpaquePointer?
     private var insertStmt: OpaquePointer?
+    /// Read-only connection used by `chartSeries`/`topHosts`/`topApps`.
+    /// Guarded by `analyticsQueue`; `nil` when it could not be opened, in which
+    /// case queries fall back to `db` on `dbQueue` (TM-04).
+    private var analyticsDB: OpaquePointer?
 
     /// Set when the DB could not be opened or the INSERT could not be prepared;
     /// writes are kept in the retry queue instead of being silently discarded.
@@ -170,6 +186,11 @@ final class TelemetryStore: ObservableObject {
     private let recoveryLock = NSLock()
 
     private let dbQueue = DispatchQueue(label: "com.proxymanager.telemetry.db")
+    /// Serial queue for the read-only analytics connection. Long-range scans
+    /// must not share `dbQueue` with inserts: a 7 d query used to stall every
+    /// writer batch behind it. WAL lets this connection read concurrently with
+    /// the writer (TM-04).
+    private let analyticsQueue = DispatchQueue(label: "com.proxymanager.telemetry.analytics")
     private let lock = NSLock()
 
     private var pending: [RequestEvent] = []
@@ -211,9 +232,12 @@ final class TelemetryStore: ObservableObject {
 
     private var flusher: DispatchSourceTimer?
 
-    /// Live-session bookkeeping (guarded by `lock`).
+    /// Live-session bookkeeping (guarded by `lock`). `sessionIndex` maps an id
+    /// to its position in `sessionOrder`, so removing a finished session is
+    /// O(1) (swap with the last element); iteration order is irrelevant.
     private var sessions: [UUID: LiveSession] = [:]
     private var sessionOrder: [UUID] = []
+    private var sessionIndex: [UUID: Int] = [:]
     private var pendingLiveStarts: [RequestEvent] = []
     private var pendingFinishes: [UUID] = []
 
@@ -227,6 +251,7 @@ final class TelemetryStore: ObservableObject {
         // A corrupt-database recovery already prepared the INSERT; re-preparing
         // here would leak the previous statement.
         if insertStmt == nil { prepareStatements() }
+        openAnalyticsConnection()
         startFlusher()
     }
 
@@ -234,6 +259,10 @@ final class TelemetryStore: ObservableObject {
         flusher?.cancel()
         sqlite3_finalize(insertStmt)
         if let db = db { sqlite3_close(db) }
+        // No analytics query can be in flight here: the query blocks capture
+        // `self` strongly for their duration, which would keep `deinit` from
+        // running.
+        if let analytics = analyticsDB { sqlite3_close(analytics) }
     }
 
     private func openDatabase() {
@@ -256,6 +285,32 @@ final class TelemetryStore: ObservableObject {
             // Cap how much WAL a checkpoint leaves behind. Without this the
             // `-wal` sidecar grows to the peak write volume and never shrinks.
             execChecked(db, "PRAGMA journal_size_limit=33554432;", "journal_size_limit pragma")
+        }
+    }
+
+    /// Opens (or reopens) the read-only analytics connection. Called after the
+    /// schema/migration is ready, and again after a quarantine so it points at
+    /// the recreated file. Reopening synchronously on `analyticsQueue` means no
+    /// query can still be using the old handle when the DB is moved aside.
+    /// A failure is not fatal: queries fall back to the writer connection.
+    private func openAnalyticsConnection() {
+        let path = dbURL.path
+        analyticsQueue.sync {
+            if let handle = analyticsDB {
+                sqlite3_close(handle)
+                analyticsDB = nil
+            }
+            var handle: OpaquePointer?
+            let rc = sqlite3_open_v2(path, &handle,
+                                     SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nil)
+            guard rc == SQLITE_OK, let opened = handle else {
+                let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                if let handle = handle { sqlite3_close(handle) }
+                telemetryLog.error("read-only analytics DB open failed (\(rc, privacy: .public)): \(message, privacy: .public); analytics will use the writer connection")
+                return
+            }
+            sqlite3_busy_timeout(opened, 2_000)
+            analyticsDB = opened
         }
     }
 
@@ -310,6 +365,8 @@ final class TelemetryStore: ObservableObject {
         createSchema()
         migrateSchema()
         if insertStmt == nil { prepareStatements() }
+        // Point analytics at the recreated file (closes the old handle first).
+        openAnalyticsConnection()
 
         let recovered = db != nil && insertStmt != nil && !telemetryUnavailable
         if recovered {
@@ -365,6 +422,10 @@ final class TelemetryStore: ObservableObject {
         CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
         CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
         CREATE INDEX IF NOT EXISTS idx_requests_route ON requests(route);
+        -- Range + route lookups (top hosts/apps over 1 h/24 h/7 d) need both
+        -- columns in one index; `idx_requests_route` alone scans every row of
+        -- that route regardless of the time range (TM-04).
+        CREATE INDEX IF NOT EXISTS idx_requests_ts_route ON requests(ts, route);
         -- `minute_stats` was a write-only aggregate (never queried); drop it on
         -- upgrade. Charts read the `requests` table directly.
         DROP TABLE IF EXISTS minute_stats;
@@ -447,37 +508,45 @@ final class TelemetryStore: ObservableObject {
 
     /// Register a connection that is about to stream. Publishes a live feed
     /// row immediately (next flush tick); must be paired with `endSession`.
-    func beginSession(_ event: RequestEvent) -> UUID {
+    func beginSession(_ event: RequestEvent) -> SessionHandle {
         let event = Self.clampedForStorage(event)
         let session = LiveSession(event: event)
+        let handle = SessionHandle(session: session)
         lock.lock()
         sessions[event.id] = session
-        sessionOrder.insert(event.id, at: 0)
+        sessionIndex[event.id] = sessionOrder.count
+        sessionOrder.append(event.id)
         pendingLiveStarts.append(event)
         lock.unlock()
-        return event.id
+        return handle
     }
 
-    /// Per-relay-iteration byte deltas (O(1), no main-thread work).
-    func updateSession(_ id: UUID, bytesIn: Int64, bytesOut: Int64) {
-        lock.lock()
-        guard let s = sessions[id] else { lock.unlock(); return }
-        s.lock.lock()
-        s.bytesIn += bytesIn
-        s.bytesOut += bytesOut
-        s.lock.unlock()
-        lock.unlock()
+    /// Per-relay-iteration byte deltas (O(1), no main-thread work). Only the
+    /// session's own lock is taken, never the store-wide `lock` (TM-05).
+    func updateSession(_ handle: SessionHandle, bytesIn: Int64, bytesOut: Int64) {
+        let session = handle.session
+        session.lock.lock()
+        session.bytesIn += bytesIn
+        session.bytesOut += bytesOut
+        session.lock.unlock()
     }
 
     /// Finalize a session: the live row closes and the event becomes a normal
     /// completed request (persisted + counted exactly like `record`).
-    func endSession(_ id: UUID, _ event: RequestEvent) {
+    func endSession(_ handle: SessionHandle, _ event: RequestEvent) {
+        let id = handle.id
         lock.lock()
         // A session removed by `purge()` was explicitly discarded: don't append
         // its completion (or a finish the main block would have to undo).
         let existed = sessions.removeValue(forKey: id) != nil
-        if let idx = sessionOrder.firstIndex(of: id) {
-            sessionOrder.remove(at: idx)
+        if let idx = sessionIndex.removeValue(forKey: id) {
+            let last = sessionOrder.count - 1
+            if idx != last {
+                let moved = sessionOrder[last]
+                sessionOrder[idx] = moved
+                sessionIndex[moved] = idx
+            }
+            sessionOrder.removeLast()
         }
         if existed {
             pendingFinishes.append(id)
@@ -486,6 +555,14 @@ final class TelemetryStore: ObservableObject {
         if existed {
             appendCompletion(event)
         }
+    }
+
+    /// Test seam: live-session bookkeeping sizes. After every session ends they
+    /// must all be zero (the churn check would otherwise hide a leak).
+    var liveSessionBookkeeping: (sessions: Int, order: Int, index: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (sessions.count, sessionOrder.count, sessionIndex.count)
     }
 
     private func appendCompletion(_ event: RequestEvent) {
@@ -536,11 +613,18 @@ final class TelemetryStore: ObservableObject {
         let finishes = pendingFinishes
         pendingFinishes.removeAll(keepingCapacity: true)
 
+        // Copy the live-session handles under the lock (cheap, no payload
+        // building), then read counters and build snapshots after releasing it.
+        // A session that finishes meanwhile is a class reference, so it stays
+        // valid; `applyToUI` drops updates for rows it also removes as finished.
+        let liveSessions = sessionOrder.compactMap { sessions[$0] }
+        lock.unlock()
+
         // Snapshot live sessions whose row content changed (bytes moved or
-        // ≥1 s elapsed so the duration ticks).
+        // ≥1 s elapsed so the duration ticks). Only the single flusher thread
+        // touches the `published*` fields.
         var updates: [RequestEvent] = []
-        for id in sessionOrder {
-            guard let s = sessions[id] else { continue }
+        for s in liveSessions {
             s.lock.lock()
             let bi = s.bytesIn, bo = s.bytesOut
             s.lock.unlock()
@@ -552,7 +636,6 @@ final class TelemetryStore: ObservableObject {
                                                 durationMs: nowMs - s.event.ts))
             }
         }
-        lock.unlock()
 
         let hasUIWork = !batch.isEmpty || !starts.isEmpty || !updates.isEmpty || !finishes.isEmpty
         if hasUIWork {
@@ -1104,6 +1187,7 @@ final class TelemetryStore: ObservableObject {
         pendingFinishes.removeAll()
         sessions.removeAll()
         sessionOrder.removeAll()
+        sessionIndex.removeAll()
         retryBatches.removeAll()
         retryEventCount = 0
         retryAfterMs = 0
@@ -1172,26 +1256,44 @@ final class TelemetryStore: ObservableObject {
         return result
     }
 
-    /// Time-series aggregation straight from SQLite, bucketed per route.
-    /// Runs on the DB queue and delivers on the main thread; safe for the
-    /// 1h/24h/7d chart ranges where the in-memory feed has long rolled over.
-    func chartSeries(rangeSeconds: Int, bucketMs: Int64,
-                     completion: @escaping ([ChartBucket]) -> Void) {
-        dbQueue.async { [weak self] in
-            guard let self = self, let db = self.db else {
-                DispatchQueue.main.async { completion([]) }
+    /// Runs a read-only query on the analytics connection, or — when that
+    /// connection could not be opened — on the writer connection via `dbQueue`.
+    /// Neither path takes the store-wide `lock`, so analytics can never stall
+    /// `record`/`flush` (TM-04).
+    private func runAnalyticsQuery(_ work: @escaping (OpaquePointer) -> Void,
+                                   unavailable: @escaping () -> Void) {
+        analyticsQueue.async { [weak self] in
+            guard let self = self else { return }
+            if let analytics = self.analyticsDB {
+                work(analytics)
                 return
             }
-            let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
-            let sql = """
-            SELECT (ts / ?) * ? AS bucket, route, COUNT(*),
-                   COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
-                   COALESCE(SUM(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), 0)
-            FROM requests
-            WHERE ts >= ?
-            GROUP BY bucket, route
-            ORDER BY bucket;
-            """
+            self.dbQueue.async { [weak self] in
+                guard let self = self, let db = self.db else {
+                    unavailable()
+                    return
+                }
+                work(db)
+            }
+        }
+    }
+
+    /// Time-series aggregation straight from SQLite, bucketed per route.
+    /// Delivers on the main thread; safe for the 1 h/24 h/7 d chart ranges where
+    /// the in-memory feed has long rolled over.
+    func chartSeries(rangeSeconds: Int, bucketMs: Int64,
+                     completion: @escaping ([ChartBucket]) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT (ts / ?) * ? AS bucket, route, COUNT(*),
+               COALESCE(SUM(bytes_in), 0), COALESCE(SUM(bytes_out), 0),
+               COALESCE(SUM(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), 0)
+        FROM requests
+        WHERE ts >= ?
+        GROUP BY bucket, route
+        ORDER BY bucket;
+        """
+        runAnalyticsQuery({ db in
             var result: [ChartBucket] = []
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
@@ -1212,24 +1314,36 @@ final class TelemetryStore: ObservableObject {
             }
             sqlite3_finalize(stmt)
             DispatchQueue.main.async { completion(result) }
-        }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
     }
 
     func topHosts(rangeSeconds: Int, limit: Int = 10, completion: @escaping ([(host: String, count: Int)]) -> Void) {
-        dbQueue.async { [weak self] in
-            guard let self = self, let db = self.db else {
-                DispatchQueue.main.async { completion([]) }
-                return
-            }
-            let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
-            let sql = """
-            SELECT host, COUNT(*) AS c FROM requests
-            WHERE ts >= \(cutoff * 1000) AND route = 'TUNNEL'
-            GROUP BY host ORDER BY c DESC LIMIT \(limit);
-            """
+        let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
+        // Without an explicit index hint SQLite scans every row of the route
+        // (or every host, for the GROUP BY) regardless of the time range. The
+        // `(ts, route)` index keeps a 1 h/24 h query proportional to the range.
+        // The hint falls back to the plain query if an old DB lost the index.
+        let indexedSQL = """
+        SELECT host, COUNT(*) AS c FROM requests INDEXED BY idx_requests_ts_route
+        WHERE ts >= \(cutoff * 1000) AND route = 'TUNNEL'
+        GROUP BY host ORDER BY c DESC LIMIT \(limit);
+        """
+        let plainSQL = """
+        SELECT host, COUNT(*) AS c FROM requests
+        WHERE ts >= \(cutoff * 1000) AND route = 'TUNNEL'
+        GROUP BY host ORDER BY c DESC LIMIT \(limit);
+        """
+        runAnalyticsQuery({ db in
             var result: [(String, Int)] = []
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+            if sqlite3_prepare_v2(db, indexedSQL, -1, &stmt, nil) != SQLITE_OK || stmt == nil {
+                sqlite3_finalize(stmt)
+                stmt = nil
+                _ = sqlite3_prepare_v2(db, plainSQL, -1, &stmt, nil)
+            }
+            if let s = stmt {
                 while sqlite3_step(s) == SQLITE_ROW {
                     let host = String(cString: sqlite3_column_text(s, 0))
                     result.append((host, Int(sqlite3_column_int(s, 1))))
@@ -1237,7 +1351,9 @@ final class TelemetryStore: ObservableObject {
             }
             sqlite3_finalize(stmt)
             DispatchQueue.main.async { completion(result) }
-        }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
     }
 
     /// Top apps by request count over a range, for the dashboard breakdown.
@@ -1245,18 +1361,14 @@ final class TelemetryStore: ObservableObject {
     /// so the UI can show the app icon.
     func topApps(rangeSeconds: Int, limit: Int = 10,
                  completion: @escaping ([(app: String, bundle: String?, count: Int)]) -> Void) {
-        dbQueue.async { [weak self] in
-            guard let self = self, let db = self.db else {
-                DispatchQueue.main.async { completion([]) }
-                return
-            }
-            let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
-            let sql = """
-            SELECT MAX(app) AS name, MAX(app_bundle) AS bundle, COUNT(*) AS c
-            FROM requests
-            WHERE ts >= \(cutoff * 1000) AND app IS NOT NULL AND app != ''
-            GROUP BY COALESCE(app_bundle, app) ORDER BY c DESC LIMIT \(limit);
-            """
+        let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
+        let sql = """
+        SELECT MAX(app) AS name, MAX(app_bundle) AS bundle, COUNT(*) AS c
+        FROM requests
+        WHERE ts >= \(cutoff * 1000) AND app IS NOT NULL AND app != ''
+        GROUP BY COALESCE(app_bundle, app) ORDER BY c DESC LIMIT \(limit);
+        """
+        runAnalyticsQuery({ db in
             var result: [(String, String?, Int)] = []
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
@@ -1268,6 +1380,8 @@ final class TelemetryStore: ObservableObject {
             }
             sqlite3_finalize(stmt)
             DispatchQueue.main.async { completion(result) }
-        }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
     }
 }
