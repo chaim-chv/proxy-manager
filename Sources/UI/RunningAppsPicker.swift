@@ -30,7 +30,6 @@ struct RunningAppItem: Identifiable {
     let keyKind: AppRuleKeyKind
     let bundleId: String?
     let path: String?
-    let icon: NSImage?
 }
 
 /// A large, searchable, categorized running-apps picker (sheet).
@@ -306,8 +305,7 @@ struct RunningAppsPickerSheet: View {
                 id: key, section: section,
                 name: app.localizedName ?? bundleId ?? key,
                 key: key, keyKind: keyKind,
-                bundleId: bundleId, path: path,
-                icon: AppIcon.image(bundleId: bundleId, path: path))
+                bundleId: bundleId, path: path)
         }
         return byKey.values.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
@@ -373,8 +371,11 @@ private struct RunningAppRow: View {
         .help(configured ? "Remove the rule for \(item.key)" : "Add \(item.name) — \(item.key)")
     }
 
+    /// Resolved lazily for visible rows only: `LazyVStack` builds rows as they
+    /// scroll into view, so an off-screen app never costs a LaunchServices
+    /// lookup. `AppIcon` caches hits (and misses), so re-evaluation is cheap.
     @ViewBuilder private var icon: some View {
-        if let image = item.icon {
+        if let image = AppIcon.image(bundleId: item.bundleId, path: item.path) {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
