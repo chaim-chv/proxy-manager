@@ -69,6 +69,7 @@ run_harness ProcessRunnerHarness \
 run_harness UIHarness \
   -framework AppKit \
   Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \
+  Sources/UI/AppIcon.swift \
   Tests/UIHarness/main.swift
 
 run_harness WindowTrackerHarness \

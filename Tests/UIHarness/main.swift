@@ -126,6 +126,46 @@ check("identical empty has no diff",
 check("partially reordered common ids falls back to reloadData",
       FeedTableDiff.compute(old: [a, b, c], new: [b, a, c]) == nil)
 
+print("== App icon cache ==")
+let defaultResolver = AppIcon.resolver
+
+var missCount = 0
+AppIcon.resolver = { _, _ in
+    missCount += 1
+    return nil
+}
+AppIcon.clearCachesForTesting()
+
+check("missing icon resolves to nil", AppIcon.image(bundleId: "missing", path: nil) == nil)
+check("repeated missing icon stays nil", AppIcon.image(bundleId: "missing", path: nil) == nil)
+check("negative cache calls the resolver once", missCount == 1)
+
+_ = AppIcon.image(bundleId: "missing-2", path: nil)
+check("a different id resolves separately", missCount == 2)
+
+_ = AppIcon.image(bundleId: "missing", path: nil)
+check("a negative hit skips the resolver", missCount == 2)
+
+AppIcon.clearCachesForTesting()
+_ = AppIcon.image(bundleId: "missing", path: nil)
+check("clearing caches allows a new resolution", missCount == 3)
+
+var hitCount = 0
+let testIcon = NSImage(size: NSSize(width: 16, height: 16))
+AppIcon.resolver = { _, _ in
+    hitCount += 1
+    return testIcon
+}
+AppIcon.clearCachesForTesting()
+
+check("resolved icon is returned", AppIcon.image(bundleId: "present", path: nil) === testIcon)
+check("second lookup returns the cached icon",
+      AppIcon.image(bundleId: "present", path: nil) === testIcon)
+check("positive cache calls the resolver once", hitCount == 1)
+
+AppIcon.resolver = defaultResolver
+AppIcon.clearCachesForTesting()
+
 print("")
 print("== SUMMARY: \(checks - failures)/\(checks) passed ==")
 exit(failures == 0 ? 0 : 1)
