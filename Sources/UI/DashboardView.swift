@@ -1,6 +1,7 @@
 import SwiftUI
 import Charts
 import Combine
+import AppKit
 
 private enum TimeRange: String, CaseIterable, Identifiable {
     case m5, h1, h24, d7
@@ -79,6 +80,7 @@ struct DashboardView: View {
     @State private var metric: ChartMetric = .requests
     @State private var topMetric: TopMetric = .hosts
     @State private var selectedID: UUID?
+    @State private var windowVisible = true
 
     // Long-range chart/top-hosts data, loaded from SQLite on a 2 s cadence.
     @State private var dbSeries: [ChartBucket] = []
@@ -96,13 +98,48 @@ struct DashboardView: View {
     }
 
     var body: some View {
+        Group {
+            if windowVisible {
+                loadedContent()
+            } else {
+                Color.clear
+            }
+        }
+        .frame(minWidth: 860, minHeight: 560)
+        .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
+        .onChange(of: topMetric) { _, _ in refreshLongRange(force: true) }
+        .onChange(of: windowVisible) { _, visible in
+            guard visible else { return }
+            reconcileSelection()
+            refreshLongRange(force: true)
+        }
+        .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
+        .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
+        .onReceive(seriesTimer) { _ in refreshLongRange() }
+        .background(WindowVisibilityReader(isVisible: $windowVisible))
+        #if SCREENSHOT_MODE
+        .onAppear {
+            guard DemoMode.isEnabled, DemoMode.showsDetailPanel, selectedID == nil else { return }
+            let event = telemetry.recentRequests.last { $0.route == .tunnel && !$0.path.isEmpty }
+                ?? telemetry.recentRequests.last { $0.route == .tunnel }
+            selectedID = event?.id
+        }
+        #endif
+    }
+
+    /// The full dashboard. Only built while the hosting window is on screen:
+    /// every value here walks the live/recent event arrays or the chart data, so
+    /// an occluded/minimized/hidden window skips all of it (UI-08).
+    private func loadedContent() -> some View {
         let baseRows = baseFeedRows()
-        let rows = paused ? pausedSnapshot : computeFeedRows(from: baseRows)
         let appOptions = appFilterOptions(from: baseRows)
+        let appOptionIds = appOptions.map(\.id)
+        let appKey = validatedAppFilterKey(appOptions)
+        let rows = paused ? pausedSnapshot : computeFeedRows(from: baseRows, appKey: appKey)
         let points = seriesPoints
         let tops = topItems
 
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             header
             Divider()
             statsStrip
@@ -119,26 +156,22 @@ struct DashboardView: View {
             Divider()
             feedArea(rows: rows, appOptions: appOptions)
         }
-        .frame(minWidth: 860, minHeight: 560)
         .onChange(of: paused) { _, isPaused in
-            if isPaused { pausedSnapshot = computeFeedRows(from: baseRows) }
+            if isPaused { pausedSnapshot = computeFeedRows(from: baseRows, appKey: appKey) }
         }
-        .onChange(of: timeRange) { _, _ in refreshLongRange(force: true) }
-        .onChange(of: topMetric) { _, _ in refreshLongRange(force: true) }
-        .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
-        .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
-        .onReceive(seriesTimer) { _ in refreshLongRange() }
-        #if SCREENSHOT_MODE
-        .onAppear {
-            guard DemoMode.isEnabled, DemoMode.showsDetailPanel, selectedID == nil else { return }
-            let event = telemetry.recentRequests.last { $0.route == .tunnel && !$0.path.isEmpty }
-                ?? telemetry.recentRequests.last { $0.route == .tunnel }
-            selectedID = event?.id
+        // The app filter menu is hidden when no apps are in the feed, so a
+        // selected app that ages out (or is purged) would otherwise silently
+        // filter every remaining row. Re-validate on appearance and whenever
+        // the live option set changes; `initial: true` also covers a stale
+        // selection surviving a hide/restore (UI-07).
+        .onChange(of: appOptionIds, initial: true) { _, ids in
+            guard let key = appFilterKey, !ids.contains(key) else { return }
+            appFilterKey = nil
         }
-        #endif
     }
 
     private func reconcileSelection() {
+        guard windowVisible else { return }
         if selectedID != nil && selectedEvent == nil { selectedID = nil }
     }
 
@@ -504,7 +537,7 @@ struct DashboardView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 170)
             if !appOptions.isEmpty {
-                AppFilterMenu(options: appOptions, selection: $appFilterKey)
+                AppFilterMenu(options: appOptions, selection: appFilterSelection(options: appOptions))
             }
             if paused {
                 Text("paused")
@@ -539,7 +572,7 @@ struct DashboardView: View {
             .map(\.element)
     }
 
-    private func computeFeedRows(from baseRows: [FeedRow]) -> [FeedRow] {
+    private func computeFeedRows(from baseRows: [FeedRow], appKey: String?) -> [FeedRow] {
         var rows = baseRows
         switch routeFilter {
         case "Tunneled": rows = rows.filter { $0.event.route == .tunnel }
@@ -550,10 +583,32 @@ struct DashboardView: View {
         if !hostFilter.isEmpty {
             rows = rows.filter { $0.event.host.localizedCaseInsensitiveContains(hostFilter) }
         }
-        if let appFilterKey {
-            rows = rows.filter { ($0.event.appBundle ?? $0.event.app ?? "") == appFilterKey }
+        if let appKey {
+            rows = rows.filter { ($0.event.appBundle ?? $0.event.app ?? "") == appKey }
         }
         return Array(rows.prefix(250))
+    }
+
+    /// The app filter only ever refers to an app that is still in the feed.
+    private func validatedAppFilterKey(_ options: [AppFilterOption]) -> String? {
+        guard let appFilterKey, options.contains(where: { $0.id == appFilterKey }) else { return nil }
+        return appFilterKey
+    }
+
+    /// The menu snapshots its options when the popover opens, so the row picked
+    /// may have aged out of the live feed meanwhile. Accept only live ids;
+    /// anything else resets to "All apps" instead of trapping the feed (UI-07).
+    private func appFilterSelection(options: [AppFilterOption]) -> Binding<String?> {
+        Binding(
+            get: { validatedAppFilterKey(options) },
+            set: { newValue in
+                if let newValue, !options.contains(where: { $0.id == newValue }) {
+                    appFilterKey = nil
+                } else {
+                    appFilterKey = newValue
+                }
+            }
+        )
     }
 
     /// Apps present in the current feed, most-requested first (then A–Z), with
@@ -581,6 +636,9 @@ struct DashboardView: View {
     // MARK: - Long-range loading
 
     private func refreshLongRange(force: Bool = false) {
+        // No DB work while nothing is on screen; `.onChange(of: windowVisible)`
+        // does one forced load when the window comes back (UI-08).
+        guard windowVisible else { return }
         guard timeRange != .m5 else { return }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         guard force || now - lastDBLoad >= 1500 else { return }
@@ -592,6 +650,97 @@ struct DashboardView: View {
         } else {
             telemetry.topHosts(rangeSeconds: range, limit: 6) { dbTopHosts = $0 }
         }
+    }
+}
+
+/// Drives `DashboardView.windowVisible` from the actual hosting window. A
+/// window that is minimized, fully occluded, or whose app is hidden is "not
+/// visible"; the dashboard then keeps a cheap placeholder instead of deriving
+/// the feed/charts from telemetry on every 10 Hz tick.
+///
+/// Window notifications are filtered to the hosting window so another window
+/// (Settings, onboarding) cannot make the dashboard think it is visible.
+private struct WindowVisibilityReader: NSViewRepresentable {
+    @Binding var isVisible: Bool
+
+    func makeNSView(context: Context) -> WindowVisibilityObserverView {
+        let view = WindowVisibilityObserverView()
+        view.onVisibilityChange = publish
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowVisibilityObserverView, context: Context) {
+        nsView.onVisibilityChange = publish
+    }
+
+    private func publish(_ visible: Bool) {
+        DispatchQueue.main.async {
+            if isVisible != visible { isVisible = visible }
+        }
+    }
+}
+
+private final class WindowVisibilityObserverView: NSView {
+    var onVisibilityChange: ((Bool) -> Void)?
+
+    private weak var observedWindow: NSWindow?
+    private var lastReported: Bool?
+    private var hasBeenVisible = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observe(window)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func observe(_ window: NSWindow?) {
+        NotificationCenter.default.removeObserver(self)
+        observedWindow = window
+        guard let window else { return }
+
+        let center = NotificationCenter.default
+        for name in [
+            NSWindow.didChangeOcclusionStateNotification,
+            NSWindow.didMiniaturizeNotification,
+            NSWindow.didDeminiaturizeNotification,
+            NSWindow.didExposeNotification,
+            NSWindow.didBecomeKeyNotification,
+        ] {
+            center.addObserver(self, selector: #selector(stateChanged), name: name, object: window)
+        }
+        // Hiding the app does not miniaturize the window, so watch app state too.
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            center.addObserver(self, selector: #selector(stateChanged), name: name, object: nil)
+        }
+
+        // The hosting window may not be on screen yet when the view attaches;
+        // re-check once after the current runloop turn.
+        report()
+        DispatchQueue.main.async { [weak self] in self?.report() }
+    }
+
+    @objc private func stateChanged(_ notification: Notification) {
+        report()
+    }
+
+    private func report() {
+        guard let window = observedWindow else { return }
+        let visible = !NSApp.isHidden
+            && !window.isMiniaturized
+            && window.occlusionState.contains(.visible)
+        if visible {
+            hasBeenVisible = true
+        } else if !hasBeenVisible {
+            // The view attaches before the window is ordered on screen; keep
+            // the default (visible) until the window has actually appeared.
+            return
+        }
+        guard visible != lastReported else { return }
+        lastReported = visible
+        onVisibilityChange?(visible)
     }
 }
 
