@@ -386,12 +386,14 @@ final class MockSOCKS5 {
     let fd: Int32
     let port: UInt16
     let originPort: UInt16
+    let dribble: Bool
 
-    init(originPort: UInt16) {
+    init(originPort: UInt16, dribble: Bool = false) {
         let l = tcpListen()
         self.fd = l.fd
         self.port = l.port
         self.originPort = originPort
+        self.dribble = dribble
         Thread.detachNewThread { [weak self] in self?.acceptLoop() }
     }
 
@@ -410,7 +412,7 @@ final class MockSOCKS5 {
         guard let greeting = try? recvN(c, 2), greeting[0] == 0x05 else { return }
         let nmethods = Int(greeting[1])
         _ = try? recvN(c, nmethods)
-        sendAll(c, [0x05, 0x00]) // no auth
+        guard sendBytes(c, [0x05, 0x00]) else { return }
         // request: VER CMD RSV ATYP ...
         guard let req = try? recvN(c, 4) else { return }
         let atyp = req[3]
@@ -422,13 +424,36 @@ final class MockSOCKS5 {
         case 0x04: _ = try? recvN(c, 16 + 2)
         default: return
         }
+        if dribble {
+            // One reply byte every 1.5 s: the method reply lands at 3 s, then the
+            // request reply's second byte would land at 6 s — past the 5 s
+            // handshake deadline. PS-12 must abort at the deadline, not wait.
+            _ = sendBytes(c, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            return
+        }
         guard let up = tcpConnect(host: "127.0.0.1", port: originPort) else {
-            sendAll(c, [0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]) // connection refused
+            _ = sendBytes(c, [0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0]) // connection refused
             return
         }
         defer { close(up) }
-        sendAll(c, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]) // success
+        _ = sendBytes(c, [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]) // success
         bridge(c, up)
+    }
+
+    /// Writes one byte every 1.5 s when `dribble` is on (false as soon as the
+    /// peer closes; the test process must not die on SIGPIPE).
+    private func sendBytes(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
+        guard dribble else {
+            sendAll(fd, bytes)
+            return true
+        }
+        for b in bytes {
+            Thread.sleep(forTimeInterval: 1.5)
+            var byte = b
+            let n = Darwin.send(fd, &byte, 1, 0)
+            if n <= 0 { return false }
+        }
+        return true
     }
 
     private func recvN(_ fd: Int32, _ count: Int) throws -> [UInt8] {
@@ -602,6 +627,41 @@ do {
     Darwin.shutdown(c, Int32(SHUT_WR))
     let resp = String(decoding: recvAll(c), as: UTF8.self)
     check("tunneled half-close delivers full body", resp.contains("TUNNELED-BODY"))
+}
+
+print("== E2E: SOCKS5 handshake overall deadline (PS-12) ==")
+do {
+    let origin = MockOrigin(body: "FRESH-CONNECT")
+    let dribbling = MockSOCKS5(originPort: origin.port, dribble: true)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: dribbling.port)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 12)
+    let start = Date()
+    sendAll(c, Array("CONNECT example.test:443 HTTP/1.1\r\nHost: example.test\r\n\r\n".utf8))
+    let head = readSome(c)
+    let elapsed = Date().timeIntervalSince(start)
+    check("dribbling SOCKS5 handshake is rejected with 502", head.contains("502"))
+    check(String(format: "handshake abort is bounded (< 7 s, took %.2fs)", elapsed), elapsed < 7)
+    check(String(format: "handshake used the overall budget (%.2fs >= 4 s)", elapsed), elapsed >= 4)
+
+    // Same proxy/process: the timed-out handshake must have released its permit
+    // and reset nothing global, so pointing at a healthy SOCKS server works.
+    let socks = MockSOCKS5(originPort: origin.port)
+    var s = ProxyRuntimeSettings()
+    s.bindHost = "127.0.0.1"
+    s.port = proxyPort
+    s.tunnelHost = "127.0.0.1"
+    s.tunnelPort = socks.port
+    s.failClosed = false
+    proxy.update(settings: s)
+    guard let c2 = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c2) }
+    setRecvTimeout(c2, 5)
+    sendAll(c2, Array("CONNECT example.test:443 HTTP/1.1\r\nHost: example.test\r\n\r\n".utf8))
+    let freshHead = readSome(c2)
+    check("fresh CONNECT after a timed-out handshake still works", freshHead.contains("200"))
 }
 
 print("== E2E: concurrency (200 parallel CONNECTs) ==")
