@@ -51,6 +51,8 @@ final class Box {
     var disarmCalls = 0
     var envRemoved = 0
     var restoreSem = DispatchSemaphore(value: 0)
+    var restoreHook: (() -> Void)?
+    var proxyCheckHook: (() -> Void)?
     var now = Date(timeIntervalSince1970: 1_000_000)
 
     func hooks() -> WatchdogHooks {
@@ -59,11 +61,13 @@ final class Box {
             isAlive: { [self] _ in alive },
             proxyCheck: { [self] port in
                 checkedPorts.append(port)
+                proxyCheckHook?()
                 return proxyCheckResult
             },
             loadSnapshot: { [self] in snapshot },
             restore: { [self] _ in
                 restoreCalls += 1
+                restoreHook?()
                 if let restoreError { throw restoreError }
                 restoreSem.signal()
             },
@@ -75,8 +79,9 @@ final class Box {
             clearSnapshot: { [self] in clearSnapshotCalls += 1 },
             reapTunnel: { [self] in reapCalls += 1 },
             removeEnv: { [self] in envRemoved += 1 },
-            disarm: { [self] in
+            disarmIfStill: { [self] pid, port in
                 disarmCalls += 1
+                guard state.armed, state.pid == pid, state.port == port else { return }
                 state = .disarmed
             },
             log: { _ in }
@@ -322,7 +327,11 @@ do {
         clearSnapshot: { box.clearSnapshotCalls += 1 },
         reapTunnel: { box.reapCalls += 1 },
         removeEnv: { box.envRemoved += 1 },
-        disarm: { box.disarmCalls += 1; box.state = .disarmed },
+        disarmIfStill: { pid, port in
+            box.disarmCalls += 1
+            guard box.state.armed, box.state.pid == pid, box.state.port == port else { return }
+            box.state = .disarmed
+        },
         log: { _ in }
     ), tickArmed: 10)
     Thread.detachNewThread { realEngine.run() }
@@ -388,6 +397,59 @@ do {
     check(smallSize?.intValue == maxBytes, "small log content is untouched")
 }
 
+print("watchdog: relaunch race (LC-13)")
+do {
+    // A new instance re-arms while the old owner's restore is running. The new
+    // state (and its snapshot/env/tunnel/armed marker) must survive untouched.
+    let box = Box()
+    box.state = armed(pid: 1111, port: 8888)
+    box.alive = false
+    box.proxyCheckResult = .ours
+    box.restoreHook = { box.state = armed(pid: 2222, port: 9999) }
+    let engine = WatchdogEngine(hooks: box.hooks())
+    check(engine.tick(), "old restore still completes for the dead owner")
+    check(box.restoreCalls == 1, "restore ran exactly once")
+    check(box.state.armed, "new armed state is still armed")
+    check(box.state.pid == 2222 && box.state.port == 9999,
+          "new owner's pid/port survive the old restore")
+    check(box.clearSnapshotCalls == 0, "does not clear the new owner's snapshot")
+    check(box.disarmCalls == 0, "does not disarm the new owner")
+    check(box.envRemoved == 0, "does not remove the new owner's shell env")
+    check(box.reapCalls == 0, "does not reap the new owner's managed SSH tunnel")
+}
+
+do {
+    // State changes between the tick's read and the restore: abort before
+    // touching anything.
+    let box = Box()
+    box.state = armed(pid: 1111, port: 8888)
+    box.alive = false
+    box.proxyCheckResult = .ours
+    box.proxyCheckHook = { box.state = armed(pid: 3333, port: 9999) }
+    let engine = WatchdogEngine(hooks: box.hooks())
+    check(!engine.tick(), "changed owner before restore -> no restore")
+    check(box.restoreCalls == 0, "does not run the old restore")
+    check(box.state.armed && box.state.pid == 3333 && box.state.port == 9999,
+          "new armed state survives the aborted restore")
+    check(box.clearSnapshotCalls == 0, "does not clear the snapshot for the old owner")
+    check(box.disarmCalls == 0, "does not disarm the new owner")
+}
+
+do {
+    // Same check on the already-clean cleanup path.
+    let box = Box()
+    box.state = armed(pid: 1111, port: 8888)
+    box.alive = false
+    box.proxyCheckResult = .clean
+    box.proxyCheckHook = { box.state = armed(pid: 4444, port: 9999) }
+    let engine = WatchdogEngine(hooks: box.hooks())
+    check(!engine.tick(), "changed owner while probing a clean proxy -> no cleanup")
+    check(box.clearSnapshotCalls == 0, "does not clear the new owner's snapshot on the clean path")
+    check(box.reapCalls == 0, "does not reap the new owner's tunnel on the clean path")
+    check(box.disarmCalls == 0, "does not disarm the new owner on the clean path")
+    check(box.state.armed && box.state.pid == 4444, "new armed state survives the clean path")
+}
+
 print("watchdog: install detection")
 do {
     // LC-12: quit may only delegate to a watchdog whose LaunchAgent is on disk
@@ -416,6 +478,22 @@ do {
     WatchdogPaths.writeArmedState(.disarmed)
     try? FileManager.default.removeItem(atPath: dir)
     unsetenv("PROXYMANAGER_LAUNCHAGENTS_DIR")
+}
+
+print("watchdog: state-aware disarm (LC-13)")
+do {
+    WatchdogPaths.writeArmedState(armed(pid: 4242, port: 8888))
+    WatchdogController.disarmIfStill(pid: 4242, port: 9999)
+    var state = WatchdogPaths.readArmedState()
+    check(state.armed && state.pid == 4242 && state.port == 8888,
+          "mismatched port leaves the armed state alone")
+    WatchdogController.disarmIfStill(pid: 9998, port: 8888)
+    state = WatchdogPaths.readArmedState()
+    check(state.armed && state.pid == 4242, "mismatched pid leaves the armed state alone")
+    WatchdogController.disarmIfStill(pid: 4242, port: 8888)
+    state = WatchdogPaths.readArmedState()
+    check(!state.armed, "matching pid/port disarms")
+    WatchdogPaths.writeArmedState(.disarmed)
 }
 
 print("watchdog: config backward compatibility")

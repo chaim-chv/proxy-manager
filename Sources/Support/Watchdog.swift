@@ -174,6 +174,19 @@ enum WatchdogController {
         writeArmedState(.disarmed)
     }
 
+    /// Disarms only when the persisted state still belongs to the dead owner
+    /// the watchdog restored. A relaunch/update may have armed a fresh pid/port
+    /// in the meantime; that instance owns the state and must not be disarmed
+    /// by the old restore (LC-13).
+    static func disarmIfStill(pid: Int32, port: UInt16) {
+        let state = WatchdogPaths.readArmedState()
+        guard state.armed, state.pid == pid, state.port == port else {
+            Log.app.notice("watchdog: not disarming; armed state changed (pid \(state.pid), port \(state.port))")
+            return
+        }
+        writeArmedState(.disarmed)
+    }
+
     static func writeArmedState(_ state: WatchdogArmedState) {
         WatchdogPaths.writeArmedState(state)
     }
@@ -245,7 +258,8 @@ struct WatchdogHooks {
     /// the proxy is provably safe (restored, cleared, or already clean).
     var reapTunnel: () -> Void
     var removeEnv: () -> Void
-    var disarm: () -> Void
+    /// Disarms only if the armed state still matches the dead owner.
+    var disarmIfStill: (Int32, UInt16) -> Void
     var log: (String) -> Void
 }
 
@@ -288,7 +302,7 @@ final class WatchdogEngine {
         let state = hooks.readState()
         observe(state)
         guard state.armed, !hooks.isAlive(state.pid) else { return false }
-        return performRestore(port: state.port)
+        return performRestore(expected: state)
     }
 
     /// A new arming (different app pid) or a disarm starts a fresh retry
@@ -312,8 +326,18 @@ final class WatchdogEngine {
         nextRetryAt = nil
     }
 
-    private func performRestore(port: UInt16) -> Bool {
+    private func performRestore(expected: WatchdogArmedState) -> Bool {
         if let nextRetryAt, now() < nextRetryAt {
+            return false
+        }
+        let port = expected.port
+
+        // Re-read right before acting: a relaunch/Sparkle update can arm a new
+        // pid/port while an old restore is pending. That new instance owns the
+        // apply now, so restoring and clearing would clobber it (LC-13).
+        guard stillCurrent(expected) else {
+            hooks.log("armed state changed before restore (pid \(expected.pid), port \(port)); leaving it alone")
+            resetRetrySchedule()
             return false
         }
 
@@ -326,14 +350,26 @@ final class WatchdogEngine {
             noteRetry("cannot determine system proxy state")
             return false
         case .clean:
+            // Reads can be slow (networksetup); check again before cleanup so a
+            // freshly armed owner is never cleared/disarmed.
+            guard stillCurrent(expected) else {
+                hooks.log("armed state changed during proxy check; skipping cleanup")
+                resetRetrySchedule()
+                return false
+            }
             hooks.log("system proxy already clean; disarming")
             hooks.clearSnapshot()
             hooks.reapTunnel()
-            hooks.disarm()
+            hooks.disarmIfStill(expected.pid, expected.port)
             resetRetrySchedule()
             return false
         case .ours:
-            break
+            // The probe is unbounded in principle; re-check before restoring.
+            guard stillCurrent(expected) else {
+                hooks.log("armed state changed during proxy check; skipping restore")
+                resetRetrySchedule()
+                return false
+            }
         }
 
         // A snapshot only exists while routing is (or was) applied, so it is
@@ -341,34 +377,53 @@ final class WatchdogEngine {
         if let snapshot = hooks.loadSnapshot() {
             do {
                 try hooks.restore(snapshot)
-                hooks.removeEnv()
-                hooks.clearSnapshot()
-                hooks.reapTunnel()
-                hooks.disarm()
-                resetRetrySchedule()
-                hooks.log("restored system proxy after app exit (armed port \(port))")
-                return true
             } catch {
                 noteRetry("restore failed: \(error.localizedDescription)")
                 return false
             }
+            // If a new instance armed while we restored, it owns the snapshot,
+            // env, tunnel and armed state now: do not clear or disarm any of it.
+            guard stillCurrent(expected) else {
+                hooks.log("armed state changed during restore (pid \(expected.pid), port \(port)); skipping cleanup for the new owner")
+                resetRetrySchedule()
+                return true
+            }
+            hooks.removeEnv()
+            hooks.clearSnapshot()
+            hooks.reapTunnel()
+            hooks.disarmIfStill(expected.pid, expected.port)
+            resetRetrySchedule()
+            hooks.log("restored system proxy after app exit (armed port \(port))")
+            return true
         }
 
         // No snapshot: we can still recover, but only by clearing services that
         // provably point at our local proxy. Keep armed on any read/clear error.
         do {
             try hooks.clearLocalProxy(0)
-            hooks.removeEnv()
-            hooks.clearSnapshot()
-            hooks.reapTunnel()
-            hooks.disarm()
-            resetRetrySchedule()
-            hooks.log("no snapshot; cleared local system proxy after app exit")
-            return true
         } catch {
             noteRetry("no snapshot; clearing local proxy failed: \(error.localizedDescription)")
             return false
         }
+        guard stillCurrent(expected) else {
+            hooks.log("armed state changed during local clear (pid \(expected.pid), port \(port)); skipping cleanup for the new owner")
+            resetRetrySchedule()
+            return true
+        }
+        hooks.removeEnv()
+        hooks.clearSnapshot()
+        hooks.reapTunnel()
+        hooks.disarmIfStill(expected.pid, expected.port)
+        resetRetrySchedule()
+        hooks.log("no snapshot; cleared local system proxy after app exit")
+        return true
+    }
+
+    /// True while the persisted state still names the dead owner we are acting
+    /// for (same pid *and* port). Any change means another instance re-armed.
+    private func stillCurrent(_ expected: WatchdogArmedState) -> Bool {
+        let current = hooks.readState()
+        return current.armed && current.pid == expected.pid && current.port == expected.port
     }
 
     /// Counts a transient failure but never gives up permanently: the machine is
@@ -434,7 +489,7 @@ final class WatchdogEngine {
 
             // Fast path: already dead (also covers a missed NOTE_EXIT).
             if state.armed, !hooks.isAlive(state.pid) {
-                _ = performRestore(port: state.port)
+                _ = performRestore(expected: state)
                 if watchedPid > 0 {
                     removeProcWatch(kq, pid: watchedPid)
                     watchedPid = 0
@@ -523,7 +578,7 @@ enum Watchdog {
                 // No-op unless we published it (guarded by the persisted snapshot).
                 GuiEnvInjector(snapshotURL: store.guiEnvSnapshotURL).remove()
             },
-            disarm: { WatchdogController.disarm() },
+            disarmIfStill: { pid, port in WatchdogController.disarmIfStill(pid: pid, port: port) },
             log: { Log.app.notice("watchdog: \($0, privacy: .public)") }
         )
     }

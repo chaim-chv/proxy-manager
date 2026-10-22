@@ -66,6 +66,10 @@ run_harness ProcessRunnerHarness \
   Sources/Support/BoundedProcess.swift \
   Tests/ProcessRunnerHarness/main.swift
 
+run_harness SingleInstanceHarness \
+  Sources/Support/Log.swift Sources/Support/SingleInstanceLock.swift \
+  Tests/SingleInstanceHarness/main.swift
+
 run_harness UIHarness \
   -framework AppKit \
   Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \

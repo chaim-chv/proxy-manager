@@ -211,6 +211,14 @@ enum Main {
         if CommandLine.arguments.contains("--watchdog") {
             Watchdog.run()
         }
+        // One app instance owns the shared recovery state (config, snapshots,
+        // ssh.pid, watchdog.json). A second instance (`open -n`, direct exec)
+        // must exit before `AppModel.shared` or any config/proxy work runs, or
+        // its quit could restore/clear/disarm the first instance's state.
+        guard SingleInstanceLock.shared.acquire() else {
+            Log.app.notice("another ProxyManager instance owns the support directory; exiting")
+            exit(0)
+        }
         ProxyManagerApp.main()
     }
 }
