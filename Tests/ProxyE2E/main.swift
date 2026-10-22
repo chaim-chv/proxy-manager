@@ -1063,5 +1063,72 @@ do {
 }
 
 print("")
+print("== E2E: large transfer with a slow reader (PS-10) ==")
+do {
+    // The per-recv cap: `min(chunk, maxBuf - available)`, never a full chunk
+    // when only a few bytes of capacity remain.
+    let chunk = 16_384, maxBuf = 256 * 1024
+    check("cap: a full chunk fits an empty buffer",
+          ProxyServer.relayReadRemaining(available: 0, chunk: chunk, maxBuf: maxBuf) == chunk)
+    check("cap: one byte below the cap admits only one byte",
+          ProxyServer.relayReadRemaining(available: maxBuf - 1, chunk: chunk, maxBuf: maxBuf) == 1)
+    check("cap: a full buffer admits no read",
+          ProxyServer.relayReadRemaining(available: maxBuf, chunk: chunk, maxBuf: maxBuf) == 0)
+    check("cap: an overfull buffer admits no read (defensive)",
+          ProxyServer.relayReadRemaining(available: maxBuf + 5, chunk: chunk, maxBuf: maxBuf) == 0)
+
+    // 1 MiB is four times the relay buffer cap, so the slow reader forces the
+    // relay to hit backpressure and resume once the client drains.
+    let payload = String(repeating: "0123456789abcdef", count: 65_536)
+    let origin = MockOrigin(body: payload)
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    defer { proxy.stop() }
+    guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { fatalError("connect proxy failed") }
+    defer { close(c) }
+    setRecvTimeout(c, 10)
+    sendAll(c, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+    let head = readSome(c)
+    check("large transfer CONNECT returns 200", head.contains("200"))
+    // Half-close so the origin starts sending, then stall long enough for the
+    // proxy to buffer up to its cap and stop reading.
+    Darwin.shutdown(c, Int32(SHUT_WR))
+    Thread.sleep(forTimeInterval: 0.15)
+    let data = recvAll(c)
+    check("slow reader receives the full 1 MiB", data.count == payload.utf8.count)
+    check("slow reader payload matches", data == Array(payload.utf8))
+    check("proxy still running after the large transfer", proxy.isRunning)
+}
+
+print("")
+print("== E2E: accept-loop stop/start churn (PS-11) ==")
+do {
+    let origin = MockOrigin(body: "CHURN-BODY")
+    let (proxy, proxyPort) = makeProxy(tunnelPort: 1)
+    var cyclesOK = 0
+    for _ in 0..<50 {
+        proxy.stop()
+        guard !proxy.isRunning else { break }
+        do { try proxy.start() } catch {
+            print("  start failed: \(error)")
+            break
+        }
+        guard proxy.isRunning else { break }
+        guard let c = tcpConnect(host: "127.0.0.1", port: proxyPort) else { break }
+        setRecvTimeout(c, 5)
+        sendAll(c, Array("CONNECT 127.0.0.1:\(origin.port) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8))
+        let head = readSome(c)
+        Darwin.shutdown(c, Int32(SHUT_WR))
+        _ = recvAll(c)
+        close(c)
+        guard head.contains("200") else { break }
+        cyclesOK += 1
+    }
+    check("50 stop/start cycles each served a CONNECT", cyclesOK == 50)
+    check("isRunning is true after restarting", proxy.isRunning)
+    proxy.stop()
+    check("isRunning is false after the final stop", !proxy.isRunning)
+}
+
+print("")
 if failures == 0 { print("PASS: proxy e2e"); exit(0) }
 else { print("FAIL: \(failures) e2e check(s) failed"); exit(1) }

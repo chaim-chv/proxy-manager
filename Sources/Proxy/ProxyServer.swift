@@ -110,6 +110,10 @@ final class ProxyServer {
     private var listenFD: Int32 = -1
     private let acceptQueue = DispatchQueue(label: "com.proxymanager.proxy.accept")
     private var running = false
+    /// Bumped by every `start()`/`stop()` transition. An `acceptLoop` captures
+    /// its generation and exits as soon as the state no longer matches, so a
+    /// loop left over from a previous listener can never serve the new fd.
+    private var acceptGeneration: UInt64 = 0
 
     private let active = AtomicInt()
     private let semaphore: DispatchSemaphore
@@ -176,44 +180,84 @@ final class ProxyServer {
             throw SocketError.message("listen failed: \(msg)")
         }
 
+        lock.lock()
+        // A concurrent `start()` may have committed while this one was
+        // binding. Keep exactly one listener; drop the loser's fd.
+        guard !running else {
+            lock.unlock()
+            close(fd)
+            return
+        }
+        running = true
         listenFD = fd
-        lock.lock(); running = true; lock.unlock()
+        acceptGeneration &+= 1
+        let generation = acceptGeneration
+        lock.unlock()
 
         Log.proxy.notice("listening on \(s.bindHost):\(s.port)")
         if s.bindHost != "127.0.0.1" && s.bindHost != "localhost" {
             Log.proxy.warning("proxy is listening on a non-loopback address (\(s.bindHost)) and has no authentication")
         }
 
-        acceptQueue.async { [weak self] in self?.acceptLoop() }
+        acceptQueue.async { [weak self] in self?.acceptLoop(generation: generation) }
     }
 
     func stop() {
         lock.lock()
         guard running else { lock.unlock(); return }
         running = false
+        // Invalidate the running accept loop before clearing the fd: the loop
+        // re-reads both under this lock and must not touch anything else.
+        acceptGeneration &+= 1
         let fd = listenFD
         listenFD = -1
         lock.unlock()
+        // Safe to close after unlocking: the fd is still open, so nothing can
+        // have reused its descriptor number in the meantime.
         if fd >= 0 { close(fd) }
         Log.proxy.notice("stopped listening")
     }
 
-    private func acceptLoop() {
-        while isRunning {
+    private func acceptLoop(generation: UInt64) {
+        while true {
+            // Read the listener state under the lock so a stop()/start() cannot
+            // race this thread into re-reading a reused descriptor.
+            lock.lock()
+            let isCurrent = running && acceptGeneration == generation
+            let fd = listenFD
+            lock.unlock()
+            guard isCurrent, fd >= 0 else { break }
+
             var clientAddr = sockaddr_in()
             var len = socklen_t(MemoryLayout<sockaddr_in>.size)
             let cfd = withUnsafeMutablePointer(to: &clientAddr) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    accept(listenFD, $0, &len)
+                    accept(fd, $0, &len)
                 }
             }
             guard cfd >= 0 else {
-                if isRunning { usleep(50_000); continue }
+                // `accept` also fails when stop() closes the fd; re-check before
+                // the backoff so a stale loop exits instead of sleeping.
+                lock.lock()
+                let stillCurrent = running && acceptGeneration == generation
+                lock.unlock()
+                if stillCurrent { usleep(50_000); continue }
                 break
             }
             Socket.setNoSIGPIPE(cfd)
             let clientIsLoopback = Socket.isLoopbackPeer(cfd)
             semaphore.wait()
+            // The server may have been stopped/restarted while this thread
+            // waited for a permit (e.g. after the 257th accepted connection).
+            // Never hand a stale fd to a connection thread.
+            lock.lock()
+            let stillCurrent = running && acceptGeneration == generation
+            lock.unlock()
+            guard stillCurrent else {
+                close(cfd)
+                semaphore.signal()
+                break
+            }
             let current = active.inc()
             telemetry.setActiveConnections(current)
             // Use a detached thread (not GCD's global queue) — GCD's global pool
@@ -482,6 +526,14 @@ final class ProxyServer {
         try Socket.sendAll(fd, Array(body.utf8))
     }
 
+    /// Bytes a relay `recv` may take without pushing an already-queued buffer
+    /// past `maxBuf`. Returns 0 when the buffer is at (or beyond) the cap, so
+    /// the poll loop simply stops reading that direction until it drains.
+    static func relayReadRemaining(available: Int, chunk: Int, maxBuf: Int) -> Int {
+        let remaining = maxBuf - available
+        return remaining > 0 ? min(chunk, remaining) : 0
+    }
+
     /// Single-threaded bidirectional relay using `poll()`. Returns
     /// (clientToUpstreamBytes, upstreamToClientBytes). `progress` is invoked
     /// (from this thread) whenever bytes moved in either direction — one call
@@ -499,8 +551,8 @@ final class ProxyServer {
 
         let chunk = 16_384
         let maxBuf = 256 * 1024
-        var c2u = RelayBuffer(initial, reservingCapacity: maxBuf + chunk)
-        var u2c = RelayBuffer(reservingCapacity: maxBuf + chunk)
+        var c2u = RelayBuffer(initial, reservingCapacity: maxBuf)
+        var u2c = RelayBuffer(reservingCapacity: maxBuf)
         var c2uTotal: Int64 = 0
         var u2cTotal: Int64 = 0
         // Read-done is graceful EOF only (`recv() == 0`): the peer can no longer
@@ -598,9 +650,15 @@ final class ProxyServer {
                 // client's EOF; after that POLLHUP just re-fires the
                 // level-triggered hangup and recv returns 0/EAGAIN forever
                 // (a busy-spin) if we keep asking.
-                if !clientGone && !clientReadDone && (clientRevents & Int16(POLLIN | POLLHUP) != 0) {
+                // Never read past the buffer cap: the poll mask admits POLLIN
+                // whenever `available < maxBuf`, so a full-chunk read could
+                // otherwise overshoot by `chunk - 1`. Capacity is 0 only when
+                // POLLHUP was reported without a POLLIN request.
+                let c2uWant = Self.relayReadRemaining(available: c2u.available, chunk: chunk, maxBuf: maxBuf)
+                if !clientGone && !clientReadDone && c2uWant > 0
+                    && (clientRevents & Int16(POLLIN | POLLHUP) != 0) {
                     let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
-                        Darwin.recv(client, b.baseAddress!, chunk, 0)
+                        Darwin.recv(client, b.baseAddress!, c2uWant, 0)
                     }
                     if n > 0 {
                         c2u.append(contentsOf: readBuf[0..<n])
@@ -641,9 +699,11 @@ final class ProxyServer {
                     upstreamGone = true
                 }
                 // upstream → client (POLLHUP means peer closed; recv returns 0).
-                if !upstreamGone && !upstreamReadDone && (upstreamRevents & Int16(POLLIN | POLLHUP) != 0) {
+                let u2cWant = Self.relayReadRemaining(available: u2c.available, chunk: chunk, maxBuf: maxBuf)
+                if !upstreamGone && !upstreamReadDone && u2cWant > 0
+                    && (upstreamRevents & Int16(POLLIN | POLLHUP) != 0) {
                     let n = readBuf.withUnsafeMutableBytes { (b: UnsafeMutableRawBufferPointer) -> Int in
-                        Darwin.recv(upstream, b.baseAddress!, chunk, 0)
+                        Darwin.recv(upstream, b.baseAddress!, u2cWant, 0)
                     }
                     if n > 0 {
                         u2c.append(contentsOf: readBuf[0..<n])
