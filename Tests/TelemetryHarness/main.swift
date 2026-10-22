@@ -198,6 +198,66 @@ if let db = openDB(lockedPath) {
     check("open locked DB", false)
 }
 
+print("== bounded DB backlog while a writer lock is held (TM-09) ==")
+let backlogPath = tmpDir + "pm-telemetry-backlog-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: backlogPath)
+let backlogStore = TelemetryStore(dbURL: URL(fileURLWithPath: backlogPath),
+                                  maxRows: 1_000_000, retentionDays: 3650)
+let backlogHolder = openDB(backlogPath)
+check("backlog holder connection opened", backlogHolder != nil)
+check("backlog holder acquired the write lock", exec(backlogHolder, "BEGIN IMMEDIATE;") == SQLITE_OK)
+
+// Fill the writer gate first: these batches all block on the held lock (2 s
+// busy timeout each on the serial writer queue).
+var backlogRecorded = 0
+for i in 0..<8_000 {
+    backlogStore.record(RequestEvent(host: "backlog-fill\(i).example", route: .direct))
+    backlogRecorded += 1
+}
+for _ in 0..<4 { backlogStore.pumpFlushForTesting() }
+
+var backlogMaxAccumulator = 0
+var backlogMaxInFlight = 0
+let backlogDeadline = Date().addingTimeInterval(2.0)
+while Date() < backlogDeadline {
+    for i in 0..<1_500 {
+        backlogStore.record(RequestEvent(host: "backlog\(i).example", route: .direct))
+        backlogRecorded += 1
+    }
+    backlogStore.pumpFlushForTesting()
+    backlogMaxAccumulator = max(backlogMaxAccumulator, backlogStore.dbAccumulatorCount)
+    backlogMaxInFlight = max(backlogMaxInFlight, backlogStore.dbWritesInFlight)
+    usleep(20_000)
+}
+check("writer gate never exceeds 4 in-flight batches", backlogMaxInFlight <= 4)
+check("dbAccumulator never exceeds the 50k event cap", backlogMaxAccumulator <= 50_000)
+check("dbAccumulator actually reached the cap and was trimmed (\(backlogMaxAccumulator))",
+      backlogMaxAccumulator == 50_000)
+check("dbAccumulator is bounded at the cap (oldest dropped)",
+      backlogStore.dbAccumulatorCount <= 50_000)
+
+exec(backlogHolder, "ROLLBACK;")
+if let backlogHolder { sqlite3_close(backlogHolder) }
+backlogStore.flushNow()
+backlogStore.pumpFlushForTesting()
+var backlogPersisted = -1
+if let db = openDB(backlogPath) {
+    backlogPersisted = queryInt(db, "SELECT COUNT(*) FROM requests") ?? -1
+    sqlite3_close(db)
+}
+check("queued rows are written after the lock is released", backlogPersisted > 0)
+check("persisted rows never exceed the recorded total (oldest-drop cap)",
+      backlogPersisted <= backlogRecorded)
+check("flushNow drains the accumulator", backlogStore.dbAccumulatorCount == 0)
+let backlogDrainDeadline = Date().addingTimeInterval(2)
+while backlogStore.dbWritesInFlight > 0 && Date() < backlogDrainDeadline {
+    usleep(10_000)
+}
+check("no batch stays in flight after the drain", backlogStore.dbWritesInFlight == 0)
+// Drain the UI blocks the backlog flushed to the main queue so the following
+// feed assertions do not start behind a few hundred thousand queued rows.
+pumpMain(seconds: 1.0)
+
 print("== retention trims to maxRows in bounded chunks ==")
 let capPath = tmpDir + "pm-telemetry-cap-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: capPath)
@@ -625,7 +685,7 @@ if let db = openDB(churnPath) {
 
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
              purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath,
-             analyticsPath, churnPath] {
+             analyticsPath, churnPath, backlogPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")

@@ -186,6 +186,10 @@ final class TelemetryStore: ObservableObject {
     private let recoveryLock = NSLock()
 
     private let dbQueue = DispatchQueue(label: "com.proxymanager.telemetry.db")
+    /// Serial queue for the 10 Hz flusher. Using a dedicated queue (instead of
+    /// the global pool) makes flush ticks mutually exclusive, so the test seam
+    /// can run one deterministically without racing the timer.
+    private let flusherQueue = DispatchQueue(label: "com.proxymanager.telemetry.flusher", qos: .utility)
     /// Serial queue for the read-only analytics connection. Long-range scans
     /// must not share `dbQueue` with inserts: a 7 d query used to stall every
     /// writer batch behind it. WAL lets this connection read concurrently with
@@ -216,6 +220,18 @@ final class TelemetryStore: ObservableObject {
     private static let maxRetryBatches = 4
     private static let maxRetryEvents = 50_000
     private static let retryBackoffMs: Int64 = 2_000
+
+    // TM-09: bound how far the writer can fall behind. Each dispatched batch
+    // holds a permit until `insertBatch` returns (success or failure); when all
+    // permits are busy the events stay in `dbAccumulator` for the next tick
+    // instead of queueing another strong array behind a wedged writer. The
+    // accumulator itself is capped, dropping the oldest events.
+    private static let maxDbWritesInFlight = 4
+    private static let maxDbAccumulatorEvents = 50_000
+    private let dbWriteGate = DispatchSemaphore(value: maxDbWritesInFlight)
+    private var dbWritesInFlightCount = 0
+    private var lastAccumulatorDropLogMs: Int64 = 0
+    private var suppressedAccumulatorDrops = 0
 
     /// Rows touched by one trim statement. Bounds the work (and the rollback
     /// journal) of a single autocommit instead of materialising the whole
@@ -493,11 +509,18 @@ final class TelemetryStore: ObservableObject {
     }
 
     private func startFlusher() {
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        let t = DispatchSource.makeTimerSource(queue: flusherQueue)
         t.schedule(deadline: .now() + 0.1, repeating: 0.1)
         t.setEventHandler { [weak self] in self?.flush() }
         t.resume()
         flusher = t
+    }
+
+    /// Test seam: run one flush tick synchronously on the flusher's serial
+    /// queue. The periodic timer is bound to the same queue, so this cannot
+    /// overlap with a scheduled tick.
+    func pumpFlushForTesting() {
+        flusherQueue.sync { self.flush() }
     }
 
     // MARK: - Hot path (called from relay threads, thousands/sec)
@@ -565,6 +588,22 @@ final class TelemetryStore: ObservableObject {
         return (sessions.count, sessionOrder.count, sessionIndex.count)
     }
 
+    /// Test/diagnostic seam: events waiting for a free DB writer permit. This is
+    /// the backlog TM-09 bounds (`maxDbAccumulatorEvents`).
+    var dbAccumulatorCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return dbAccumulator.count
+    }
+
+    /// Test/diagnostic seam: batches currently dispatched to `dbQueue`
+    /// (`maxDbWritesInFlight` is the hard ceiling).
+    var dbWritesInFlight: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return dbWritesInFlightCount
+    }
+
     private func appendCompletion(_ event: RequestEvent) {
         let event = Self.clampedForStorage(event)
         lock.lock()
@@ -604,9 +643,19 @@ final class TelemetryStore: ObservableObject {
         pending.removeAll(keepingCapacity: true)
         pendingDelta = StatsSnapshot()
         dbAccumulator.append(contentsOf: batch)
+        var dbBatch: [RequestEvent] = []
+        var enqueuedDB = false
         let flushDB = dbAccumulator.count >= Self.dbBatchSize || canRetry
-        let dbBatch = flushDB ? dbAccumulator : []
-        if flushDB { dbAccumulator.removeAll(keepingCapacity: true) }
+        // Non-blocking permit: never queue a strong batch behind four batches
+        // that are already waiting on a locked/slow writer. Without a permit the
+        // events stay in the (capped) accumulator and are retried next tick.
+        if flushDB, dbWriteGate.wait(timeout: .now()) == .success {
+            dbBatch = dbAccumulator
+            dbAccumulator.removeAll(keepingCapacity: true)
+            dbWritesInFlightCount += 1
+            enqueuedDB = true
+        }
+        let dropped = trimDbAccumulatorLocked()
 
         let starts = pendingLiveStarts
         pendingLiveStarts.removeAll(keepingCapacity: true)
@@ -619,6 +668,8 @@ final class TelemetryStore: ObservableObject {
         // valid; `applyToUI` drops updates for rows it also removes as finished.
         let liveSessions = sessionOrder.compactMap { sessions[$0] }
         lock.unlock()
+
+        noteAccumulatorDrop(dropped)
 
         // Snapshot live sessions whose row content changed (bytes moved or
         // ≥1 s elapsed so the duration ticks). Only the single flusher thread
@@ -645,8 +696,17 @@ final class TelemetryStore: ObservableObject {
             }
         }
 
-        if flushDB {
+        if enqueuedDB {
+            let gate = dbWriteGate
             dbQueue.async { [weak self] in
+                defer {
+                    if let self = self {
+                        self.lock.lock()
+                        self.dbWritesInFlightCount -= 1
+                        self.lock.unlock()
+                    }
+                    gate.signal()
+                }
                 self?.insertBatch(dbBatch, generation: gen)
             }
         }
@@ -744,6 +804,37 @@ final class TelemetryStore: ObservableObject {
     }
 
     // MARK: - SQLite (batched)
+
+    /// Caps `dbAccumulator` while the writer gate is saturated. Must be called
+    /// with `lock` held; returns how many oldest events were dropped.
+    private func trimDbAccumulatorLocked() -> Int {
+        let excess = dbAccumulator.count - Self.maxDbAccumulatorEvents
+        guard excess > 0 else { return 0 }
+        dbAccumulator.removeFirst(excess)
+        return excess
+    }
+
+    /// Throttled backlog-drop log: one line per minute, reporting the events
+    /// dropped while throttled on the next line (same contract as DB failures).
+    private func noteAccumulatorDrop(_ dropped: Int) {
+        guard dropped > 0 else { return }
+        let now = Self.nowMs()
+        lock.lock()
+        guard now - lastAccumulatorDropLogMs >= 60_000 else {
+            suppressedAccumulatorDrops += dropped
+            lock.unlock()
+            return
+        }
+        let suppressed = suppressedAccumulatorDrops
+        suppressedAccumulatorDrops = 0
+        lastAccumulatorDropLogMs = now
+        lock.unlock()
+        if suppressed > 0 {
+            telemetryLog.error("telemetry DB backlog full; dropped \(dropped, privacy: .public) oldest event(s) [\(suppressed, privacy: .public) more dropped while throttled]")
+        } else {
+            telemetryLog.error("telemetry DB backlog full; dropped \(dropped, privacy: .public) oldest event(s)")
+        }
+    }
 
     private func insertBatch(_ events: [RequestEvent], generation: UInt64) {
         // Purge invalidates any batch captured before it. If this work is still
