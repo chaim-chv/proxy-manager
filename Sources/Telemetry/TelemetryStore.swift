@@ -116,6 +116,19 @@ final class TelemetryStore: ObservableObject {
     static let liveFeedCapacity = 5000
     static let dbBatchSize = 1000
 
+    // TM-08: the header block is capped at 64 KB, so a CONNECT target or
+    // absolute-form path can be huge. Clamp at ingest so neither the feed nor
+    // the DB can be blown up by a handful of rows. `String.prefix` is used
+    // deliberately: it counts Characters, which is at least as safe as bytes.
+    static let maxHostLength = 255
+    static let maxPathLength = 2_048
+    static let maxErrorLength = 1_024
+    static let maxAppLength = 255
+    /// Soft memory cap for `recentRequests` (the 5,000-row cap alone allows
+    /// hundreds of MB when rows carry large strings).
+    static let recentRequestsByteBudget = 8 * 1024 * 1024
+    private static let recentRowOverheadBytes = 96
+
     /// A connection currently in the relay. `bytes` is written by the owning
     /// relay thread and read by the 10 Hz flusher.
     private final class LiveSession {
@@ -130,6 +143,10 @@ final class TelemetryStore: ObservableObject {
     }
 
     @Published var recentRequests: [RequestEvent] = []
+    /// Running estimate of the memory held by `recentRequests` (strings + a
+    /// fixed per-row overhead). Maintained on the main thread by
+    /// `applyToRecentRequests`/`purge`; read it as a diagnostic only.
+    private(set) var recentRequestsApproxBytes = 0
     /// In-progress connections, newest first. Rows appear here the moment a
     /// connection is established and move to `recentRequests` when it closes.
     @Published private(set) var liveRequests: [RequestEvent] = []
@@ -146,6 +163,11 @@ final class TelemetryStore: ObservableObject {
     /// Set when the DB could not be opened or the INSERT could not be prepared;
     /// writes are kept in the retry queue instead of being silently discarded.
     private(set) var telemetryUnavailable = false
+    /// How many times a corrupt DB has been quarantined and recreated. Test
+    /// diagnostic only (`recovering` prevents overlapping recoveries).
+    private(set) var dbQuarantineCount = 0
+    private var recovering = false
+    private let recoveryLock = NSLock()
 
     private let dbQueue = DispatchQueue(label: "com.proxymanager.telemetry.db")
     private let lock = NSLock()
@@ -202,7 +224,9 @@ final class TelemetryStore: ObservableObject {
         openDatabase()
         createSchema()
         migrateSchema()
-        prepareStatements()
+        // A corrupt-database recovery already prepared the INSERT; re-preparing
+        // here would leak the previous statement.
+        if insertStmt == nil { prepareStatements() }
         startFlusher()
     }
 
@@ -213,11 +237,16 @@ final class TelemetryStore: ObservableObject {
     }
 
     private func openDatabase() {
-        if sqlite3_open(dbURL.path, &db) != SQLITE_OK {
-            telemetryUnavailable = true
-            let message = String(cString: sqlite3_errmsg(db))
-            telemetryLog.error("failed to open telemetry DB: \(message, privacy: .public)")
+        let rc = sqlite3_open(dbURL.path, &db)
+        if rc != SQLITE_OK {
+            // SQLite allocates a handle on most open failures. Close it so the
+            // fd/connection does not leak for the process lifetime (TM-11).
+            let message = db.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            if let handle = db { sqlite3_close(handle) }
             db = nil
+            telemetryUnavailable = true
+            telemetryLog.error("failed to open telemetry DB (\(rc, privacy: .public)): \(message, privacy: .public)")
+            return
         }
         if let db = db {
             sqlite3_busy_timeout(db, 2_000)
@@ -228,6 +257,88 @@ final class TelemetryStore: ObservableObject {
             // `-wal` sidecar grows to the peak write volume and never shrinks.
             execChecked(db, "PRAGMA journal_size_limit=33554432;", "journal_size_limit pragma")
         }
+    }
+
+    private static func isCorruption(_ rc: Int32) -> Bool {
+        rc == SQLITE_CORRUPT || rc == SQLITE_NOTADB
+    }
+
+    /// Moves the unreadable DB (plus its WAL/SHM sidecars) aside and recreates a
+    /// fresh one. `recovering` makes this idempotent/non-reentrant: a corruption
+    /// hit inside the recovery itself must not recurse. The old file is never
+    /// deleted, so a failed recovery still leaves it for manual inspection.
+    @discardableResult
+    private func recoverFromCorruption(reason: String) -> Bool {
+        recoveryLock.lock()
+        if recovering {
+            recoveryLock.unlock()
+            return false
+        }
+        recovering = true
+        recoveryLock.unlock()
+        defer {
+            recoveryLock.lock()
+            recovering = false
+            recoveryLock.unlock()
+        }
+
+        sqlite3_finalize(insertStmt)
+        insertStmt = nil
+        if let handle = db { sqlite3_close(handle) }
+        db = nil
+
+        let fm = FileManager.default
+        let basePath = dbURL.path
+        if fm.fileExists(atPath: basePath) {
+            let quarantine = uniqueQuarantinePath(for: dbURL, timestampMs: Self.nowMs())
+            do {
+                try fm.moveItem(atPath: basePath, toPath: quarantine)
+                for suffix in ["-wal", "-shm"] where fm.fileExists(atPath: basePath + suffix) {
+                    try fm.moveItem(atPath: basePath + suffix,
+                                    toPath: quarantine + suffix)
+                }
+            } catch {
+                // Leave whatever remains where it is; never pretend success.
+                telemetryUnavailable = true
+                telemetryLog.error("telemetry DB corruption recovery failed to quarantine \(basePath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+            telemetryLog.error("telemetry DB corrupt (\(reason, privacy: .public)); quarantined to \(quarantine, privacy: .public) and recreating")
+        }
+
+        openDatabase()
+        createSchema()
+        migrateSchema()
+        if insertStmt == nil { prepareStatements() }
+
+        let recovered = db != nil && insertStmt != nil && !telemetryUnavailable
+        if recovered {
+            recoveryLock.lock()
+            dbQuarantineCount += 1
+            recoveryLock.unlock()
+            telemetryUnavailable = false
+            telemetryLog.error("telemetry DB recreated after corruption (\(reason, privacy: .public))")
+        } else {
+            telemetryUnavailable = true
+            telemetryLog.error("telemetry DB recovery failed; leaving telemetry unavailable")
+        }
+        return recovered
+    }
+
+    /// `telemetry.sqlite.corrupt-<ms>`, with `-1`, `-2`, … appended rather than
+    /// overwriting an earlier quarantine from the same millisecond.
+    private func uniqueQuarantinePath(for url: URL, timestampMs: Int64) -> String {
+        let fm = FileManager.default
+        let base = "\(url.path).corrupt-\(timestampMs)"
+        var candidate = base
+        var suffix = 1
+        while fm.fileExists(atPath: candidate)
+                || fm.fileExists(atPath: candidate + "-wal")
+                || fm.fileExists(atPath: candidate + "-shm") {
+            candidate = "\(base)-\(suffix)"
+            suffix += 1
+        }
+        return candidate
     }
 
     private func createSchema() {
@@ -270,12 +381,19 @@ final class TelemetryStore: ObservableObject {
         guard let db = db else { return }
         var existing = Set<String>()
         var stmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "PRAGMA table_info(requests);", -1, &stmt, nil) == SQLITE_OK {
+        let rc = sqlite3_prepare_v2(db, "PRAGMA table_info(requests);", -1, &stmt, nil)
+        if rc == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 if let name = sqlite3_column_text(stmt, 1) {
                     existing.insert(String(cString: name))
                 }
             }
+        } else if Self.isCorruption(rc) {
+            let message = String(cString: sqlite3_errmsg(db))
+            sqlite3_finalize(stmt)
+            noteDatabaseFailure("table_info probe failed (\(rc)): \(message)")
+            _ = recoverFromCorruption(reason: "schema inspection returned SQLite error \(rc)")
+            return
         }
         sqlite3_finalize(stmt)
         if !existing.contains("app") {
@@ -305,8 +423,12 @@ final class TelemetryStore: ObservableObject {
                 insertStmt = nil
             }
             noteDatabaseFailure("prepare INSERT failed (\(rc)): \(String(cString: sqlite3_errmsg(db)))")
+            if Self.isCorruption(rc) {
+                _ = recoverFromCorruption(reason: "INSERT prepare returned SQLite error \(rc)")
+            }
             return
         }
+        telemetryUnavailable = false
     }
 
     private func startFlusher() {
@@ -326,6 +448,7 @@ final class TelemetryStore: ObservableObject {
     /// Register a connection that is about to stream. Publishes a live feed
     /// row immediately (next flush tick); must be paired with `endSession`.
     func beginSession(_ event: RequestEvent) -> UUID {
+        let event = Self.clampedForStorage(event)
         let session = LiveSession(event: event)
         lock.lock()
         sessions[event.id] = session
@@ -366,6 +489,7 @@ final class TelemetryStore: ObservableObject {
     }
 
     private func appendCompletion(_ event: RequestEvent) {
+        let event = Self.clampedForStorage(event)
         lock.lock()
         pending.append(event)
         switch event.route {
@@ -489,10 +613,7 @@ final class TelemetryStore: ObservableObject {
         }
 
         if !batch.isEmpty {
-            recentRequests.append(contentsOf: batch)
-            if recentRequests.count > Self.liveFeedCapacity {
-                recentRequests.removeFirst(recentRequests.count - Self.liveFeedCapacity)
-            }
+            appendToRecentRequests(batch)
         }
 
         // The six stat fields are written together so a tick that only moves
@@ -507,6 +628,36 @@ final class TelemetryStore: ObservableObject {
             newStats.activeConnections = active
             if newStats != stats { stats = newStats }
         }
+    }
+
+    /// Main-thread append with both caps (row count and estimated bytes). The
+    /// trim amount is computed first so the array is shifted at most once.
+    private func appendToRecentRequests(_ batch: [RequestEvent]) {
+        var addedBytes = 0
+        for event in batch {
+            recentRequests.append(event)
+            addedBytes += Self.approxEventBytes(event)
+        }
+        recentRequestsApproxBytes += addedBytes
+
+        guard recentRequests.count > Self.liveFeedCapacity
+                || recentRequestsApproxBytes > Self.recentRequestsByteBudget else { return }
+
+        var dropCount = max(0, recentRequests.count - Self.liveFeedCapacity)
+        var droppedBytes = 0
+        var index = 0
+        while index < dropCount {
+            droppedBytes += Self.approxEventBytes(recentRequests[index])
+            index += 1
+        }
+        while recentRequestsApproxBytes - droppedBytes > Self.recentRequestsByteBudget,
+              dropCount < recentRequests.count {
+            droppedBytes += Self.approxEventBytes(recentRequests[dropCount])
+            dropCount += 1
+        }
+        guard dropCount > 0 else { return }
+        recentRequests.removeFirst(dropCount)
+        recentRequestsApproxBytes = max(0, recentRequestsApproxBytes - droppedBytes)
     }
 
     // MARK: - SQLite (batched)
@@ -546,48 +697,68 @@ final class TelemetryStore: ObservableObject {
 
     private func insertTransaction(_ events: [RequestEvent], db: OpaquePointer,
                                    stmt: OpaquePointer) -> Bool {
-        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+        let beginRC = sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil)
+        guard beginRC == SQLITE_OK else {
             let message = String(cString: sqlite3_errmsg(db))
             _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             noteDatabaseFailure("BEGIN IMMEDIATE failed, \(events.count) event(s) not written: \(message)")
+            if Self.isCorruption(beginRC) {
+                _ = recoverFromCorruption(reason: "BEGIN returned SQLite error \(beginRC)")
+            }
             return false
         }
         var failed = 0
         var firstError: String?
+        var firstRC: Int32 = SQLITE_OK
         for e in events {
             sqlite3_reset(stmt)
             sqlite3_clear_bindings(stmt)
             sqlite3_bind_int64(stmt, 1, e.ts)
             bindText(stmt, 2, e.scheme)
             bindText(stmt, 3, e.method)
-            bindText(stmt, 4, e.host)
+            bindText(stmt, 4, Self.clampText(e.host, to: Self.maxHostLength))
             sqlite3_bind_int(stmt, 5, Int32(e.port))
-            bindText(stmt, 6, e.path)
+            bindText(stmt, 6, Self.clampText(e.path, to: Self.maxPathLength))
             bindText(stmt, 7, e.route.rawValue)
             sqlite3_bind_int(stmt, 8, Int32(e.status))
             sqlite3_bind_int64(stmt, 9, e.bytesIn)
             sqlite3_bind_int64(stmt, 10, e.bytesOut)
             sqlite3_bind_int64(stmt, 11, e.durationMs)
-            if let err = e.error { bindText(stmt, 12, err) } else { sqlite3_bind_null(stmt, 12) }
+            if let err = e.error {
+                bindText(stmt, 12, Self.clampText(err, to: Self.maxErrorLength))
+            } else { sqlite3_bind_null(stmt, 12) }
             sqlite3_bind_int(stmt, 13, Int32(e.srcPort))
-            if let app = e.app { bindText(stmt, 14, app) } else { sqlite3_bind_null(stmt, 14) }
-            if let bundle = e.appBundle { bindText(stmt, 15, bundle) } else { sqlite3_bind_null(stmt, 15) }
-            if sqlite3_step(stmt) != SQLITE_DONE {
+            if let app = e.app {
+                bindText(stmt, 14, Self.clampText(app, to: Self.maxAppLength))
+            } else { sqlite3_bind_null(stmt, 14) }
+            if let bundle = e.appBundle {
+                bindText(stmt, 15, Self.clampText(bundle, to: Self.maxAppLength))
+            } else { sqlite3_bind_null(stmt, 15) }
+            let stepRC = sqlite3_step(stmt)
+            if stepRC != SQLITE_DONE {
                 failed += 1
                 if firstError == nil {
                     firstError = String(cString: sqlite3_errmsg(db))
+                    firstRC = stepRC
                 }
             }
         }
         if failed == 0 {
-            if sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK { return true }
+            let commitRC = sqlite3_exec(db, "COMMIT", nil, nil, nil)
+            if commitRC == SQLITE_OK { return true }
             let message = String(cString: sqlite3_errmsg(db))
             let rb = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             noteDatabaseFailure("COMMIT failed, \(events.count) event(s) rolled back: \(message)\(rollbackSuffix(rb, db: db))")
+            if Self.isCorruption(commitRC) {
+                _ = recoverFromCorruption(reason: "COMMIT returned SQLite error \(commitRC)")
+            }
             return false
         }
         let rb = sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
         noteDatabaseFailure("\(failed)/\(events.count) INSERT(s) failed; batch rolled back (first error: \(firstError ?? "unknown"))\(rollbackSuffix(rb, db: db))")
+        if Self.isCorruption(firstRC) {
+            _ = recoverFromCorruption(reason: "INSERT returned SQLite error \(firstRC)")
+        }
         return false
     }
 
@@ -621,10 +792,14 @@ final class TelemetryStore: ObservableObject {
     @discardableResult
     private func execChecked(_ db: OpaquePointer, _ sql: String, _ label: String) -> Bool {
         var errorMessage: UnsafeMutablePointer<CChar>?
-        if sqlite3_exec(db, sql, nil, nil, &errorMessage) != SQLITE_OK {
+        let rc = sqlite3_exec(db, sql, nil, nil, &errorMessage)
+        if rc != SQLITE_OK {
             let detail = errorMessage.map { String(cString: $0) } ?? String(cString: sqlite3_errmsg(db))
             sqlite3_free(errorMessage)
-            noteDatabaseFailure("\(label) failed: \(detail)")
+            noteDatabaseFailure("\(label) failed (\(rc)): \(detail)")
+            if Self.isCorruption(rc) {
+                _ = recoverFromCorruption(reason: "\(label) returned SQLite error \(rc)")
+            }
             return false
         }
         return true
@@ -688,6 +863,35 @@ final class TelemetryStore: ObservableObject {
 
     private func bindText(_ stmt: OpaquePointer, _ idx: Int32, _ text: String) {
         sqlite3_bind_text(stmt, idx, (text as NSString).utf8String, -1, SQLITE_TRANSIENT)
+    }
+
+    static func clampText(_ text: String, to limit: Int) -> String {
+        text.count > limit ? String(text.prefix(limit)) : text
+    }
+
+    /// Returns a copy whose variable-length display fields are bounded before
+    /// any in-memory buffer or SQLite bind sees them (TM-08).
+    static func clampedForStorage(_ event: RequestEvent) -> RequestEvent {
+        var clamped = event
+        clamped.host = clampText(clamped.host, to: maxHostLength)
+        clamped.path = clampText(clamped.path, to: maxPathLength)
+        clamped.error = clamped.error.map { clampText($0, to: maxErrorLength) }
+        clamped.app = clamped.app.map { clampText($0, to: maxAppLength) }
+        clamped.appBundle = clamped.appBundle.map { clampText($0, to: maxAppLength) }
+        return clamped
+    }
+
+    /// Rough memory estimate for one feed row: its variable strings plus a
+    /// fixed struct/allocation overhead. Only used for the byte budget.
+    static func approxEventBytes(_ event: RequestEvent) -> Int {
+        recentRowOverheadBytes
+            + event.host.utf8.count
+            + event.path.utf8.count
+            + event.scheme.utf8.count
+            + event.method.utf8.count
+            + (event.error?.utf8.count ?? 0)
+            + (event.app?.utf8.count ?? 0)
+            + (event.appBundle?.utf8.count ?? 0)
     }
 
     /// Safe even for an in-memory hostile `days`: on overflow the cutoff is
@@ -915,6 +1119,7 @@ final class TelemetryStore: ObservableObject {
             self.lock.unlock()
             guard stillCurrent else { return }
             self.recentRequests = []
+            self.recentRequestsApproxBytes = 0
             self.liveRequests = []
             var cleared = StatsSnapshot()
             cleared.activeConnections = liveCount

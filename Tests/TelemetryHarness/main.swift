@@ -68,6 +68,10 @@ func queryInt(_ db: OpaquePointer?, _ sql: String) -> Int? {
     return Int(sqlite3_column_int64(stmt, 0))
 }
 
+func openFDCount() -> Int {
+    (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+}
+
 func fileSize(_ path: String) -> Int64? {
     guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
           let size = attrs[.size] as? NSNumber else { return nil }
@@ -280,17 +284,108 @@ check("Int.max days falls back to Int64.min without trapping",
 check("cutoff subtraction underflow falls back to Int64.min",
       TelemetryStore.retentionCutoffMs(nowMs: Int64.min, days: 1) == Int64.min)
 
+print("== oversized event fields are clamped in the feed and DB (TM-08) ==")
+let clampPath = tmpDir + "pm-telemetry-clamp-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: clampPath)
+let clampStore = TelemetryStore(dbURL: URL(fileURLWithPath: clampPath), maxRows: 1000, retentionDays: 1)
+let hugeField = String(repeating: "x", count: 60_000)
+clampStore.record(RequestEvent(host: hugeField, path: hugeField, error: hugeField,
+                               app: hugeField, appBundle: hugeField))
+pumpMain { clampStore.recentRequests.count == 1 }
+clampStore.flushNow()
+let clampedFeed = clampStore.recentRequests.first
+check("feed host is clamped to 255", clampedFeed?.host.count == 255)
+check("feed path is clamped to 2,048", clampedFeed?.path.count == 2_048)
+check("feed error is clamped to 1,024", clampedFeed?.error?.count == 1_024)
+check("feed app is clamped to 255", clampedFeed?.app?.count == 255)
+check("feed appBundle is clamped to 255", clampedFeed?.appBundle?.count == 255)
+if let db = openDB(clampPath) {
+    check("DB host is clamped to 255",
+          queryInt(db, "SELECT length(host) FROM requests LIMIT 1") == 255)
+    check("DB path is clamped to 2,048",
+          queryInt(db, "SELECT length(path) FROM requests LIMIT 1") == 2_048)
+    check("DB error is clamped to 1,024",
+          queryInt(db, "SELECT length(error) FROM requests LIMIT 1") == 1_024)
+    check("DB app is clamped to 255",
+          queryInt(db, "SELECT length(app) FROM requests LIMIT 1") == 255)
+    check("DB app_bundle is clamped to 255",
+          queryInt(db, "SELECT length(app_bundle) FROM requests LIMIT 1") == 255)
+    sqlite3_close(db)
+} else {
+    check("open clamp DB", false)
+}
+
+print("== recentRequests byte budget trims below the row cap (TM-08) ==")
+let budgetPath = tmpDir + "pm-telemetry-budget-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: budgetPath)
+let budgetStore = TelemetryStore(dbURL: URL(fileURLWithPath: budgetPath),
+                                 maxRows: 100_000, retentionDays: 1)
+for _ in 0..<3_000 {
+    budgetStore.record(RequestEvent(host: hugeField, path: hugeField, error: hugeField,
+                                    app: hugeField, appBundle: hugeField))
+}
+pumpMain { budgetStore.recentRequests.count > 0 }
+pumpMain(seconds: 0.5)
+check("byte budget keeps fewer rows than the 5,000-row cap",
+      budgetStore.recentRequests.count > 0 && budgetStore.recentRequests.count < 3_000)
+check("estimated feed bytes stay within the budget (\(budgetStore.recentRequestsApproxBytes) <= \(TelemetryStore.recentRequestsByteBudget))",
+      budgetStore.recentRequestsApproxBytes <= TelemetryStore.recentRequestsByteBudget)
+check("a large batch still reaches SQLite", {
+    budgetStore.flushNow()
+    guard let db = openDB(budgetPath) else { return false }
+    defer { sqlite3_close(db) }
+    return queryInt(db, "SELECT COUNT(*) FROM requests") == 3_000
+}())
+
 print("== unavailable DB path does not crash or hang flushNow ==")
 let missingDir = tmpDir + "pm-telemetry-missing-\(getpid())"
 let missingPath = missingDir + "/telemetry.sqlite"
 try? FileManager.default.removeItem(atPath: missingDir)
+let fdsBeforeOpenFailures = openFDCount()
 let badStore = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
 check("open failure marks telemetry unavailable", badStore.telemetryUnavailable)
+check("open failure does not report a quarantine", badStore.dbQuarantineCount == 0)
+for _ in 0..<5 {
+    _ = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
+}
+let fdsAfterOpenFailures = openFDCount()
+check("repeated open failures do not leak file descriptors (\(fdsBeforeOpenFailures) -> \(fdsAfterOpenFailures))",
+      fdsAfterOpenFailures <= fdsBeforeOpenFailures + 2)
 badStore.record(RequestEvent(host: "nowhere.example"))
 let badStart = Date()
 badStore.flushNow()
 check("flushNow returns promptly with an unavailable DB", Date().timeIntervalSince(badStart) < 3)
 check("store survives the failed flush", badStore.telemetryUnavailable)
+
+print("== corrupt DB is quarantined and recreated (TM-11) ==")
+let corruptPath = tmpDir + "pm-telemetry-corrupt-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: corruptPath)
+try? FileManager.default.removeItem(atPath: corruptPath + "-wal")
+try? FileManager.default.removeItem(atPath: corruptPath + "-shm")
+try? Data("this is definitely not a sqlite database".utf8)
+    .write(to: URL(fileURLWithPath: corruptPath))
+let corruptStore = TelemetryStore(dbURL: URL(fileURLWithPath: corruptPath),
+                                  maxRows: 1000, retentionDays: 1)
+check("corrupt DB recovery leaves telemetry available", !corruptStore.telemetryUnavailable)
+check("corrupt DB was quarantined exactly once", corruptStore.dbQuarantineCount == 1)
+let corruptBaseName = URL(fileURLWithPath: corruptPath).lastPathComponent
+let quarantinedFiles = ((try? FileManager.default.contentsOfDirectory(atPath: tmpDir)) ?? [])
+    .filter { $0.hasPrefix(corruptBaseName + ".corrupt-") }
+check("quarantine file exists", !quarantinedFiles.isEmpty)
+corruptStore.record(RequestEvent(host: "after-corrupt.example", route: .tunnel))
+corruptStore.flushNow()
+if let db = openDB(corruptPath) {
+    check("recording works against the recreated DB",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='after-corrupt.example'") == 1)
+    check("recreated DB passes integrity_check",
+          queryString(db, "PRAGMA integrity_check") == "ok")
+    sqlite3_close(db)
+} else {
+    check("open recreated DB", false)
+}
+for name in quarantinedFiles {
+    try? FileManager.default.removeItem(atPath: tmpDir + name)
+}
 
 print("== live limit change applies without relaunch ==")
 let livePath = tmpDir + "pm-telemetry-live-\(getpid()).sqlite"
@@ -405,7 +500,7 @@ check("a purged session that ends later does not return to the feed",
       !purgeStatsStore.recentRequests.contains { $0.host == "stats-live.example" })
 
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
-             purgePath, purgeBatchPath, purgeStatsPath] {
+             purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")
