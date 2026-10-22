@@ -1,6 +1,49 @@
 import Foundation
 import Darwin
 
+/// Keeps only the last `capacity` bytes of a child's stderr.
+///
+/// A hostile/verbose server, a broken `ProxyCommand`, or a rekey loop can write
+/// arbitrarily much to stderr; retaining the whole stream (and splitting it at
+/// exit) grows memory without bound. Fatal markers are at the end, so a bounded
+/// tail is enough. Appends race with the exit drain, hence the lock.
+final class StderrTail {
+    static let defaultCapacity = 64 * 1024
+
+    let capacity: Int
+    private let lock = NSLock()
+    private var buffer = Data()
+
+    init(capacity: Int = StderrTail.defaultCapacity) {
+        self.capacity = max(1, capacity)
+    }
+
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        // Trim an oversized chunk before appending so the buffer never spans
+        // more than the cap plus one chunk.
+        if chunk.count >= capacity {
+            buffer = Data(chunk.suffix(capacity))
+        } else {
+            buffer.append(chunk)
+            let overflow = buffer.count - capacity
+            if overflow > 0 { buffer.removeFirst(overflow) }
+        }
+    }
+
+    var byteCount: Int {
+        lock.lock(); defer { lock.unlock() }; return buffer.count
+    }
+
+    /// Decoded lazily on read; invalid UTF-8 becomes replacement characters
+    /// rather than discarding the whole tail (fatal markers are ASCII).
+    var string: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: buffer, as: UTF8.self)
+    }
+}
+
 /// Runs and supervises an SSH SOCKS5 tunnel ("run the tunnel for me" mode).
 ///
 /// Spawns `ssh -N -D <host:port> <user>@<host>` as a foreground child, drains
@@ -208,22 +251,41 @@ final class SSHTunnelRunner: ObservableObject {
         }
         p.environment = env
 
-        var errData = Data()
-        let errLock = NSLock()
-        errPipe.fileHandleForReading.readabilityHandler = { handle in
+        let errHandle = errPipe.fileHandleForReading
+        let errTail = StderrTail()
+        // Serializes the async callback and the exit drain so they never read
+        // the descriptor concurrently (which could reorder or drop bytes).
+        let errReadLock = NSLock()
+
+        errHandle.readabilityHandler = { handle in
+            errReadLock.lock(); defer { errReadLock.unlock() }
             let chunk = handle.availableData
             if chunk.isEmpty {
                 handle.readabilityHandler = nil
             } else {
-                errLock.lock(); errData.append(chunk); errLock.unlock()
+                errTail.append(chunk)
             }
         }
 
         p.terminationHandler = { [weak self] proc in
-            // Give the readability handler a moment to drain the final bytes
-            // (the real error is usually written just before exit).
-            Thread.sleep(forTimeInterval: 0.05)
-            errLock.lock(); let err = String(data: errData, encoding: .utf8) ?? ""; errLock.unlock()
+            // The fatal line is usually written immediately before exit and the
+            // readability callback is asynchronous, so stop it and drain the
+            // pipe to EOF ourselves before classifying. The wait is bounded: a
+            // grandchild may hold the write end open.
+            errHandle.readabilityHandler = nil
+            let deadline = Date().addingTimeInterval(1.0)
+            if errReadLock.lock(before: deadline) {
+                let eof = Self.drainToEOF(errHandle, into: errTail, until: deadline)
+                errReadLock.unlock()
+                // A writer that outlives the child (an inherited fd) must not
+                // keep the read end open; best effort to unblock/discard it.
+                if !eof { try? errHandle.close() }
+            } else {
+                // A callback is stuck reading; close the read end so it cannot
+                // block a thread forever, then classify with what we captured.
+                try? errHandle.close()
+            }
+            let err = errTail.string
             self?.queue.async { self?.handleExit(proc, stderr: err, generation: gen) }
         }
 
@@ -280,16 +342,16 @@ final class SSHTunnelRunner: ObservableObject {
         // the delay up to 60 s forever.
         if uptime >= 60 { attempt = 0 }
 
-        if isFatal(stderr, code: code) {
+        if Self.isFatal(stderr, code: code) {
             attempt = 0
             // Sticky until the settings change or an explicit restart, so an
             // unrelated config commit cannot retry a failing auth.
             fatalSettings = lastSpawnSettings
-            setError(shortMessage(stderr) ?? "ssh exited with code \(code)")
+            setError(Self.shortMessage(stderr) ?? "ssh exited with code \(code)")
             return
         }
 
-        setError(shortMessage(stderr) ?? "ssh exited with code \(code)")
+        setError(Self.shortMessage(stderr) ?? "ssh exited with code \(code)")
         let delay = min(60.0, pow(2.0, Double(attempt)))
         attempt += 1
         // If the user changed the settings while this child was dying, the
@@ -299,7 +361,41 @@ final class SSHTunnelRunner: ObservableObject {
         }
     }
 
-    private func isFatal(_ stderr: String, code: Int32) -> Bool {
+    /// Reads `handle` to EOF (or until `deadline`) into `tail`, without ever
+    /// blocking past the deadline. `poll` with short slices lets us notice both
+    /// EOF and a writer that stays open (e.g. an inherited fd in a grandchild).
+    /// Returns false when the timeout expired before EOF.
+    @discardableResult
+    static func drainToEOF(_ handle: FileHandle, into tail: StderrTail, until deadline: Date) -> Bool {
+        let fd = handle.fileDescriptor
+        guard fd >= 0 else { return true }
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 { return false }
+
+            var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let slice = Int32(max(1, min(remaining, 0.25) * 1000))
+            let ready = poll(&descriptor, 1, slice)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            if ready == 0 { continue }
+
+            let count = read(fd, &buffer, buffer.count)
+            if count > 0 {
+                tail.append(Data(bytes: buffer, count: count))
+                continue
+            }
+            if count == 0 { return true }
+            if errno == EINTR { continue }
+            if errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            return (descriptor.revents & Int16(POLLHUP)) != 0
+        }
+    }
+
+    static func isFatal(_ stderr: String, code: Int32) -> Bool {
         let lower = stderr.lowercased()
         let fatalMarkers = [
             "permission denied",
@@ -318,12 +414,15 @@ final class SSHTunnelRunner: ObservableObject {
         return fatalMarkers.contains { lower.contains($0) }
     }
 
-    private func shortMessage(_ stderr: String) -> String? {
-        let line = stderr.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .last
-        return line
+    /// Last non-empty line, scanned without materializing every line of the
+    /// (bounded) tail. Line separators other than `\n` are treated as text.
+    static func shortMessage(_ stderr: String) -> String? {
+        var last: String?
+        stderr.enumerateLines { line, _ in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { last = trimmed }
+        }
+        return last
     }
 
     // MARK: - Process construction

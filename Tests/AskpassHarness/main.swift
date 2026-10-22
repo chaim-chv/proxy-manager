@@ -1,7 +1,8 @@
 import Foundation
 import Darwin
 
-// Standalone regression harness for the managed-tunnel askpass lifecycle (TC-08).
+// Standalone regression harness for the managed-tunnel askpass lifecycle (TC-08)
+// and the bounded stderr tail / exit drain (TC-09, TC-11).
 //
 // Build (from the repo root):
 //   xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
@@ -107,6 +108,71 @@ if geteuid() == 0 {
     check(badResult.status != 0, "helper reports failure when cat fails")
     check(!exists(badSecret), "helper still deletes the secret when cat fails")
 }
+
+print("== bounded stderr tail (TC-09) ==")
+let ring = StderrTail(capacity: 8)
+ring.append(Data("abcd".utf8))
+ring.append(Data("efgh".utf8))
+ring.append(Data("ijkl".utf8))
+check(ring.byteCount == 8, "ring keeps exactly its capacity")
+check(ring.string == "efghijkl", "ring keeps the most recent bytes")
+
+let smallTail = StderrTail()
+smallTail.append(Data("debug noise\nPermission denied (publickey).\n".utf8))
+check(SSHTunnelRunner.shortMessage(smallTail.string) == "Permission denied (publickey).",
+      "shortMessage returns the last non-empty line")
+check(SSHTunnelRunner.isFatal(smallTail.string, code: 255), "small output still classifies as fatal")
+
+let cap = StderrTail.defaultCapacity
+let marker = "host key verification failed\n"
+let bigTail = StderrTail()
+bigTail.append(Data(String(repeating: "x", count: cap).utf8))
+bigTail.append(Data(marker.utf8))
+let expectedTail = String((String(repeating: "x", count: cap) + marker).suffix(cap))
+check(bigTail.byteCount == cap, "default cap is \(cap) bytes")
+check(bigTail.string == expectedTail, "retains exactly the last 64 KiB")
+check(bigTail.string.hasSuffix(marker), "fatal marker in the tail is retained")
+check(SSHTunnelRunner.isFatal(bigTail.string, code: 255), "classification uses the capped tail")
+
+let streamed = StderrTail()
+var full = ""
+for i in 0..<100 {
+    let chunk = String(repeating: "\(i % 10)", count: 1024)
+    full += chunk
+    streamed.append(Data(chunk.utf8))
+}
+check(streamed.byteCount == cap, "chunked appends stay capped")
+check(streamed.string == String(full.suffix(cap)), "chunked tail content matches the last 64 KiB")
+
+print("== stderr drain before classification (TC-11) ==")
+let immediate = Pipe()
+let immediateTail = StderrTail()
+try! immediate.fileHandleForWriting.write(contentsOf: Data("debug\nPermission denied (publickey).\n".utf8))
+try! immediate.fileHandleForWriting.close()
+let immediateEOF = SSHTunnelRunner.drainToEOF(immediate.fileHandleForReading,
+                                              into: immediateTail,
+                                              until: Date().addingTimeInterval(1.0))
+check(immediateEOF, "drain reaches EOF")
+check(SSHTunnelRunner.isFatal(immediateTail.string, code: 255),
+      "fatal line written just before EOF is classified without a sleep")
+check(SSHTunnelRunner.shortMessage(immediateTail.string) == "Permission denied (publickey).",
+      "drained short message is the last non-empty line")
+try? immediate.fileHandleForReading.close()
+
+let held = Pipe()
+let heldTail = StderrTail()
+try! held.fileHandleForWriting.write(contentsOf: Data("partial diagnostic\n".utf8))
+let heldStart = Date()
+let heldEOF = SSHTunnelRunner.drainToEOF(held.fileHandleForReading,
+                                         into: heldTail,
+                                         until: Date().addingTimeInterval(0.3))
+let heldElapsed = Date().timeIntervalSince(heldStart)
+check(!heldEOF, "drain reports timeout while the write end stays open")
+check(heldElapsed >= 0.25 && heldElapsed < 2.0,
+      String(format: "drain returns within its bounded budget (%.2fs)", heldElapsed))
+check(heldTail.string.contains("partial diagnostic"), "bytes received before the timeout are kept")
+try? held.fileHandleForWriting.close()
+try? held.fileHandleForReading.close()
 
 print("")
 if failures == 0 {
