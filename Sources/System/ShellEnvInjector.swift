@@ -4,6 +4,10 @@ final class ShellEnvInjector {
     static let blockStart = "# >>> proxy-manager >>>"
     static let blockEnd = "# <<< proxy-manager <<<"
 
+    /// Removal must not depend on the current config (the watchdog may hold a
+    /// stale snapshot), so always sweep the shell's default rc file too.
+    static let defaultRCFiles = ["~/.zshrc"]
+
     private let configStore: ConfigStore
 
     init(configStore: ConfigStore) {

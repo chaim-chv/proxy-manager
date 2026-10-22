@@ -49,6 +49,43 @@ enum WatchdogPaths {
             .appendingPathComponent("Library/Logs/ProxyManager-watchdog.log")
     }
 
+    static let maxLogBytes = 2 * 1024 * 1024
+
+    /// Truncates a log in place when it exceeds `maxBytes`. launchd opens the
+    /// log by path at spawn time, so replacing the file would leave the daemon
+    /// writing to the unlinked inode; truncate keeps the same inode valid. If
+    /// our own stdout/stderr is that file, rewind it too so the next write does
+    /// not leave a sparse hole at the old offset.
+    @discardableResult
+    static func truncateIfLarger(_ url: URL, maxBytes: Int = maxLogBytes) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attrs[.size] as? NSNumber)?.intValue,
+              size > maxBytes else { return false }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.truncate(atOffset: 0)
+            try? handle.synchronize()
+        } catch {
+            return false
+        }
+        rewindOwnStdioIfPointingAt(url)
+        return true
+    }
+
+    private static func rewindOwnStdioIfPointingAt(_ url: URL) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let targetDev = (attrs[.systemNumber] as? NSNumber)?.uint64Value,
+              let targetIno = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value else { return }
+        for fd in [STDOUT_FILENO, STDERR_FILENO] {
+            var st = stat()
+            guard fstat(fd, &st) == 0 else { continue }
+            if UInt64(st.st_dev) == targetDev, UInt64(st.st_ino) == targetIno {
+                _ = lseek(fd, 0, SEEK_SET)
+            }
+        }
+    }
+
     static func readArmedState() -> WatchdogArmedState {
         guard let data = try? Data(contentsOf: armedFile),
               let state = try? JSONDecoder().decode(WatchdogArmedState.self, from: data) else {
@@ -204,6 +241,9 @@ struct WatchdogHooks {
     /// Removes the persisted recovery snapshot once it is no longer needed.
     /// Called only after a proven clean state or a successful restore.
     var clearSnapshot: () -> Void
+    /// Kills an `ssh -N -D` orphaned by a crash/force-quit. Only called once
+    /// the proxy is provably safe (restored, cleared, or already clean).
+    var reapTunnel: () -> Void
     var removeEnv: () -> Void
     var disarm: () -> Void
     var log: (String) -> Void
@@ -217,22 +257,66 @@ final class WatchdogEngine {
     private let maxAttempts = 5
     private let tickArmed: Int
     private let tickDisarmed: Int
+    private let now: () -> Date
 
-    init(hooks: WatchdogHooks, tickArmed: Int = 15, tickDisarmed: Int = 120) {
+    /// Retry cadence for a persistently failing restore: 15 s, 1 min, then
+    /// every 5 min. A machine that stays broken must eventually recover without
+    /// hammering `networksetup` (LC-18).
+    static let retryDelays: [TimeInterval] = [15, 60, 300]
+
+    /// Pure schedule helper: attempt 1 -> 15 s, 2 -> 60 s, 3+ -> 300 s.
+    static func restoreDelay(attempt: Int) -> TimeInterval {
+        guard attempt >= 1 else { return retryDelays[0] }
+        return retryDelays[min(attempt - 1, retryDelays.count - 1)]
+    }
+
+    private var nextRetryAt: Date?
+    private var exhaustedLogged = false
+    private var observedPid: pid_t?
+
+    init(hooks: WatchdogHooks, tickArmed: Int = 15, tickDisarmed: Int = 120,
+         now: @escaping () -> Date = Date.init) {
         self.hooks = hooks
         self.tickArmed = tickArmed
         self.tickDisarmed = tickDisarmed
+        self.now = now
     }
 
     /// One reconcile pass. Returns true if it restored the system proxy.
     @discardableResult
     func tick() -> Bool {
         let state = hooks.readState()
+        observe(state)
         guard state.armed, !hooks.isAlive(state.pid) else { return false }
         return performRestore(port: state.port)
     }
 
+    /// A new arming (different app pid) or a disarm starts a fresh retry
+    /// schedule: a 5-minute backoff left over from an old failure must never
+    /// delay recovery for a later crash.
+    private func observe(_ state: WatchdogArmedState) {
+        guard state.armed else {
+            observedPid = nil
+            resetRetrySchedule()
+            return
+        }
+        if observedPid != state.pid {
+            observedPid = state.pid
+            resetRetrySchedule()
+        }
+    }
+
+    private func resetRetrySchedule() {
+        attempts = 0
+        exhaustedLogged = false
+        nextRetryAt = nil
+    }
+
     private func performRestore(port: UInt16) -> Bool {
+        if let nextRetryAt, now() < nextRetryAt {
+            return false
+        }
+
         // Probe ANY local port, not merely the armed one: a failed re-apply or
         // an in-flight port change can leave the old port applied while the
         // watchdog was armed for the new one (LC-07). `.unknown` means at least
@@ -244,8 +328,9 @@ final class WatchdogEngine {
         case .clean:
             hooks.log("system proxy already clean; disarming")
             hooks.clearSnapshot()
+            hooks.reapTunnel()
             hooks.disarm()
-            attempts = 0
+            resetRetrySchedule()
             return false
         case .ours:
             break
@@ -258,8 +343,9 @@ final class WatchdogEngine {
                 try hooks.restore(snapshot)
                 hooks.removeEnv()
                 hooks.clearSnapshot()
+                hooks.reapTunnel()
                 hooks.disarm()
-                attempts = 0
+                resetRetrySchedule()
                 hooks.log("restored system proxy after app exit (armed port \(port))")
                 return true
             } catch {
@@ -274,8 +360,9 @@ final class WatchdogEngine {
             try hooks.clearLocalProxy(0)
             hooks.removeEnv()
             hooks.clearSnapshot()
+            hooks.reapTunnel()
             hooks.disarm()
-            attempts = 0
+            resetRetrySchedule()
             hooks.log("no snapshot; cleared local system proxy after app exit")
             return true
         } catch {
@@ -285,14 +372,21 @@ final class WatchdogEngine {
     }
 
     /// Counts a transient failure but never gives up permanently: the machine is
-    /// still broken, so the next safety tick must try again.
+    /// still broken, so the next safety tick must try again. After five attempts
+    /// the per-attempt log stops (one "still failing" notice), while the delay
+    /// stays capped at 5 minutes so a broken machine is retried forever.
     private func noteRetry(_ what: String) {
-        attempts += 1
-        hooks.log("\(what) (attempt \(attempts))")
-        if attempts >= maxAttempts {
-            attempts = 0
+        if attempts < maxAttempts { attempts += 1 }
+        if !exhaustedLogged {
+            hooks.log("\(what) (attempt \(attempts))")
+        }
+        if attempts >= maxAttempts, !exhaustedLogged {
+            exhaustedLogged = true
             hooks.log("\(what) still failing after \(maxAttempts) attempts; will keep retrying (run ./revert.sh to fix manually)")
         }
+        let delay = Self.restoreDelay(attempt: attempts)
+        nextRetryAt = now().addingTimeInterval(delay)
+        hooks.log("next restore retry in \(Int(delay))s")
     }
 
     /// Event-driven loop: blocks in `kevent` until the app exits, the armed file
@@ -327,6 +421,7 @@ final class WatchdogEngine {
 
         while true {
             let state = hooks.readState()
+            observe(state)
 
             // Keep the process-exit watch in sync with the armed pid.
             if state.armed, state.pid != watchedPid {
@@ -377,6 +472,9 @@ final class WatchdogEngine {
 enum Watchdog {
     /// Runs the watchdog process. Never returns.
     static func run() -> Never {
+        if WatchdogPaths.truncateIfLarger(WatchdogPaths.logFile) {
+            Log.app.notice("watchdog: rotated log at startup")
+        }
         Log.app.notice("watchdog: started (pid \(getpid()))")
         WatchdogEngine(hooks: defaultHooks()).run()
     }
@@ -405,12 +503,23 @@ enum Watchdog {
                     _ = store.quarantineSnapshot()
                 }
             },
+            reapTunnel: {
+                // A crash leaves the managed `ssh -N -D` child running; the
+                // watchdog reaps it after the proxy is safe again.
+                SSHTunnelRunner.reapStaleProcess()
+            },
             removeEnv: {
-                if store.config.system.injectShellEnv {
-                    let injector = ShellEnvInjector(configStore: store)
-                    injector.remove(rcFiles: store.config.system.managedShellRcs)
-                    injector.removeEnvFile()
+                // Always remove our marker blocks + env file. The captured
+                // config may be stale (the user could have changed or disabled
+                // injection after this watchdog started), so never gate cleanup
+                // on it; only *adding* is config-gated (LC-18).
+                let injector = ShellEnvInjector(configStore: store)
+                var rcFiles = ShellEnvInjector.defaultRCFiles
+                for rc in store.config.system.managedShellRcs where !rcFiles.contains(rc) {
+                    rcFiles.append(rc)
                 }
+                injector.remove(rcFiles: rcFiles)
+                injector.removeEnvFile()
                 // No-op unless we published it (guarded by the persisted snapshot).
                 GuiEnvInjector(snapshotURL: store.guiEnvSnapshotURL).remove()
             },

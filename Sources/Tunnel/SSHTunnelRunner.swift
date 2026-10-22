@@ -488,8 +488,10 @@ final class SSHTunnelRunner: ObservableObject {
 
     /// Kills an ssh left over from a previous run (crash/force-quit). Verifies
     /// the pid is actually `ssh` before signalling so PID reuse is safe.
-    private func killStaleProcess() {
-        let url = Self.pidFileURL
+    /// Static so the crash watchdog (a separate process) can reap the orphan
+    /// even when the app is gone (LC-18).
+    static func reapStaleProcess() {
+        let url = pidFileURL
         guard let raw = try? String(contentsOf: url, encoding: .utf8),
               let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
             return
@@ -500,7 +502,11 @@ final class SSHTunnelRunner: ObservableObject {
         kill(pid, SIGKILL)
     }
 
-    private func isSSHProcess(_ pid: Int32) -> Bool {
+    private func killStaleProcess() {
+        Self.reapStaleProcess()
+    }
+
+    private static func isSSHProcess(_ pid: Int32) -> Bool {
         let result = BoundedProcess.run(executable: "/bin/ps",
                                         arguments: ["-p", String(pid), "-o", "comm="],
                                         timeout: 5)

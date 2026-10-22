@@ -134,13 +134,14 @@ run_harness GuiEnvHarness \
   Tests/GuiEnvHarness/main.swift
 
 run_harness WatchdogHarness \
-  -framework AppKit -framework ServiceManagement \
+  -framework AppKit -framework ServiceManagement -framework Security \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/Support/Log.swift Sources/Support/BoundedProcess.swift \
   Sources/Support/Watchdog.swift \
   Sources/System/HelperProtocol.swift Sources/System/HelperXPCClient.swift \
   Sources/System/SystemProxyManager.swift Sources/System/ShellEnvInjector.swift \
   Sources/System/GuiEnvInjector.swift \
+  Sources/Tunnel/SSHKeychain.swift Sources/Tunnel/SSHTunnelRunner.swift \
   Sources/Proxy/HostClassifier.swift Sources/Socks/Socket.swift \
   Tests/WatchdogHarness/main.swift
 

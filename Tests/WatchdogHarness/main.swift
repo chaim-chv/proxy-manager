@@ -47,9 +47,11 @@ final class Box {
     var clearCalls = 0
     var clearedPorts: [UInt16] = []
     var clearSnapshotCalls = 0
+    var reapCalls = 0
     var disarmCalls = 0
     var envRemoved = 0
     var restoreSem = DispatchSemaphore(value: 0)
+    var now = Date(timeIntervalSince1970: 1_000_000)
 
     func hooks() -> WatchdogHooks {
         WatchdogHooks(
@@ -71,6 +73,7 @@ final class Box {
                 if let clearError { throw clearError }
             },
             clearSnapshot: { [self] in clearSnapshotCalls += 1 },
+            reapTunnel: { [self] in reapCalls += 1 },
             removeEnv: { [self] in envRemoved += 1 },
             disarm: { [self] in
                 disarmCalls += 1
@@ -96,6 +99,7 @@ do {
     check(box.restoreCalls == 1, "restore called exactly once")
     check(box.envRemoved == 1, "shell env removed on restore")
     check(box.clearSnapshotCalls == 1, "clears the stale snapshot after a successful restore")
+    check(box.reapCalls == 1, "reaps an orphaned managed SSH tunnel after a successful restore")
     check(box.disarmCalls == 1, "disarms after restore")
 }
 
@@ -106,6 +110,7 @@ do {
     let engine = WatchdogEngine(hooks: box.hooks())
     check(!engine.tick(), "armed + app alive -> no restore")
     check(box.restoreCalls == 0, "restore not called while alive")
+    check(box.reapCalls == 0, "does not reap the tunnel while the app is alive")
     check(box.disarmCalls == 0, "stays armed while alive")
 }
 
@@ -116,6 +121,7 @@ do {
     let engine = WatchdogEngine(hooks: box.hooks())
     check(!engine.tick(), "disarmed -> no restore")
     check(box.restoreCalls == 0, "restore not called when disarmed")
+    check(box.reapCalls == 0, "does not reap when disarmed")
 }
 
 do {
@@ -133,6 +139,7 @@ do {
     check(box.clearedPorts == [0], "clear hook asked for any local port")
     check(box.restoreCalls == 0, "no snapshot -> restore not called")
     check(box.clearSnapshotCalls == 1, "clears any stale snapshot after a successful local clear")
+    check(box.reapCalls == 1, "reaps an orphaned managed SSH tunnel after the no-snapshot clear")
     check(box.disarmCalls == 1, "disarms after a successful clear")
     check(box.envRemoved == 1, "shell env removed after clear")
 }
@@ -149,6 +156,7 @@ do {
     for _ in 0..<6 { _ = engine.tick() }
     check(box.clearCalls == 0, "does not clear on unknown state")
     check(box.clearSnapshotCalls == 0, "does not clear the snapshot on unknown state")
+    check(box.reapCalls == 0, "does not reap the tunnel on unknown state")
     check(box.disarmCalls == 0, "never disarms on unknown state")
     check(box.state.armed, "stays armed after repeated unknown reads")
 }
@@ -165,6 +173,7 @@ do {
     check(box.clearCalls == 0, "does not clear a clean proxy")
     check(box.restoreCalls == 0, "does not restore without a snapshot")
     check(box.clearSnapshotCalls == 1, "clears the snapshot after a proven clean state")
+    check(box.reapCalls == 1, "reaps an orphaned managed SSH tunnel after a proven clean state")
     check(box.disarmCalls == 1, "disarms when no snapshot and proxy is clean")
 }
 
@@ -176,13 +185,18 @@ do {
     box.snapshot = nil
     box.proxyCheckResult = .ours
     box.clearError = SocketError.message("networksetup failed")
-    let engine = WatchdogEngine(hooks: box.hooks())
+    let engine = WatchdogEngine(hooks: box.hooks(), now: { box.now })
     check(!engine.tick(), "no snapshot + failed clear -> no success")
+    check(box.clearCalls == 1, "first clear attempted")
+    check(box.reapCalls == 0, "does not reap the tunnel while the clear keeps failing")
     for _ in 0..<6 { _ = engine.tick() }
-    check(box.clearCalls == 7, "retries the clear")
+    check(box.clearCalls == 1, "backs off instead of hammering a failing clear")
+    box.now += WatchdogEngine.restoreDelay(attempt: 1)
+    check(!engine.tick(), "still failing after the first backoff")
+    check(box.clearCalls == 2, "retries the clear after the 15 s backoff")
     check(box.clearSnapshotCalls == 0, "keeps the snapshot when the clear keeps failing")
     check(box.disarmCalls == 0, "stays armed while the clear keeps failing")
-    check(box.state.armed, "still armed after max clear attempts")
+    check(box.state.armed, "still armed after retries")
 }
 
 do {
@@ -214,6 +228,7 @@ do {
     for _ in 0..<6 { _ = engine.tick() }
     check(box.restoreCalls == 0, "does not restore on unknown state")
     check(box.clearSnapshotCalls == 0, "does not clear the snapshot on unknown state")
+    check(box.reapCalls == 0, "does not reap the tunnel on unknown state with a snapshot")
     check(box.disarmCalls == 0, "never disarms on unknown state with a snapshot")
     check(box.state.armed, "stays armed after repeated unknown reads")
 }
@@ -228,27 +243,60 @@ do {
     check(!engine.tick(), "proxy already clean -> no clobber")
     check(box.restoreCalls == 0, "does not restore over a non-localhost proxy")
     check(box.clearSnapshotCalls == 1, "clears the stale snapshot after finding a clean proxy")
+    check(box.reapCalls == 1, "reaps an orphaned managed SSH tunnel after finding a clean proxy")
     check(box.disarmCalls == 1, "disarms after finding a clean proxy")
+}
+
+print("watchdog: restore backoff (LC-18)")
+do {
+    check(WatchdogEngine.restoreDelay(attempt: 0) == 15, "attempt 0 uses the initial 15 s delay")
+    check(WatchdogEngine.restoreDelay(attempt: 1) == 15, "attempt 1 -> 15 s")
+    check(WatchdogEngine.restoreDelay(attempt: 2) == 60, "attempt 2 -> 60 s")
+    check(WatchdogEngine.restoreDelay(attempt: 3) == 300, "attempt 3 -> 300 s")
+    check(WatchdogEngine.restoreDelay(attempt: 4) == 300, "attempt 4 capped at 300 s")
+    check(WatchdogEngine.restoreDelay(attempt: 10) == 300, "later attempts stay capped at 300 s")
 }
 
 do {
     // Retry on failure, and keep retrying (never give up permanently) so a
-    // broken machine is not abandoned.
+    // broken machine is not abandoned. A persistent failure backs off
+    // 15 s -> 60 s -> 300 s and never falls back to 15 s.
     let box = Box()
     box.state = armed(pid: 999_999)
     box.alive = false
     box.restoreError = SocketError.message("boom")
-    let engine = WatchdogEngine(hooks: box.hooks())
-    for _ in 0..<4 { _ = engine.tick() }
-    check(box.restoreCalls == 4, "retries restore")
-    check(box.disarmCalls == 0, "stays armed while retrying")
+    let engine = WatchdogEngine(hooks: box.hooks(), now: { box.now })
+    check(!engine.tick(), "failed restore -> no success")
+    check(box.restoreCalls == 1, "first restore attempt")
+    check(box.reapCalls == 0, "does not reap the tunnel while the restore fails")
     _ = engine.tick()
-    check(box.restoreCalls == 5, "5th attempt made")
+    check(box.restoreCalls == 1, "does not retry before the 15 s backoff")
+
+    box.now += WatchdogEngine.restoreDelay(attempt: 1)
+    _ = engine.tick()
+    check(box.restoreCalls == 2, "retries after the 15 s backoff")
+
+    box.now += WatchdogEngine.restoreDelay(attempt: 2)
+    _ = engine.tick()
+    check(box.restoreCalls == 3, "retries after the 60 s backoff")
+
+    for attempt in 3...5 {
+        box.now += WatchdogEngine.restoreDelay(attempt: attempt)
+        _ = engine.tick()
+        check(box.restoreCalls == attempt + 1,
+              "retries after the capped 300 s backoff (attempt \(attempt + 1))")
+    }
     check(box.disarmCalls == 0, "does NOT disarm after max attempts")
-    _ = engine.tick()
-    check(box.restoreCalls == 6, "keeps retrying after max attempts")
     check(box.clearSnapshotCalls == 0, "never clears the snapshot while the restore fails")
     check(box.state.armed, "stays armed after failed restores")
+    check(box.reapCalls == 0, "never reaps the tunnel while the restore fails")
+
+    box.now += 15
+    _ = engine.tick()
+    check(box.restoreCalls == 6, "does not fall back to the 15 s cadence after max attempts")
+    box.now += 285
+    _ = engine.tick()
+    check(box.restoreCalls == 7, "keeps retrying at the capped 300 s cadence")
 }
 
 print("watchdog: kqueue NOTE_EXIT detection")
@@ -272,6 +320,7 @@ do {
         restore: { _ in box.restoreCalls += 1; box.restoreSem.signal() },
         clearLocalProxy: { _ in box.clearCalls += 1 },
         clearSnapshot: { box.clearSnapshotCalls += 1 },
+        reapTunnel: { box.reapCalls += 1 },
         removeEnv: { box.envRemoved += 1 },
         disarm: { box.disarmCalls += 1; box.state = .disarmed },
         log: { _ in }
@@ -285,6 +334,7 @@ do {
     check(got == .success, "NOTE_EXIT triggers restore well before the 10 s tick")
     check(box.restoreCalls == 1, "restore called once after the app dies")
     check(box.clearSnapshotCalls == 1, "snapshot cleared after the NOTE_EXIT restore")
+    check(box.reapCalls == 1, "orphaned managed SSH tunnel reaped after the NOTE_EXIT restore")
     child.waitUntilExit()
 }
 
@@ -310,6 +360,32 @@ do {
     let delta = after - before
     print(String(format: "  (idle CPU over 1.2 s: %.4f s)", delta))
     check(delta < 0.20, "idle watchdog consumes < 0.20 s CPU over 1.2 s")
+}
+
+print("watchdog: log rotation (LC-18)")
+do {
+    let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("wd-log-\(getpid())", isDirectory: true)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+
+    let big = dir.appendingPathComponent("big.log")
+    let maxBytes = 2 * 1024 * 1024
+    let bigData = Data(repeating: 0x41, count: maxBytes + 1024)
+    try? bigData.write(to: big)
+    let inodeBefore = (try? FileManager.default.attributesOfItem(atPath: big.path))?[.systemFileNumber] as? NSNumber
+    check(WatchdogPaths.truncateIfLarger(big, maxBytes: maxBytes), "truncates a log larger than the cap")
+    let bigSize = (try? FileManager.default.attributesOfItem(atPath: big.path))?[.size] as? NSNumber
+    let inodeAfter = (try? FileManager.default.attributesOfItem(atPath: big.path))?[.systemFileNumber] as? NSNumber
+    check(bigSize?.intValue == 0, "oversized log is truncated to zero")
+    check(inodeBefore != nil && inodeBefore == inodeAfter, "truncation keeps the same inode (launchd fd stays valid)")
+
+    let small = dir.appendingPathComponent("small.log")
+    let smallData = Data(repeating: 0x42, count: maxBytes)
+    try? smallData.write(to: small)
+    check(!WatchdogPaths.truncateIfLarger(small, maxBytes: maxBytes), "leaves a log at the cap unchanged")
+    let smallSize = (try? FileManager.default.attributesOfItem(atPath: small.path))?[.size] as? NSNumber
+    check(smallSize?.intValue == maxBytes, "small log content is untouched")
 }
 
 print("watchdog: install detection")
