@@ -1,12 +1,15 @@
 import Foundation
 import Darwin
 
-// Standalone regression harness for the managed-tunnel askpass lifecycle (TC-08)
-// and the bounded stderr tail / exit drain (TC-09, TC-11).
+// Standalone regression harness for the managed-tunnel askpass lifecycle (TC-08),
+// the bounded stderr tail / exit drain (TC-09, TC-11), and the ssh pid-file
+// start-time verification that keeps the orphan reaper from killing a reused
+// PID (TC-14).
 //
 // Build (from the repo root):
 //   xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 //     Sources/Config/ConfigModels.swift Sources/Support/Log.swift \
+//     Sources/Support/BoundedProcess.swift \
 //     Sources/Tunnel/SSHKeychain.swift Sources/Tunnel/SSHTunnelRunner.swift \
 //     -framework Security Tests/AskpassHarness/main.swift -o /tmp/askpass-harness
 //
@@ -173,6 +176,43 @@ check(heldElapsed >= 0.25 && heldElapsed < 2.0,
 check(heldTail.string.contains("partial diagnostic"), "bytes received before the timeout are kept")
 try? held.fileHandleForWriting.close()
 try? held.fileHandleForReading.close()
+
+print("== ssh pid record / reap policy (TC-14) ==")
+let record = PidRecord(pid: 4242, startSec: 1_698_000_000, startUsec: 123_456)
+check(PidRecord.parse(record.serialized) == record, "pid record round-trips through serialized/parse")
+check(PidRecord.parse(record.serialized + "\n") == record, "trailing newline is accepted")
+check(PidRecord.parse("4242") == nil, "legacy one-field pid file has no verifiable start time")
+check(PidRecord.parse("") == nil, "empty pid file parses to nil")
+check(PidRecord.parse("  \n\t ") == nil, "whitespace-only pid file parses to nil")
+check(PidRecord.parse("4242 1698000000") == nil, "two-field record parses to nil")
+check(PidRecord.parse("4242 1698000000 123456 999") == nil, "extra fields parse to nil")
+check(PidRecord.parse("4242 1698000000 123456x") == nil, "non-numeric start time parses to nil")
+check(PidRecord.parse("-4242 1698000000 123456") == nil, "negative pid parses to nil")
+check(PidRecord.parse("0 1698000000 123456") == nil, "pid 0 parses to nil")
+check(PidRecord.parse("4242 -1 123456") == nil, "negative start second parses to nil")
+check(PidRecord.parse("4242 1698000000 -1") == nil, "negative start usec parses to nil")
+check(PidRecord.parse("4242 1698000000 1000000") == nil, "out-of-range start usec parses to nil")
+check(PidRecord.parse("99999999999999999999 1 1") == nil, "oversized pid parses to nil")
+check(PidRecord.parse("\(Int32.max) 18446744073709551615 999999") != nil,
+      "largest representable values parse")
+check(PidRecord.parse("garbage\n" + String(repeating: "9", count: 5000)) == nil,
+      "garbage input parses to nil without crashing")
+
+let recordedStart = (sec: UInt64(1_698_000_000), usec: UInt64(123_456))
+check(SSHTunnelRunner.shouldReap(record: record, currentStart: recordedStart, isSSH: true),
+      "matching start time + ssh comm may be reaped")
+check(!SSHTunnelRunner.shouldReap(record: record,
+                                  currentStart: (sec: 1_698_000_001, usec: 123_456),
+                                  isSSH: true),
+      "start-time mismatch (recycled pid) is never reaped")
+check(!SSHTunnelRunner.shouldReap(record: record,
+                                  currentStart: (sec: 1_698_000_000, usec: 123_457),
+                                  isSSH: true),
+      "microsecond mismatch is never reaped")
+check(!SSHTunnelRunner.shouldReap(record: record, currentStart: recordedStart, isSSH: false),
+      "matching start time but a non-ssh process is never reaped")
+check(!SSHTunnelRunner.shouldReap(record: record, currentStart: nil, isSSH: true),
+      "a process that is gone is never reaped")
 
 print("")
 if failures == 0 {

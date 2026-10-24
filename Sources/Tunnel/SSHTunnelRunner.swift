@@ -44,6 +44,35 @@ final class StderrTail {
     }
 }
 
+/// Identity of an ssh child, as persisted in `ssh.pid`.
+///
+/// A bare PID cannot prove identity after a crash: PID reuse can make both
+/// `kill(pid, 0)` and `ps -o comm=` match an unrelated `ssh` (e.g. the user's
+/// own session). The process start time disambiguates them, so a file without
+/// one is never acted on (TC-14).
+struct PidRecord: Equatable {
+    let pid: Int32
+    let startSec: UInt64
+    let startUsec: UInt64
+
+    var serialized: String { "\(pid) \(startSec) \(startUsec)" }
+
+    /// Returns nil for anything that is not a well-formed three-field record,
+    /// which includes the legacy pid-only format (never trusted, never killed).
+    static func parse(_ raw: String) -> PidRecord? {
+        let fields = raw.split(whereSeparator: {
+            $0 == " " || $0 == "\t" || $0 == "\n" || $0 == "\r"
+        })
+        guard fields.count == 3,
+              let pid = Int64(fields[0]), pid > 0, pid <= Int64(Int32.max),
+              let startSec = UInt64(fields[1]),
+              let startUsec = UInt64(fields[2]), startUsec < 1_000_000 else {
+            return nil
+        }
+        return PidRecord(pid: Int32(pid), startSec: startSec, startUsec: startUsec)
+    }
+}
+
 /// Runs and supervises an SSH SOCKS5 tunnel ("run the tunnel for me" mode).
 ///
 /// Spawns `ssh -N -D <host:port> <user>@<host>` as a foreground child, drains
@@ -578,31 +607,91 @@ final class SSHTunnelRunner: ObservableObject {
     private func writePidFile(_ pid: Int32) {
         let url = Self.pidFileURL
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? String(pid).write(to: url, atomically: true, encoding: .utf8)
+        // The child only exists after `run()`, so its start time can only be read
+        // here. Never guess one: a pid-only fallback is written for diagnostics,
+        // but the reaper refuses to kill it (TC-14).
+        guard let start = Self.processStartTime(pid) else {
+            Log.tunnel.notice("could not read the ssh start time; writing a pid-only file the reaper will not kill")
+            writePidContents(String(pid), to: url)
+            return
+        }
+        writePidContents(PidRecord(pid: pid, startSec: start.sec, startUsec: start.usec).serialized,
+                         to: url)
+    }
+
+    private func writePidContents(_ contents: String, to url: URL) {
+        do {
+            try contents.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            Log.tunnel.error("failed to write \(url.lastPathComponent): \(error.localizedDescription)")
+        }
     }
 
     private func removePidFile() {
         try? FileManager.default.removeItem(at: Self.pidFileURL)
     }
 
-    /// Kills an ssh left over from a previous run (crash/force-quit). Verifies
-    /// the pid is actually `ssh` before signalling so PID reuse is safe.
+    /// Pure reap policy: only a PID whose recorded start time still matches and
+    /// that is still an `ssh` may be killed.
+    static func shouldReap(record: PidRecord,
+                           currentStart: (sec: UInt64, usec: UInt64)?,
+                           isSSH: Bool) -> Bool {
+        guard isSSH, let currentStart else { return false }
+        return currentStart.sec == record.startSec && currentStart.usec == record.startUsec
+    }
+
+    /// Kills an ssh left over from a previous run (crash/force-quit), but only
+    /// when the pid file proves it is still that child: a recycled PID (such as
+    /// the user's own ssh) is never signalled.
     /// Static so the crash watchdog (a separate process) can reap the orphan
     /// even when the app is gone (LC-18).
     static func reapStaleProcess() {
         let url = pidFileURL
-        guard let raw = try? String(contentsOf: url, encoding: .utf8),
-              let pid = Int32(raw.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0 else {
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return }
+        // The file describes one run only; it is never reused after inspection.
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let record = PidRecord.parse(raw) else {
+            // Legacy pid-only file or garbage: identity cannot be proven, so do
+            // not signal anything. A surviving orphan holds the SOCKS port and
+            // surfaces as a port conflict instead of risking an unrelated kill.
+            Log.tunnel.notice("stale ssh pid file has no verifiable start time; skipping reap")
             return
         }
-        defer { try? FileManager.default.removeItem(at: url) }
-        guard pid != getpid(), kill(pid, 0) == 0, isSSHProcess(pid) else { return }
-        Log.tunnel.notice("reaping stale ssh process \(pid)")
-        kill(pid, SIGKILL)
+        guard record.pid != getpid(), let currentStart = processStartTime(record.pid) else {
+            Log.tunnel.debug("stale ssh pid \(record.pid) is gone or cannot be inspected; not killing")
+            return
+        }
+        // Only pay for the `ps` spawn once the start time already matches.
+        let startMatches = currentStart.sec == record.startSec
+            && currentStart.usec == record.startUsec
+        guard shouldReap(record: record,
+                         currentStart: currentStart,
+                         isSSH: startMatches && isSSHProcess(record.pid)) else {
+            Log.tunnel.notice("stale ssh pid \(record.pid) was reused by another process; not killing it")
+            return
+        }
+        Log.tunnel.notice("reaping stale ssh process \(record.pid)")
+        kill(record.pid, SIGKILL)
     }
 
     private func killStaleProcess() {
         Self.reapStaleProcess()
+    }
+
+    /// Kernel start time of a process. Used to prove a PID is still the child we
+    /// recorded: PID reuse otherwise makes a bare PID unsafe to signal (TC-14).
+    private static func processStartTime(_ pid: Int32) -> (sec: UInt64, usec: UInt64)? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let rc = withUnsafeMutablePointer(to: &info) {
+            proc_pidinfo(pid, Int32(PROC_PIDTBSDINFO), 0, $0, size)
+        }
+        // A short read would leave parts of the struct zeroed: refuse to treat
+        // that as a real start time.
+        guard rc == size else { return nil }
+        return (info.pbi_start_tvsec, info.pbi_start_tvusec)
     }
 
     private static func isSSHProcess(_ pid: Int32) -> Bool {
