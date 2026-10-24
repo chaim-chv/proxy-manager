@@ -14,6 +14,7 @@ SCRIPT="$ROOT/revert.sh"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/pm-revert-harness.XXXXXX")"
 FAKEBIN="$WORK/fakebin"
 SLEEP_PID=""
+FAKE_PS_LSTART=""   # fake `ps -o lstart=` output for the current case
 
 cleanup() {
     if [ -n "$SLEEP_PID" ]; then kill -9 "$SLEEP_PID" 2>/dev/null; fi
@@ -61,6 +62,25 @@ expect_stat_gone() { # pid, description
     esac
 }
 
+expect_stat_alive() { # pid, description
+    local stat
+    stat="$(/bin/ps -p "$1" -o stat= 2>/dev/null | tr -d '[:space:]')"
+    case "$stat" in
+        ''|Z*) bad "$2 (process is not running)" ;;
+        *)     ok "$2" ;;
+    esac
+}
+
+# Real start time of a pid in the exact format `ps -o lstart=` prints (C locale,
+# internal spaces preserved so `date -j -f "%a %b %e %T %Y"` can parse it).
+lstart_of() {
+    LC_ALL=C /bin/ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+epoch_of_lstart() {
+    LC_ALL=C date -j -f "%a %b %e %T %Y" "$1" +%s 2>/dev/null
+}
+
 # ── Fakes ────────────────────────────────────────────────────────────────────
 mkdir -p "$FAKEBIN"
 
@@ -106,6 +126,18 @@ FAKE
 cat > "$FAKEBIN/ps" <<'FAKE'
 #!/bin/bash
 printf '%s\n' "$*" >> "$FAKE_LOG_DIR/ps"
+for arg in "$@"; do
+    case "$arg" in
+        lstart=)
+            cat "$FAKE_PS_LSTART" 2>/dev/null
+            exit 0
+            ;;
+        comm=)
+            echo ssh
+            exit 0
+            ;;
+    esac
+done
 echo ssh
 exit 0
 FAKE
@@ -186,6 +218,7 @@ run_revert() { # dir, missing-services, fail-service, skip-app-kill, [extra args
         FAKE_LIST="$dir/list.txt" \
         FAKE_MISSING="$missing" \
         FAKE_FAIL_SERVICE="$fail_svc" \
+        FAKE_PS_LSTART="$FAKE_PS_LSTART" \
         SKIP_APP_KILL="$skip_kill" \
         bash "$SCRIPT" "$@" > "$dir/out.txt" 2>&1
     )
@@ -320,7 +353,11 @@ RC
 sleep 120 &
 SLEEP_PID=$!
 disown 2>/dev/null || true
-printf '%s' "$SLEEP_PID" > "$CASE/support/ssh.pid"
+SSH_LSTART="$(lstart_of "$SLEEP_PID")"
+SSH_SEC="$(epoch_of_lstart "$SSH_LSTART")"
+printf '%s %s 0' "$SLEEP_PID" "$SSH_SEC" > "$CASE/support/ssh.pid"
+printf '%s\n' "$SSH_LSTART" > "$CASE/lstart.txt"
+FAKE_PS_LSTART="$CASE/lstart.txt"
 
 rc="$(run_revert "$CASE" "" "" 1)"
 expect_rc "$rc" 0 "second run (marker only) exits 0"
@@ -380,20 +417,80 @@ expect_rc "$rc" 1 "a failed explicit reset exits non-zero"
 expect_file "$CASE/support/system-proxy-snapshot.json" "a failed explicit reset keeps the snapshot"
 expect_not_contains "$CASE/out.txt" "Done. The system proxy is set to a direct connection" "a failed explicit reset does not claim success"
 
-# ── 4. Managed ssh is reaped (pid verified as ssh first) ─────────────────────
-printf '\n-- managed ssh reaping --\n'
+# ── 4. Managed ssh reaping: pid + kernel start time must both match ──────────
+printf '\n-- managed ssh reaping (3-field record) --\n'
 CASE="$(new_case ssh)"
 printf '%s\n' 'An asterisk (*) denotes that a network service is disabled.' 'Wi-Fi' > "$CASE/list.txt"
 sleep 120 &
 SLEEP_PID=$!
 disown 2>/dev/null || true   # keep bash from printing "Killed: 9" for our own test child
-printf '%s' "$SLEEP_PID" > "$CASE/support/ssh.pid"
+SSH_LSTART="$(lstart_of "$SLEEP_PID")"
+SSH_SEC="$(epoch_of_lstart "$SSH_LSTART")"
+printf '%s %s 0' "$SLEEP_PID" "$SSH_SEC" > "$CASE/support/ssh.pid"
+printf '%s\n' "$SSH_LSTART" > "$CASE/lstart.txt"
+FAKE_PS_LSTART="$CASE/lstart.txt"
 rc="$(run_revert "$CASE" "" "" 1)"
 expect_rc "$rc" 0 "ssh case exits 0"
-expect_contains "$CASE/out.txt" "killed managed ssh tunnel (pid $SLEEP_PID)" "kills the managed ssh process"
+expect_contains "$CASE/out.txt" "killed managed ssh tunnel (pid $SLEEP_PID)" "kills the managed ssh when pid and start time match"
+expect_contains "$CASE/logs/ps" "-o comm=" "verifies the executable is still ssh"
+expect_contains "$CASE/logs/ps" "-o lstart=" "verifies the kernel start time"
 expect_stat_gone "$SLEEP_PID" "the ssh process is gone"
 expect_absent "$CASE/support/ssh.pid" "removes the stale ssh pid file"
 SLEEP_PID=""
+
+# ── 4b. Recorded start time differs: PID was reused, never signal it ─────────
+printf '\n-- managed ssh reaping (start-time mismatch) --\n'
+CASE="$(new_case ssh-mismatch)"
+printf '%s\n' 'An asterisk (*) denotes that a network service is disabled.' 'Wi-Fi' > "$CASE/list.txt"
+sleep 120 &
+SLEEP_PID=$!
+disown 2>/dev/null || true
+SSH_LSTART="$(lstart_of "$SLEEP_PID")"
+SSH_SEC="$(epoch_of_lstart "$SSH_LSTART")"
+printf '%s %s 0' "$SLEEP_PID" "$((SSH_SEC - 3600))" > "$CASE/support/ssh.pid"
+printf '%s\n' "$SSH_LSTART" > "$CASE/lstart.txt"
+FAKE_PS_LSTART="$CASE/lstart.txt"
+rc="$(run_revert "$CASE" "" "" 1)"
+expect_rc "$rc" 0 "mismatched-start case exits 0"
+expect_contains "$CASE/out.txt" "start time differs" "detects the reused pid"
+expect_contains "$CASE/out.txt" "not killing it" "refuses to kill a reused pid"
+expect_stat_alive "$SLEEP_PID" "the process with the mismatched start time survives"
+expect_absent "$CASE/support/ssh.pid" "removes the stale pid file after the mismatch"
+kill -9 "$SLEEP_PID" 2>/dev/null
+SLEEP_PID=""
+
+# ── 4c. Legacy pid-only record: never trusted, never killed ──────────────────
+printf '\n-- managed ssh reaping (legacy pid-only record) --\n'
+CASE="$(new_case ssh-legacy)"
+printf '%s\n' 'An asterisk (*) denotes that a network service is disabled.' 'Wi-Fi' > "$CASE/list.txt"
+sleep 120 &
+SLEEP_PID=$!
+disown 2>/dev/null || true
+printf '%s' "$SLEEP_PID" > "$CASE/support/ssh.pid"
+FAKE_PS_LSTART=""
+rc="$(run_revert "$CASE" "" "" 1)"
+expect_rc "$rc" 0 "legacy pid-only case exits 0"
+expect_contains "$CASE/out.txt" "legacy pid-only record" "recognizes the legacy pid-only format"
+expect_contains "$CASE/out.txt" "skipped the kill for safety" "does not kill from a pid-only file"
+expect_stat_alive "$SLEEP_PID" "the legacy-record process survives"
+expect_absent "$CASE/support/ssh.pid" "removes the legacy pid file"
+kill -9 "$SLEEP_PID" 2>/dev/null
+SLEEP_PID=""
+
+# ── 4d. Malformed / empty pid file: removed, nothing signalled ───────────────
+printf '\n-- managed ssh reaping (malformed record) --\n'
+CASE="$(new_case ssh-malformed)"
+printf '%s\n' 'An asterisk (*) denotes that a network service is disabled.' 'Wi-Fi' > "$CASE/list.txt"
+printf 'not a pid\n' > "$CASE/support/ssh.pid"
+FAKE_PS_LSTART=""
+rc="$(run_revert "$CASE" "" "" 1)"
+expect_rc "$rc" 0 "malformed pid file case exits 0"
+expect_contains "$CASE/out.txt" "malformed ssh pid file" "reports the malformed pid file"
+expect_absent "$CASE/support/ssh.pid" "removes the malformed pid file"
+: > "$CASE/support/ssh.pid"
+rc="$(run_revert "$CASE" "" "" 1)"
+expect_rc "$rc" 0 "empty pid file case exits 0"
+expect_absent "$CASE/support/ssh.pid" "removes an empty pid file"
 
 # ── 5. App kill branch is reachable (fake pkill reports "not running") ───────
 printf '\n-- app kill via pkill --\n'

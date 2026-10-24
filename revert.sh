@@ -15,8 +15,9 @@
 #      `--reset-to-direct` explicitly asks for a direct connection instead;
 #      it clears the proxy and, on success, removes both the marker and any
 #      recovery snapshot.
-#   3. Stops the app and the managed `ssh -N -D` tunnel (ssh.pid, verified to
-#      still be ssh), and sweeps stale askpass temp dirs.
+#   3. Stops the app and the managed `ssh -N -D` tunnel (ssh.pid: pid + kernel
+#      start time must both match, so a reused PID is never killed), and sweeps
+#      stale askpass temp dirs.
 #   4. Removes the shell rc block + env.sh, restores the GUI-session env from
 #      gui-env-snapshot.json (or unsets our vars), and clears the "routing was
 #      on" flag.
@@ -403,34 +404,86 @@ stop_app() {
     fi
 }
 
-# Kills the managed `ssh -N -D` left behind by a crash. The pid file alone is
-# not trusted: a recycled pid must never be killed, so `ps -o comm=` has to
-# still report ssh (mirrors SSHTunnelRunner.reapStaleProcess).
+# True for a non-empty string of ASCII digits (no sign, no spaces).
+is_digits() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# Kills the managed `ssh -N -D` left behind by a crash.
+#
+# `ssh.pid` is `"<pid> <start_sec> <start_usec>"` (TC-14): a bare pid cannot
+# prove identity, because PID reuse could make an unrelated ssh match. Kill only
+# when BOTH the executable is still ssh AND the kernel start time (via
+# `ps -o lstart=`, second granularity → ±1 s) matches the recorded one. A legacy
+# pid-only file, a malformed file, or an unavailable `date`/`lstart` is never
+# signalled (same policy as SSHTunnelRunner.reapStaleProcess).
 reap_ssh() {
     [ -f "$SSH_PID_FILE" ] || { say "no managed ssh tunnel recorded"; return 0; }
-    local pid comm
-    pid="$(tr -dc '0-9' < "$SSH_PID_FILE" 2>/dev/null)"
-    if [ -z "$pid" ]; then
+
+    local pid="" sec="" usec="" extra="" comm="" lstart="" start_epoch="" delta=""
+    read -r pid sec usec extra < "$SSH_PID_FILE" 2>/dev/null || true
+
+    if ! is_digits "$pid" || [ "$pid" -le 0 ] || [ -n "$extra" ]; then
         rm -f "$SSH_PID_FILE"
-        warn "removed unreadable ssh pid file"
+        warn "removed a malformed ssh pid file (no process was signalled)"
         return 0
     fi
-    comm="$("$PS" -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')"
+    if [ -z "$sec" ] || [ -z "$usec" ]; then
+        rm -f "$SSH_PID_FILE"
+        say "ssh.pid is a legacy pid-only record (no start time); skipped the kill for safety"
+        return 0
+    fi
+    if ! is_digits "$sec" || ! is_digits "$usec" || [ "${#sec}" -gt 11 ] \
+        || [ "${#usec}" -gt 6 ] || [ "$usec" -ge 1000000 ]; then
+        rm -f "$SSH_PID_FILE"
+        warn "removed an invalid ssh pid file (no process was signalled)"
+        return 0
+    fi
+
+    comm="$(LC_ALL=C "$PS" -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')"
     case "$comm" in
-        ssh|*/ssh)
-            if kill -9 "$pid" 2>/dev/null; then
-                say "killed managed ssh tunnel (pid $pid)"
-            else
-                say "managed ssh tunnel (pid $pid) already gone"
-            fi
-            ;;
         '')
+            rm -f "$SSH_PID_FILE"
             say "managed ssh tunnel (pid $pid) not running"
+            return 0
             ;;
+        ssh|*/ssh) ;;
         *)
+            rm -f "$SSH_PID_FILE"
             warn "pid $pid from ssh.pid is '$comm', not ssh — not killing it"
+            return 0
             ;;
     esac
+
+    lstart="$(LC_ALL=C "$PS" -p "$pid" -o lstart= 2>/dev/null)"
+    lstart="$(trim "$lstart")"
+    if [ -z "$lstart" ]; then
+        rm -f "$SSH_PID_FILE"
+        warn "cannot read the start time of pid $pid (ps lstart unavailable) — not killing it"
+        return 0
+    fi
+    start_epoch="$(LC_ALL=C date -j -f "%a %b %e %T %Y" "$lstart" +%s 2>/dev/null)"
+    if ! is_digits "$start_epoch"; then
+        rm -f "$SSH_PID_FILE"
+        warn "cannot parse the start time of pid $pid ('$lstart') — not killing it"
+        return 0
+    fi
+    delta=$((start_epoch - sec))
+    [ "$delta" -lt 0 ] && delta=$((-delta))
+    if [ "$delta" -gt 1 ]; then
+        rm -f "$SSH_PID_FILE"
+        warn "pid $pid from ssh.pid was reused (start time differs) — not killing it"
+        return 0
+    fi
+
+    if kill -9 "$pid" 2>/dev/null; then
+        say "killed managed ssh tunnel (pid $pid)"
+    else
+        say "managed ssh tunnel (pid $pid) already gone"
+    fi
     rm -f "$SSH_PID_FILE"
 }
 
