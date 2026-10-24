@@ -93,7 +93,7 @@ struct DashboardView: View {
     @State private var selectedID: UUID?
     @State private var windowVisible = true
 
-    // Long-range chart/top-hosts data, loaded from SQLite. The 2 s timer below
+    // Long-range chart/top-hosts data, loaded from SQLite. The 2 s ticker below
     // only drives a load once the range's cadence has elapsed; one chart + one
     // top query pair may be in flight, and completions are tagged with the
     // generation they were requested under so a stale pair (after a range/top
@@ -108,7 +108,7 @@ struct DashboardView: View {
     @State private var dbRefreshPending = false
 
     private let routeOptions = ["All", "Tunneled", "Direct", "Blocked"]
-    private let seriesTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    @StateObject private var seriesTicker = CoalescedTicker(interval: 2)
 
     private enum TopMetric: String, CaseIterable, Identifiable {
         case hosts = "Hosts"
@@ -134,13 +134,19 @@ struct DashboardView: View {
             refreshLongRange(force: true)
         }
         .onChange(of: windowVisible) { _, visible in
-            guard visible else { return }
+            guard visible else {
+                seriesTicker.stop()
+                return
+            }
+            seriesTicker.start()
             reconcileSelection()
             refreshLongRange(force: true)
         }
         .onChange(of: telemetry.liveRequests.count) { _, _ in reconcileSelection() }
         .onChange(of: telemetry.recentRequests.count) { _, _ in reconcileSelection() }
-        .onReceive(seriesTimer) { _ in refreshLongRange() }
+        .onReceive(seriesTicker.$tick) { _ in refreshLongRange() }
+        .onAppear { if windowVisible { seriesTicker.start() } }
+        .onDisappear { seriesTicker.stop() }
         .background(WindowVisibilityReader(isVisible: $windowVisible))
         #if SCREENSHOT_MODE
         .onAppear {

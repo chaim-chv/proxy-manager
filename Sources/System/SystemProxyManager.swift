@@ -9,20 +9,99 @@ enum ProxyCheck {
     case unknown
 }
 
+/// Admin authorization was needed but the session cannot safely show a dialog.
+/// This is a **deferral**, not a failure: nothing was escalated, and the caller
+/// may retry once the session is interactive again.
+enum ProxyAuthorizationError: Error, LocalizedError {
+    case deferred(reason: String?)
+
+    var errorDescription: String? {
+        "Administrator authorization is needed, but the session is locked or asleep. "
+        + "Proxy Manager will retry when you return."
+    }
+
+    var reason: String? {
+        if case .deferred(let reason) = self { return reason }
+        return nil
+    }
+
+    var isDeferred: Bool { true }
+}
+
+/// Test seam for child-process execution. Production uses `BoundedProcess`.
+struct ProcessRunner {
+    var run: (_ executable: String, _ arguments: [String],
+              _ timeout: TimeInterval, _ killTreeOnTimeout: Bool) -> BoundedProcessResult
+
+    static let live = ProcessRunner { executable, arguments, timeout, killTree in
+        BoundedProcess.run(executable: executable, arguments: arguments,
+                           timeout: timeout, killTreeOnTimeout: killTree)
+    }
+}
+
 /// Manages the macOS system proxy (HTTP + HTTPS) on all network services.
 ///
 /// Mutations use the least privilege that works: the privileged helper daemon
-/// when it's registered, then `networksetup` run directly as the current user
-/// (prompt-free), and only fall back to `osascript ... with administrator
-/// privileges` (a native admin dialog) when direct access genuinely fails.
-/// Read operations run directly.
+/// when it is registered **and** answering, then `networksetup` run directly as
+/// the current user (prompt-free). An `osascript ... with administrator
+/// privileges` dialog is only ever shown for an explicit user action in an
+/// interactive session; a background mutation defers instead. Read operations
+/// run directly.
 final class SystemProxyManager {
     private let helper = HelperXPCClient()
+    private let runner: ProcessRunner
+    private let session: SessionState
+    /// Test seam: overrides the real helper probe. `nil` = probe the daemon.
+    private let helperReadyOverride: (() -> Bool)?
 
     /// Cached tri-state: nil = not yet determined.
     private var helperUsable: Bool?
 
-    init() {}
+    init(runner: ProcessRunner = .live,
+         session: SessionState = .shared,
+         helperReady: (() -> Bool)? = nil) {
+        self.runner = runner
+        self.session = session
+        self.helperReadyOverride = helperReady
+    }
+
+    // MARK: - Helper availability
+
+    /// Whether the privileged helper can serve this session. Probe once (a ping
+    /// costs an XPC round trip) and cache; a later Install Helper action calls
+    /// `invalidateHelperCache()`.
+    private func helperIsReady() -> Bool {
+        if let helperReadyOverride { return helperReadyOverride() }
+        if let usable = helperUsable { return usable }
+        let usable = helper.state.isReady
+        helperUsable = usable
+        if usable {
+            Log.system.notice("auth helper=ready")
+        } else {
+            Log.system.notice("auth helper=unavailable")
+        }
+        return usable
+    }
+
+    /// Drops the cached helper verdict so the next mutation re-probes.
+    func invalidateHelperCache() {
+        helperUsable = nil
+    }
+
+    func currentHelperState() -> HelperState {
+        if let helperReadyOverride { return helperReadyOverride() ? .ready : .notInstalled }
+        return helper.state
+    }
+
+    /// Foreground-only registration (Settings/Onboarding button).
+    func registerHelperFromUser() throws {
+        try helper.registerFromUser()
+        invalidateHelperCache()
+    }
+
+    func openLoginItemsSettings() {
+        helper.openSystemSettingsLoginItems()
+    }
 
     // MARK: - Read (no admin)
 
@@ -143,25 +222,28 @@ final class SystemProxyManager {
         return false
     }
 
-    // MARK: - Mutations (helper → direct-as-user → osascript)
+    // MARK: - Mutations (helper → direct-as-user → osascript, user-initiated only)
 
-    func applyProxy(services: [String], port: UInt16, host: String = "127.0.0.1") throws {
+    func applyProxy(services: [String], port: UInt16, host: String = "127.0.0.1",
+                    allowAdminPrompt: Bool = false) throws {
         guard !services.isEmpty else {
             throw SocketError.message("refusing to apply the system proxy with no network services")
         }
         guard NetworksetupCommands.isValidProxyServer(host) else {
             throw SocketError.message("invalid system proxy host '\(host)'")
         }
-        try runMutations(commands: NetworksetupCommands.applyProxy(services: services, port: Int(port), host: host)) {
+        try runMutations(commands: NetworksetupCommands.applyProxy(services: services, port: Int(port), host: host),
+                         allowAdminPrompt: allowAdminPrompt) {
             try helper.applyProxy(services: services, port: Int(port), host: host)
         }
     }
 
-    func clearProxy(services: [String]) throws {
+    func clearProxy(services: [String], allowAdminPrompt: Bool = false) throws {
         let targets = existingOnly(services)
         guard !targets.isEmpty else { return }
         try runMutations(commands: NetworksetupCommands.clearProxy(services: targets),
-                         tolerateMissingServices: true) {
+                         tolerateMissingServices: true,
+                         allowAdminPrompt: allowAdminPrompt) {
             try helper.clearProxy(services: targets)
         }
     }
@@ -215,15 +297,21 @@ final class SystemProxyManager {
     /// watchdog, which runs as a background LaunchAgent with no UI: the
     /// `osascript` fallback in `clearProxy` must never run there.
     func clearWithoutPrompt(services: [String]) throws {
-        if helper.isRegistered {
+        if helperIsReady() {
             do {
                 try helper.clearProxy(services: services)
+                Log.system.notice("auth path=helper reason=watchdog-clear result=ok")
                 return
             } catch {
+                // The watchdog has no UI and must restore connectivity: try the
+                // prompt-free direct path for any helper failure (a command
+                // rejection here is still better served by a direct retry).
+                helperUsable = false
                 Log.system.warning("watchdog clear via helper failed, using direct: \(error.localizedDescription)")
             }
         }
         try runDirect(NetworksetupCommands.clearProxy(services: services), tolerateMissingServices: true)
+        Log.system.notice("auth path=direct reason=watchdog-clear result=ok")
     }
 
     /// Last-resort sweep after a successful restore: a service that appeared
@@ -268,7 +356,7 @@ final class SystemProxyManager {
         return port == 0 || foundPort == String(port)
     }
 
-    func restore(snapshot: SystemProxySnapshot) throws {
+    func restore(snapshot: SystemProxySnapshot, allowAdminPrompt: Bool = false) throws {
         try Self.checkRestorable(snapshot)
         // A genuinely empty snapshot means there is nothing of ours to restore.
         guard !snapshot.isEmpty else { return }
@@ -277,7 +365,8 @@ final class SystemProxyManager {
         guard !commands.isEmpty else {
             throw SocketError.message("snapshot has no restorable commands (all services filtered or invalid)")
         }
-        try runMutations(commands: commands, tolerateMissingServices: true) {
+        try runMutations(commands: commands, tolerateMissingServices: true,
+                         allowAdminPrompt: allowAdminPrompt) {
             try helper.restoreProxy(snapshot: filtered)
         }
     }
@@ -302,7 +391,8 @@ final class SystemProxyManager {
     /// Restores the user's original proxy state without any chance of an admin
     /// prompt. Used by the crash watchdog (a background process has no UI, so
     /// the `osascript` fallback must never run): it uses the privileged helper
-    /// only if already registered, otherwise `networksetup` directly as the user.
+    /// only if already registered and answering, otherwise `networksetup`
+    /// directly as the user.
     func restoreWithoutPrompt(snapshot: SystemProxySnapshot) throws {
         try Self.checkRestorable(snapshot)
         guard !snapshot.isEmpty else { return }
@@ -311,59 +401,69 @@ final class SystemProxyManager {
         guard !commands.isEmpty else {
             throw SocketError.message("snapshot has no restorable commands (all services filtered or invalid)")
         }
-        if helper.isRegistered {
+        if helperIsReady() {
             do {
                 try helper.restoreProxy(snapshot: filtered)
+                Log.system.notice("auth path=helper reason=watchdog-restore result=ok")
                 return
             } catch {
+                // Prompt-free recovery must not be blocked by a helper error.
+                helperUsable = false
                 Log.system.warning("watchdog restore via helper failed, using direct: \(error.localizedDescription)")
             }
         }
         try runDirect(commands, tolerateMissingServices: true)
-    }
-
-    private func useHelper() -> Bool {
-        if let usable = helperUsable { return usable }
-        let usable: Bool
-        do {
-            try helper.register()
-            usable = helper.isRegistered
-        } catch {
-            usable = false
-        }
-        helperUsable = usable
-        return usable
+        Log.system.notice("auth path=direct reason=watchdog-restore result=ok")
     }
 
     /// Executes a `networksetup` mutation with the least privilege that works:
     ///
-    /// 1. **Helper daemon (root)** — used when registered (signed installs);
-    ///    registration is a one-time admin grant, so toggles never re-prompt.
+    /// 1. **Helper daemon (root)** — used when registered and answering (signed
+    ///    installs); installation is a one-time user action, so toggles never
+    ///    re-prompt.
     /// 2. **`networksetup` as the current user** — HTTP(S)/PAC proxy settings
     ///    for the logged-in user's services are per-user and need no root, so
     ///    this path is prompt-free (this is also why `./revert.sh` never asks).
-    /// 3. **`osascript ... with administrator privileges`** — only when direct
-    ///    access genuinely fails (non-admin account, MDM-managed services),
-    ///    since it pops a native password dialog on every call.
+    /// 3. **`osascript ... with administrator privileges`** — only when
+    ///    `allowAdminPrompt` is true (an explicit user action) **and** the
+    ///    session is interactive. Everything else defers: a background admin
+    ///    prompt can deadlock macOS `authd` and freeze the lock screen.
     private func runMutations(commands: [[String]], tolerateMissingServices: Bool = false,
+                              allowAdminPrompt: Bool,
                               viaHelper: () throws -> Void) throws {
         guard !commands.isEmpty else {
             throw SocketError.message("refusing to run an empty networksetup command list")
         }
-        if useHelper() {
+        if helperIsReady() {
             do {
                 try viaHelper()
+                Log.system.notice("auth path=helper result=ok")
                 return
-            } catch {
-                // Helper failed at runtime — don't trust it again this session.
+            } catch let error as ProxyHelperError where error.isTransportFailure {
+                // Helper went away mid-session — don't trust it again until the
+                // user re-installs/re-probes it.
                 helperUsable = false
+                Log.system.warning("helper transport failed, using direct: \(error.localizedDescription)")
+            } catch {
+                // A real command/authorization error: propagate it. Falling back
+                // would mask signing and input bugs as "helper unusable".
+                Log.system.error("helper rejected the mutation: \(error.localizedDescription)")
+                throw error
             }
         }
         do {
             try runDirect(commands, tolerateMissingServices: tolerateMissingServices)
+            Log.system.notice("auth path=direct result=ok")
         } catch {
-            Log.system.warning("networksetup as user failed, escalating to admin: \(error.localizedDescription)")
+            let directError = error
+            guard allowAdminPrompt, session.canPrompt else {
+                let reason = allowAdminPrompt ? "session-not-interactive" : "background"
+                Log.system.notice("auth path=deferred reason=\(reason, privacy: .public)")
+                throw ProxyAuthorizationError.deferred(reason: directError.localizedDescription)
+            }
+            Log.system.notice("auth path=admin result=attempt")
             try runAdmin(commands.map { shell($0) })
+            Log.system.notice("auth path=admin result=ok")
         }
     }
 
@@ -381,9 +481,7 @@ final class SystemProxyManager {
         }
         var firstRealError: String?
         for args in commands {
-            let result = BoundedProcess.run(executable: "/usr/sbin/networksetup",
-                                            arguments: args,
-                                            timeout: 20)
+            let result = runner.run("/usr/sbin/networksetup", args, 20, false)
             if let error = result.launchError {
                 throw SocketError.message("networksetup launch failed: \(error)")
             }
@@ -414,9 +512,7 @@ final class SystemProxyManager {
     // MARK: - Helpers
 
     private func runRead(_ args: [String]) -> [String]? {
-        let result = BoundedProcess.run(executable: "/usr/sbin/networksetup",
-                                        arguments: args,
-                                        timeout: 20)
+        let result = runner.run("/usr/sbin/networksetup", args, 20, false)
         // Launch failure, timeout, and a non-zero exit are all failed reads,
         // not empty results: treating them as data would let a safety check
         // mistake a broken read for "clean".
@@ -428,8 +524,16 @@ final class SystemProxyManager {
     /// Runs the commands as root via `osascript`. The script is passed inline
     /// (properly escaped) rather than written to a user-writable temp file, which
     /// closed a TOCTOU root-escalation window.
+    ///
+    /// Guarded by `SessionState.canPrompt` as defense in depth: even a mistaken
+    /// `allowAdminPrompt: true` can never raise a SecurityAgent dialog while the
+    /// screen is locked or the Mac is asleep.
     private func runAdmin(_ commands: [String]) throws {
         guard !commands.isEmpty else { return }
+        guard session.canPrompt else {
+            Log.system.notice("auth path=deferred reason=canPrompt-false")
+            throw ProxyAuthorizationError.deferred(reason: "the session is locked, asleep, or not active")
+        }
         // `set -e` so any individual networksetup failure fails the whole run.
         let shellLine = "set -e; " + commands.joined(separator: "; ")
         let appleScript = "do shell script \"\(appleScriptEscape(shellLine))\" with administrator privileges"
@@ -437,10 +541,7 @@ final class SystemProxyManager {
         // shell, which in turn spawns `networksetup`. Killing only osascript
         // would let the remaining commands finish (and mutate) in the
         // background after we have already reported the failure.
-        let result = BoundedProcess.run(executable: "/usr/bin/osascript",
-                                        arguments: ["-e", appleScript],
-                                        timeout: 180,
-                                        killTreeOnTimeout: true)
+        let result = runner.run("/usr/bin/osascript", ["-e", appleScript], 30, true)
         if let error = result.launchError {
             throw SocketError.message("osascript launch failed: \(error)")
         }

@@ -412,7 +412,7 @@ struct OnboardingView: View {
         configApply()
         model.completeOnboarding()
         if enableNow {
-            model.enable()
+            model.enable(userInitiated: true)
         }
         OnboardingWindowController.shared.finish()
     }

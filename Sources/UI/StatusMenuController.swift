@@ -15,6 +15,8 @@ private let statusMenuWidth: CGFloat = 250
 ///   ● Routing   On / Off / Degraded / Starting… / Stopping…   (status)
 ///   ● Tunnel    Up / Down                                     (status)
 ///   error line (red, only while `lastError` is set)
+///   Retry                                                     (only while
+///                                                            `authorizationDeferred`)
 ///   ─────────────
 ///   ✓ Routing                                                (plain item; ✓
 ///                                                            state = native
@@ -51,6 +53,7 @@ final class StatusMenuController: NSObject {
     private var routingToggleItem: NSMenuItem?
     private var launchAtLoginItem: NSMenuItem?
     private var errorMenuItem: NSMenuItem?
+    private var retryMenuItem: NSMenuItem?
     private var restartMenuItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
     private var appControlItem: NSMenuItem?
@@ -85,6 +88,13 @@ final class StatusMenuController: NSObject {
         errorItem.isHidden = true
         errorMenuItem = errorItem
         menu.addItem(errorItem)
+
+        let retry = NSMenuItem(title: "Retry", action: #selector(retryDeferredApply), keyEquivalent: "")
+        retry.target = self
+        retry.isHidden = true
+        retry.toolTip = "Retry the change that needed administrator approval."
+        retryMenuItem = retry
+        menu.addItem(retry)
 
         menu.addItem(.separator())
 
@@ -158,6 +168,9 @@ final class StatusMenuController: NSObject {
         model.$lastError.receive(on: main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &cancellables)
+        model.$authorizationDeferred.receive(on: main)
+            .sink { [weak self] _ in self?.refresh() }
+            .store(in: &cancellables)
         model.$config.receive(on: main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &cancellables)
@@ -205,6 +218,7 @@ final class StatusMenuController: NSObject {
             errorRowView.update(text: error)
         }
         errorMenuItem?.isHidden = model.lastError == nil
+        retryMenuItem?.isHidden = !model.authorizationDeferred
         restartMenuItem?.isHidden = !model.config.tunnel.supervised
         refreshAppControl()
     }
@@ -312,6 +326,10 @@ final class StatusMenuController: NSObject {
 
     @objc private func toggleRouting() {
         model.toggle()
+    }
+
+    @objc private func retryDeferredApply() {
+        model.retryDeferredApply()
     }
 
     @objc private func toggleLaunchAtLogin() {

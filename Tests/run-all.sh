@@ -155,6 +155,15 @@ run_harness ShellEnvHarness \
   Sources/System/ShellEnvInjector.swift \
   Tests/ShellEnvHarness/main.swift
 
+run_harness SessionGateHarness \
+  -framework AppKit -framework ServiceManagement \
+  Sources/Support/BoundedProcess.swift Sources/Support/Log.swift \
+  Sources/Support/ActivityController.swift \
+  Sources/System/SessionState.swift Sources/System/HelperProtocol.swift \
+  Sources/System/HelperXPCClient.swift Sources/System/SystemProxyManager.swift \
+  Sources/Socks/Socket.swift Sources/Proxy/HostClassifier.swift \
+  Tests/SessionGateHarness/main.swift
+
 # revert.sh is the user's emergency lifeline; it is a shell script, so it has a
 # shell harness (fakes for networksetup/launchctl/defaults/pkill/ps + temp HOME).
 run_script_harness RevertHarness Tests/RevertHarness/run.sh
@@ -164,7 +173,8 @@ run_harness WatchdogHarness \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/Support/Log.swift Sources/Support/BoundedProcess.swift \
   Sources/Support/Watchdog.swift \
-  Sources/System/HelperProtocol.swift Sources/System/HelperXPCClient.swift \
+  Sources/System/HelperProtocol.swift Sources/System/SessionState.swift \
+  Sources/System/HelperXPCClient.swift \
   Sources/System/SystemProxyManager.swift Sources/System/ShellEnvInjector.swift \
   Sources/System/GuiEnvInjector.swift \
   Sources/Tunnel/SSHKeychain.swift Sources/Tunnel/SSHTunnelRunner.swift \

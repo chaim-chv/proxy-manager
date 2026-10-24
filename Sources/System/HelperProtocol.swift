@@ -255,4 +255,7 @@ enum NetworksetupCommands {
     func applyProxy(services: [String], port: Int, host: String, withReply reply: @escaping (Bool, String?) -> Void)
     func clearProxy(services: [String], withReply reply: @escaping (Bool, String?) -> Void)
     func restoreProxy(snapshot: [String: [String: String]], withReply reply: @escaping (Bool, String?) -> Void)
+    /// Liveness check used by `HelperXPCClient.state`; proves the daemon is
+    /// running *and* accepts this client before any mutation relies on it.
+    func ping(withReply reply: @escaping (Bool) -> Void)
 }

@@ -727,6 +727,14 @@ struct SystemSettingsView: View {
                     SettingsToggleRow(title: "Publish proxy env vars to GUI apps", isOn: model.binding(\.system.injectGuiEnv))
                 }
 
+                SettingsGroup(
+                    title: "Administrator access",
+                    help: "Some system proxy changes need administrator rights. The privileged helper makes them without a password prompt; without it the app runs `networksetup` as you, which covers normal per-user proxy settings. If neither path works the change is deferred and offered as a retry. Only a Developer-ID signed app installed in /Applications can register the helper — an ad-hoc build cannot."
+                ) {
+                    helperStatus
+                }
+                .task { model.refreshHelperState() }
+
                 SettingsGroup(title: "Quit behavior",
                               help: "Restoring on quit puts your original macOS proxy settings back when you quit the app normally.") {
                     VStack(spacing: 0) {
@@ -742,6 +750,68 @@ struct SystemSettingsView: View {
                         )
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder private var helperStatus: some View {
+        switch model.helperState {
+        case .ready:
+            helperInfo(
+                title: "Helper installed",
+                captions: ["Routing uses the helper, so no password prompt."],
+                icon: "checkmark.seal.fill",
+                tint: .green
+            )
+        case .notInstalled:
+            helperInfo(
+                title: "Helper not installed",
+                captions: ["Install it once to let Proxy Manager change system settings without asking for your password."],
+                icon: "seal",
+                tint: .secondary,
+                actionTitle: "Install Helper",
+                action: { model.installHelper() }
+            )
+        case .requiresApproval:
+            helperInfo(
+                title: "Helper needs approval",
+                captions: ["Approve Proxy Manager in System Settings → Login Items & Extensions."],
+                icon: "exclamationmark.triangle.fill",
+                tint: .orange,
+                actionTitle: "Open Login Items",
+                action: { model.openLoginItemsSettings() }
+            )
+        case .unavailable(let reason):
+            helperInfo(
+                title: "Helper unavailable",
+                captions: [
+                    reason,
+                    "Proxy Manager falls back to running networksetup directly. Ad-hoc builds cannot install the helper.",
+                ],
+                icon: "exclamationmark.triangle.fill",
+                tint: .orange
+            )
+        }
+    }
+
+    private func helperInfo(
+        title: String,
+        captions: [String],
+        icon: String,
+        tint: Color,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) -> some View {
+        SettingsRow {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                ForEach(captions, id: \.self) { SettingsCaption(text: $0) }
+            }
+            Spacer()
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
             }
         }
     }

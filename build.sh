@@ -17,6 +17,9 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 DAEMONS_DIR="$APP_BUNDLE/Contents/Library/LaunchDaemons"
+# Canonical SMAppService.daemon location. The plist stays in LaunchDaemons;
+# `BundleProgram` points here (relative to the app bundle).
+HELPER_TOOLS_DIR="$APP_BUNDLE/Contents/Library/HelperTools"
 FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
 
 # Sparkle (vendored): linked, embedded, and signed into the bundle. The feed URL
@@ -61,10 +64,20 @@ fi
 #   IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh 1.0.0
 IDENTITY="${IDENTITY:--}"
 
+# Hardened runtime enables library validation, which requires the app and the
+# embedded Sparkle framework to share a Team ID. Ad-hoc builds have no Team ID,
+# so dyld would refuse to load Sparkle. Only a real Developer ID build gets the
+# hardened-runtime flag; ad-hoc stays non-hardened so it can launch.
+if [ "$IDENTITY" = "-" ]; then
+    SIGN_RUNTIME=""
+else
+    SIGN_RUNTIME="--options runtime"
+fi
+
 echo "🔨 Building $APP_NAME v$VERSION for $ARCH (macOS $MIN_MACOS+)..."
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR" "$FRAMEWORKS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR" "$FRAMEWORKS_DIR" "$HELPER_TOOLS_DIR"
 
 if [ -n "${SPARKLE_PUBLIC_KEY:-}" ]; then
     SPARKLE_KEY_PLIST="    <key>SUPublicEDKey</key>
@@ -166,7 +179,7 @@ ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 
 # Compile the privileged helper daemon (no Sparkle).
 unset EXTRA_LINK_FLAGS
-compile "$ARCH" "$DAEMONS_DIR/$HELPER_NAME" "${HELPER_SOURCES[@]}"
+compile "$ARCH" "$HELPER_TOOLS_DIR/$HELPER_NAME" "${HELPER_SOURCES[@]}"
 
 # Embed the launch daemon plist (used by SMAppService.daemon).
 cat > "$DAEMONS_DIR/$HELPER_NAME.plist" <<EOF
@@ -176,6 +189,8 @@ cat > "$DAEMONS_DIR/$HELPER_NAME.plist" <<EOF
 <dict>
     <key>Label</key>
     <string>$HELPER_NAME</string>
+    <key>BundleProgram</key>
+    <string>Contents/Library/HelperTools/$HELPER_NAME</string>
     <key>MachServices</key>
     <dict>
         <key>$HELPER_NAME</key>
@@ -202,18 +217,25 @@ sign_sparkle() {
     [ -d "$fw" ] || return 0
     for xpc in Installer Downloader; do
         [ -d "$b/XPCServices/$xpc.xpc" ] && \
-            codesign --force --options runtime --preserve-metadata=entitlements \
+            codesign --force $SIGN_RUNTIME --preserve-metadata=entitlements \
                 --sign "$IDENTITY" "$b/XPCServices/$xpc.xpc"
     done
     [ -f "$b/Autoupdate" ] && \
-        codesign --force --options runtime --sign "$IDENTITY" "$b/Autoupdate"
+        codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$b/Autoupdate"
     [ -d "$b/Updater.app" ] && \
-        codesign --force --options runtime --sign "$IDENTITY" "$b/Updater.app"
-    codesign --force --options runtime --sign "$IDENTITY" "$fw"
+        codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$b/Updater.app"
+    codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$fw"
 }
 
 sign_sparkle
-codesign --force --sign "$IDENTITY" "$DAEMONS_DIR/$HELPER_NAME"
-codesign --force --sign "$IDENTITY" "$APP_BUNDLE"
+codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$HELPER_TOOLS_DIR/$HELPER_NAME"
+codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$APP_BUNDLE"
+
+if [ "$IDENTITY" = "-" ]; then
+    echo "⚠️  Ad-hoc build: the privileged helper cannot register (ad-hoc signatures have no Team ID)." >&2
+    echo "    Admin prompts are disabled/deferred; direct networksetup (per-user proxy settings) still works." >&2
+    echo "    Ad-hoc builds are intentionally not hardened so they can load the vendored Sparkle framework." >&2
+    echo "    For the helper, build with: IDENTITY=\"Developer ID Application: … (TEAMID)\" ./build.sh $VERSION" >&2
+fi
 
 echo "✅ Done! $APP_NAME.app v$VERSION is ready in $OUTPUT_DIR"

@@ -247,6 +247,11 @@ final class TelemetryStore: ObservableObject {
     private(set) var lastRetentionDeleteChunks = 0
 
     private var flusher: DispatchSourceTimer?
+    /// Guards `flusher`/`flusherIdle`: `startFlusher` runs on `dbQueue` while
+    /// `setFlusherIdle` may be called from main.
+    private let flusherLock = NSLock()
+    private var flusherIdle = false
+
     /// Set by the one-shot setup block once it has finished (whether or not the
     /// DB could be opened). Guarded by `lock`; read through `isReady`.
     private var setupComplete = false
@@ -571,10 +576,44 @@ final class TelemetryStore: ObservableObject {
 
     private func startFlusher() {
         let t = DispatchSource.makeTimerSource(queue: flusherQueue)
-        t.schedule(deadline: .now() + 0.1, repeating: 0.1)
         t.setEventHandler { [weak self] in self?.flush() }
-        t.resume()
+        flusherLock.lock()
         flusher = t
+        let idle = flusherIdle
+        flusherLock.unlock()
+        scheduleFlusher(t, idle: idle)
+        t.resume()
+    }
+
+    /// Coalesces the flusher while nothing can observe it (routing off and no
+    /// window open). A 10 Hz timer keeps the app out of App Nap even when there
+    /// is no work; the idle cadence still flushes within a few seconds so
+    /// in-flight telemetry is never stranded.
+    func setFlusherIdle(_ idle: Bool) {
+        flusherLock.lock()
+        let changed = flusherIdle != idle
+        flusherIdle = idle
+        let timer = flusher
+        flusherLock.unlock()
+        guard let timer, changed else { return }
+        scheduleFlusher(timer, idle: idle)
+        if !idle { flusherQueue.async { [weak self] in self?.flush() } }
+        telemetryLog.debug("flusher cadence: \(idle ? "idle/coalesced" : "active", privacy: .public)")
+    }
+
+    /// Test seam: the currently configured cadence.
+    var isFlusherIdle: Bool {
+        flusherLock.lock()
+        defer { flusherLock.unlock() }
+        return flusherIdle
+    }
+
+    private func scheduleFlusher(_ timer: DispatchSourceTimer, idle: Bool) {
+        if idle {
+            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(2))
+        } else {
+            timer.schedule(deadline: .now() + 0.1, repeating: 0.1, leeway: .milliseconds(25))
+        }
     }
 
     /// Test seam: run one flush tick synchronously on the flusher's serial

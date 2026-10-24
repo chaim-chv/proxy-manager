@@ -208,7 +208,10 @@ enum WatchdogController {
             <key>RunAtLoad</key>
             <true/>
             <key>KeepAlive</key>
-            <true/>
+            <dict>
+                <key>SuccessfulExit</key>
+                <false/>
+            </dict>
             <key>ThrottleInterval</key>
             <integer>10</integer>
             <key>ProcessType</key>

@@ -31,6 +31,12 @@ final class AppModel: ObservableObject {
     @Published var showOnboarding: Bool = false
     @Published var sshRunning: Bool = false
     @Published var sshError: String?
+    /// Live privileged-helper health, shown in Settings. `.notInstalled` until
+    /// the (background) probe answers.
+    @Published var helperState: HelperState = .notInstalled
+    /// True when a proxy mutation deferred because the session could not show
+    /// an authorization dialog. The UI offers a user-initiated retry.
+    @Published var authorizationDeferred: Bool = false
 
     /// Navigation requests from the dashboard inspector: which Settings section
     /// to reveal and (optionally) which target rule to highlight.
@@ -67,10 +73,23 @@ final class AppModel: ObservableObject {
     private var saveDebounce: DispatchWorkItem?
     private let onboardingKey = "hasCompletedOnboarding"
 
-    // Held while routing is enabled so macOS App Nap cannot suspend the proxy.
-    private var activityToken: NSObjectProtocol?
+    // Short-lived App Nap tokens around system-proxy mutations only. There is
+    // deliberately no session-lifetime token: the app must be able to nap while
+    // the proxy is idle (see docs/tasks/authd-unlock-deadlock/04-app-nap.md).
+    private let activity = ActivityController()
     private let pathMonitor = NWPathMonitor()
     private var workspaceObservers: [NSObjectProtocol] = []
+    /// Main-thread-only: a mutation that deferred because the session could not
+    /// prompt. Retried (still prompt-free) when the session becomes interactive.
+    private var deferredIntent: DeferredIntent?
+    /// Main-thread-only: launch auto-enable is waiting for an interactive session.
+    private var pendingAutoEnable = false
+    /// Listener for "session became interactive", registered once per app run.
+    private var sessionObserver: UUID?
+    /// Main-thread: bounded re-check while an auto-enable or deferred mutation is
+    /// pending, so a missed unlock notification cannot strand it. Never prompts.
+    private var deferredRetryTimer: DispatchSourceTimer?
+    private enum DeferredIntent { case enable, disable }
     // Serializes managed-tunnel side effects (Keychain delete, SSH apply/stop)
     // so concurrent callers cannot interleave an auth change with a spawn.
     // Tunnel state below is owned by this queue only (LC-20).
@@ -132,21 +151,23 @@ final class AppModel: ObservableObject {
             tunnelSupervisor.start()
             syncManagedTunnel(config)
             observeSystemEvents()
+            refreshHelperState()
 
             if UserDefaults.standard.bool(forKey: wasOnKey) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    self?.enable()
-                }
+                scheduleAutoEnableWhenInteractive()
             }
         }
 
         AppWindowTracker.shared.onChange = { [weak self] in
             self?.applyIconMode()
+            self?.updateTelemetryFlusherMode()
         }
+        updateTelemetryFlusherMode()
 
         Log.app.notice("ProxyManager initialized (config v\(self.config.version))")
         applyAppearance()
         applyIconMode()
+        updateTelemetryFlusherMode()
         DemoMode.apply(to: self)
     }
 
@@ -182,7 +203,9 @@ final class AppModel: ObservableObject {
     private func observeSystemEvents() {
         let center = NSWorkspace.shared.notificationCenter
         let wake = center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.reapplyAfterSystemChange(reason: "wake")
+            // Let the network stack settle first; the re-apply is still
+            // prompt-free (the screen is often still locked right after wake).
+            self?.scheduleReapply(reason: "wake", after: 3)
         }
         workspaceObservers.append(wake)
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -194,6 +217,38 @@ final class AppModel: ObservableObject {
             }
         }
         pathMonitor.start(queue: DispatchQueue(label: "com.proxymanager.pathmonitor"))
+
+        // Unlock/wake retries a deferred (locked-session) mutation and the
+        // launch auto-enable — both without a prompt.
+        sessionObserver = SessionState.shared.onBecameInteractive { [weak self] in
+            self?.sessionBecameInteractive()
+        }
+    }
+
+    private func scheduleReapply(reason: String, after delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            // A wake can also be the first moment the login session is usable
+            // again; let the deferred/auto-enable paths re-check (still
+            // prompt-free).
+            self?.sessionBecameInteractive()
+            self?.reapplyAfterSystemChange(reason: reason)
+        }
+    }
+
+    /// Runs on main when the session becomes interactive (unlock/wake/activate).
+    private func sessionBecameInteractive() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.sessionBecameInteractive() }
+            return
+        }
+        if pendingAutoEnable, state == .off, SessionState.shared.isInteractive {
+            pendingAutoEnable = false
+            ensureDeferredRetryTimer()
+            Log.app.notice("auto-enable: session is interactive; enabling prompt-free")
+            enable(userInitiated: false)
+            return
+        }
+        retryDeferredGrant(promptAllowed: false)
     }
 
     /// Runs on main; everything the work item needs is captured here so the
@@ -225,33 +280,27 @@ final class AppModel: ObservableObject {
                     WatchdogController.arm(port: port)
                 }
                 try self.ensureSnapshotCovers(services)
-                try self.systemProxyManager.applyProxy(services: services, port: port,
-                                                       host: self.systemProxyHost(bindHost))
+                try self.withApplyActivity("Re-applying proxy after \(reason)") {
+                    try self.systemProxyManager.applyProxy(
+                        services: services, port: port,
+                        host: self.systemProxyHost(bindHost),
+                        allowAdminPrompt: false)
+                }
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
+                self.clearDeferredState(only: .enable)
             } catch {
+                self.noteDeferredIfNeeded(error, intent: .enable)
                 self.setLastError("Failed to re-apply proxy after \(reason): \(error.localizedDescription)")
                 Log.app.error("re-apply after \(reason) failed: \(error.localizedDescription)")
             }
         }
     }
 
-    /// Prevents App Nap from suspending the proxy while routing is active.
-    private func beginProxyActivity() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.activityToken == nil else { return }
-            self.activityToken = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiatedAllowingIdleSystemSleep, .suddenTerminationDisabled, .automaticTerminationDisabled],
-                reason: "Proxy routing is enabled")
-        }
-    }
-
-    private func endProxyActivity() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, let token = self.activityToken else { return }
-            ProcessInfo.processInfo.endActivity(token)
-            self.activityToken = nil
-        }
+    /// Holds a short-lived App Nap token for exactly one proxy mutation. Never
+    /// held while idle, so macOS can nap the menu-bar process.
+    private func withApplyActivity<T>(_ reason: String, _ body: () throws -> T) rethrows -> T {
+        try activity.withActivity(reason, body)
     }
 
     // MARK: - Snapshot coverage
@@ -334,10 +383,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Toggle
 
+    /// Explicit user toggle (status menu, dashboard). This is the only place
+    /// that may allow an admin prompt.
     func toggle() {
+        SessionState.shared.noteUserAction()
         switch state {
-        case .off: enable()
-        case .on, .degraded: disable()
+        case .off: enable(userInitiated: true)
+        case .on, .degraded: disable(userInitiated: true)
         default: break
         }
     }
@@ -352,10 +404,15 @@ final class AppModel: ObservableObject {
         return trimmed
     }
 
-    func enable() {
+    /// - Parameter userInitiated: true only from an explicit user action. A
+    ///   background enable (login, wake, retry) passes false and defers instead
+    ///   of prompting.
+    func enable(userInitiated: Bool = false) {
         guard state == .off else { return }
+        if userInitiated { SessionState.shared.noteUserAction() }
+        pendingAutoEnable = false
+        ensureDeferredRetryTimer()
         setState(.starting)
-        beginProxyActivity()
         let cfg = config
         let port = cfg.proxy.port
         let bindHost = cfg.proxy.bindHost
@@ -401,8 +458,11 @@ final class AppModel: ObservableObject {
                 // through (some services already modified), so the catch below must
                 // roll back whenever we've started touching the system proxy.
                 touchedSystemProxy = true
-                try self.systemProxyManager.applyProxy(services: services, port: port,
-                                                       host: self.systemProxyHost(bindHost))
+                try self.withApplyActivity("Enabling proxy routing") {
+                    try self.systemProxyManager.applyProxy(services: services, port: port,
+                                                           host: self.systemProxyHost(bindHost),
+                                                           allowAdminPrompt: userInitiated)
+                }
 
                 self.appliedPort = port
                 self.appliedBindHost = bindHost
@@ -410,22 +470,31 @@ final class AppModel: ObservableObject {
                                   injectEnabled: cfg.system.injectShellEnv,
                                   rcFiles: cfg.system.managedShellRcs)
                 self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
+                self.clearDeferredState()
                 self.finalizeState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded, recoveryFailed: false)
                 Log.app.notice("enable(): routing enabled (tunnelUp=\(self.tunnelSupervisor.isTunnelUp))")
             } catch {
-                // Roll back so we never leave the system proxy dangling.
+                // Roll back so we never leave the system proxy dangling. Recovery
+                // never prompts, even when the user's own enable may have.
                 Log.app.error("enable() failed, rolling back: \(error.localizedDescription)")
+                self.noteDeferredIfNeeded(error, intent: .enable)
                 if touchedSystemProxy {
                     var rolledBack = true
                     if let snap = self.snapshot {
-                        do { try self.systemProxyManager.restore(snapshot: snap) }
-                        catch {
+                        do {
+                            try self.withApplyActivity("Rolling back the system proxy") {
+                                try self.systemProxyManager.restore(snapshot: snap, allowAdminPrompt: false)
+                            }
+                        } catch {
                             rolledBack = false
                             Log.app.error("enable() rollback restore failed: \(error.localizedDescription)")
                         }
                     } else {
-                        do { try self.systemProxyManager.clearProxy(services: services) }
-                        catch {
+                        do {
+                            try self.withApplyActivity("Clearing the system proxy") {
+                                try self.systemProxyManager.clearProxy(services: services, allowAdminPrompt: false)
+                            }
+                        } catch {
                             rolledBack = false
                             Log.app.error("enable() rollback clear failed: \(error.localizedDescription)")
                         }
@@ -442,7 +511,6 @@ final class AppModel: ObservableObject {
                         UserDefaults.standard.set(false, forKey: self.wasOnKey)
                         WatchdogController.disarm()
                         self.proxyServer.stop()
-                        self.endProxyActivity()
                         // A successful rollback leaves the system proxy exactly
                         // as we found it: nothing is left to recover.
                         self.finalizeState(.off, recoveryFailed: false)
@@ -479,7 +547,6 @@ final class AppModel: ObservableObject {
                     let hasRecoverySnapshot = !(self.snapshot?.isEmpty ?? true)
                     if !hasRecoverySnapshot {
                         if startedListener { self.proxyServer.stop() }
-                        self.endProxyActivity()
                     }
                     // A listener kept alive here may be serving a dangling proxy
                     // from a previous crash, so report degraded rather than off.
@@ -492,8 +559,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func disable() {
+    /// - Parameter userInitiated: true only from an explicit user action. A
+    ///   background disable (deferred retry, quit) passes false and defers
+    ///   instead of prompting.
+    func disable(userInitiated: Bool = false) {
         guard state.isActive else { return }
+        if userInitiated { SessionState.shared.noteUserAction() }
         setState(.stopping)
         let cfg = config
         Log.app.notice("disable(): stopping")
@@ -503,7 +574,9 @@ final class AppModel: ObservableObject {
             let sweepPort = self.appliedPort != 0 ? self.appliedPort : cfg.proxy.port
             do {
                 if let snap = self.snapshot {
-                    try self.systemProxyManager.restore(snapshot: snap)
+                    try self.activity.withActivity("Disabling the system proxy") {
+                        try self.systemProxyManager.restore(snapshot: snap, allowAdminPrompt: userInitiated)
+                    }
                     // A service that appeared after enable may have been proxied
                     // without ever entering the snapshot; clear only those.
                     self.systemProxyManager.clearUnsnapshottedLocalProxies(snapshot: snap, port: sweepPort)
@@ -515,7 +588,10 @@ final class AppModel: ObservableObject {
                         throw NSError(domain: "ProxyManager", code: 1,
                                       userInfo: [NSLocalizedDescriptionKey: "cannot read the network service list; cannot confirm the system proxy was cleared"])
                     }
-                    try self.systemProxyManager.clearProxy(services: services)
+                    try self.activity.withActivity("Clearing the system proxy") {
+                        try self.systemProxyManager.clearProxy(services: services,
+                                                              allowAdminPrompt: userInitiated)
+                    }
                 }
                 self.clearSnapshotBestEffort()
                 WatchdogController.disarm()
@@ -525,12 +601,13 @@ final class AppModel: ObservableObject {
                 self.syncGuiEnv(enabled: false, tunnelHost: "")
                 UserDefaults.standard.set(false, forKey: self.wasOnKey)
                 self.proxyServer.stop()
-                self.endProxyActivity()
+                self.clearDeferredState()
                 self.finalizeState(.off, recoveryFailed: false)
                 Log.app.notice("disable(): routing disabled")
             } catch {
                 // Restore failed: keep the proxy running, the snapshot, and the
                 // watchdog so the machine keeps working and can still recover.
+                self.noteDeferredIfNeeded(error, intent: .disable)
                 self.setLastError(error.localizedDescription)
                 // The system proxy may still point at us: a later tunnel flap
                 // must not promote this to ON (LC-21).
@@ -664,11 +741,15 @@ final class AppModel: ObservableObject {
                 WatchdogController.installIfNeeded()
                 WatchdogController.arm(port: port)
             }
-            try systemProxyManager.applyProxy(services: services, port: port,
-                                              host: systemProxyHost(bindHost))
+            try activity.withActivity("Applying a proxy port change") {
+                try systemProxyManager.applyProxy(services: services, port: port,
+                                                  host: systemProxyHost(bindHost),
+                                                  allowAdminPrompt: false)
+            }
             appliedPort = port
             appliedBindHost = bindHost
         } catch {
+            self.noteDeferredIfNeeded(error, intent: .enable)
             Log.app.error("reapply failed, rolling back to \(oldBindHost):\(oldPort): \(error.localizedDescription)")
             proxyServer.stop()
             var s = proxyServer.snapshot()
@@ -681,13 +762,17 @@ final class AppModel: ObservableObject {
                     // Never apply an empty list: `services` was verified
                     // non-empty before the rebind started.
                     try ensureSnapshotCovers(services)
-                    try systemProxyManager.applyProxy(services: services, port: oldPort,
-                                                      host: systemProxyHost(oldBindHost))
+                    try activity.withActivity("Restoring the previous proxy port") {
+                        try systemProxyManager.applyProxy(services: services, port: oldPort,
+                                                          host: systemProxyHost(oldBindHost),
+                                                          allowAdminPrompt: false)
+                    }
                     if watchdog { WatchdogController.arm(port: oldPort) }
                     appliedPort = oldPort
                     appliedBindHost = oldBindHost
                 }
             } catch {
+                self.noteDeferredIfNeeded(error, intent: .enable)
                 setLastError("Failed to apply proxy change and rollback failed: \(error.localizedDescription)")
                 Log.app.error("reapply rollback failed: \(error.localizedDescription)")
                 return
@@ -1165,6 +1250,149 @@ final class AppModel: ObservableObject {
         commitConfig()
     }
 
+    // MARK: - Deferred authorization / helper status
+
+    /// Clears a pending deferred retry after a successful mutation. With
+    /// `only`, the state is cleared only when that intent is pending (a
+    /// successful re-apply must not discard a pending disable).
+    private func clearDeferredState(only intent: DeferredIntent? = nil) {
+        let clear = { [weak self] in
+            guard let self else { return }
+            if let intent, self.deferredIntent != intent { return }
+            self.deferredIntent = nil
+            self.authorizationDeferred = false
+            self.ensureDeferredRetryTimer()
+        }
+        if Thread.isMainThread { clear() } else { DispatchQueue.main.async(execute: clear) }
+    }
+
+    /// Records a deferral and exposes it to the UI. Automatic retries stay
+    /// prompt-free; only the explicit Retry button may prompt.
+    private func noteDeferredIfNeeded(_ error: Error, intent: DeferredIntent) {
+        guard (error as? ProxyAuthorizationError)?.isDeferred == true else { return }
+        let note = { [weak self] in
+            guard let self else { return }
+            // An explicit disable should not be overwritten by a deferred
+            // rollback of the same operation.
+            if self.deferredIntent == nil { self.deferredIntent = intent }
+            self.authorizationDeferred = true
+            Log.app.notice("deferred auth intent=\(intent == .enable ? "enable" : "disable")")
+            self.ensureDeferredRetryTimer()
+        }
+        if Thread.isMainThread { note() } else { DispatchQueue.main.async(execute: note) }
+    }
+
+    private func retryDeferredGrant(promptAllowed: Bool) {
+        guard let intent = deferredIntent else { return }
+        guard SessionState.shared.isInteractive else {
+            if promptAllowed {
+                setLastError("Unlock the screen (and wake the Mac) to authorize this change.")
+            }
+            return
+        }
+        deferredIntent = nil
+        authorizationDeferred = false
+        ensureDeferredRetryTimer()
+        Log.app.notice("deferred retry intent=\(intent == .enable ? "enable" : "disable") prompt=\(promptAllowed)")
+        switch intent {
+        case .enable:
+            if state == .off {
+                enable(userInitiated: promptAllowed)
+            } else if state.isActive {
+                reapplyAfterSystemChange(reason: "deferred retry")
+            }
+        case .disable:
+            if state.isActive { disable(userInitiated: promptAllowed) }
+        }
+    }
+
+    /// Starts a 2 s re-check while an auto-enable or deferred mutation is
+    /// pending; stops as soon as neither is. This only ever calls the
+    /// prompt-free `sessionBecameInteractive()` path, so it cannot raise a
+    /// dialog while the screen is locked.
+    private func ensureDeferredRetryTimer() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.ensureDeferredRetryTimer() }
+            return
+        }
+        guard pendingAutoEnable || deferredIntent != nil else {
+            deferredRetryTimer?.cancel()
+            deferredRetryTimer = nil
+            return
+        }
+        guard deferredRetryTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in self?.deferredRetryTick() }
+        timer.resume()
+        deferredRetryTimer = timer
+    }
+
+    private func deferredRetryTick() {
+        guard pendingAutoEnable || deferredIntent != nil else {
+            ensureDeferredRetryTimer()
+            return
+        }
+        guard SessionState.shared.isInteractive else { return }
+        sessionBecameInteractive()
+        ensureDeferredRetryTimer()
+    }
+
+    /// Explicit user retry (menu/dashboard). This is the only deferred path that
+    /// may prompt, and only because the user just clicked it.
+    func retryDeferredApply() {
+        SessionState.shared.noteUserAction()
+        retryDeferredGrant(promptAllowed: true)
+    }
+
+    /// Launches auto-enable only when the session is interactive; otherwise it
+    /// waits for unlock/wake instead of prompting at login.
+    private func scheduleAutoEnableWhenInteractive() {
+        guard !DemoMode.isEnabled else { return }
+        if SessionState.shared.isInteractive {
+            Log.app.notice("auto-enable: session is interactive")
+            enable(userInitiated: false)
+            return
+        }
+        pendingAutoEnable = true
+        Log.app.notice("auto-enable: waiting for an interactive session")
+        ensureDeferredRetryTimer()
+    }
+
+    /// Re-probes the privileged helper (XPC round trip) off the main thread.
+    func refreshHelperState() {
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            let state = self.systemProxyManager.currentHelperState()
+            DispatchQueue.main.async { self.helperState = state }
+        }
+    }
+
+    /// Foreground Install Helper action (Settings). Never called from a
+    /// background path: registration may show the SMAppService approval UI.
+    func installHelper() {
+        SessionState.shared.noteUserAction()
+        do {
+            try systemProxyManager.registerHelperFromUser()
+            refreshHelperState()
+        } catch {
+            lastError = error.localizedDescription
+            refreshHelperState()
+        }
+    }
+
+    func openLoginItemsSettings() {
+        systemProxyManager.openLoginItemsSettings()
+    }
+
+    /// 10 Hz telemetry flushing is only useful while something can observe it.
+    /// When routing is off and no window is open, slow the flusher so App Nap
+    /// can coalesce the wakeups.
+    private func updateTelemetryFlusherMode() {
+        let active = state.isActive || AppWindowTracker.shared.hasOpenWindow
+        telemetry.setFlusherIdle(!active)
+    }
+
     // MARK: - Internal
 
     /// Pure state transition for a tunnel up/down change.
@@ -1204,6 +1432,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let recoveryFailed { self.recoveryFailed = recoveryFailed }
             self.state = newState
+            self.updateTelemetryFlusherMode()
         }
         if Thread.isMainThread {
             apply()

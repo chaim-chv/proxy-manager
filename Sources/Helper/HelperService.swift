@@ -3,6 +3,12 @@ import Foundation
 /// The object exported over XPC. Runs as root (LaunchDaemon), so `networksetup`
 /// needs no per-call authorization. All arguments are validated before use.
 final class HelperService: NSObject, ProxyManagerHelperProtocol {
+    /// Reaching here already means the listener's Team-ID check passed, so a
+    /// reply is proof of an authorized, live daemon.
+    func ping(withReply reply: @escaping (Bool) -> Void) {
+        reply(true)
+    }
+
     func applyProxy(services: [String], port: Int, host: String, withReply reply: @escaping (Bool, String?) -> Void) {
         guard port >= 1 && port <= 65535 else {
             reply(false, "invalid port")
