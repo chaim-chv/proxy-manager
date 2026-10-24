@@ -33,7 +33,8 @@ final class AppResolver {
     private static let maxPathBytes = 4096
     private static let sockInfoTCP: Int32 = 2
     private static let cacheTTL: TimeInterval = 30
-    private static let bundleCacheLimit = 512
+    /// Internal so the standalone harness can assert the bound.
+    static let bundleCacheLimit = 512
 
     private static let identityCacheLimit = 4096
     private static let portCacheTTL: TimeInterval = 5
@@ -41,12 +42,40 @@ final class AppResolver {
     private static let scanPermits = 6
     private static let scanWaitMs = 100
 
+    /// Bundle/no-bundle entries expire on their own, so an app installed (or
+    /// deleted) while the app runs is picked up without a restart.
+    private static let bundleCacheTTL: TimeInterval = 300
+    /// Upper bound on waiting for another thread's in-flight plist read. The read
+    /// is local; past this we resolve ourselves rather than return a wrong nil.
+    private static let bundleWaitSeconds: TimeInterval = 2
+
     private struct CacheEntry {
         let identity: AppIdentity
         let startSec: UInt64
         let startUsec: UInt64
         let expiresAt: Date
         let cachedAt: Date
+    }
+
+    /// Bundle results are value-typed and small; `lastUsed` drives LRU eviction so
+    /// reaching the cap never discards the whole cache.
+    private struct BundleEntry {
+        let info: AppBundleInfo
+        let expiresAt: Date
+        var lastUsed: Date
+    }
+
+    private struct NoBundleEntry {
+        let expiresAt: Date
+        var lastUsed: Date
+    }
+
+    /// One plist read per path at a time: concurrent misses for the same new
+    /// executable (a connection burst from a just-launched app) share it.
+    private final class InFlightBundleLookup {
+        let condition = NSCondition()
+        var finished = false
+        var info: AppBundleInfo?
     }
 
     private struct PortKey: Hashable {
@@ -76,8 +105,9 @@ final class AppResolver {
 
     private let lock = NSLock()
     private var identityCache: [Int32: CacheEntry] = [:]
-    private var bundleCache: [String: AppBundleInfo] = [:]
-    private var noBundlePaths = Set<String>()
+    private var bundleCache: [String: BundleEntry] = [:]
+    private var noBundlePaths: [String: NoBundleEntry] = [:]
+    private var inFlightBundles: [String: InFlightBundleLookup] = [:]
     private var portCache: [PortKey: PortCacheEntry] = [:]
 
     private let scanSemaphore = DispatchSemaphore(value: AppResolver.scanPermits)
@@ -85,6 +115,7 @@ final class AppResolver {
     private var freeScanBuffers: [ScanBuffers] = []
     private var scanCounter = 0
     private var scanTimeoutCounter = 0
+    private var bundleResolveCounter = 0
 
     /// Whether the private responsible-process API could be resolved. When
     /// false, helper processes still resolve to their enclosing app bundle (and
@@ -262,6 +293,8 @@ final class AppResolver {
         identityCache.removeAll()
         bundleCache.removeAll()
         noBundlePaths.removeAll()
+        inFlightBundles.removeAll()
+        bundleResolveCounter = 0
         portCache.removeAll()
         lock.unlock()
     }
@@ -272,6 +305,30 @@ final class AppResolver {
         lock.lock()
         defer { lock.unlock() }
         return identityCache.count
+    }
+
+    var bundleCacheCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bundleCache.count
+    }
+
+    var noBundlePathsCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return noBundlePaths.count
+    }
+
+    /// Number of `enclosingBundle` calls (one per real plist lookup).
+    var bundleResolveCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return bundleResolveCounter
+    }
+
+    /// Internal test seam: drives the production bundle-cache path.
+    func bundleInfoForTesting(path: String) -> AppBundleInfo? {
+        bundleInfo(forPath: path)
     }
 
     var portCacheCount: Int {
@@ -312,22 +369,123 @@ final class AppResolver {
     }
 
     private func bundleInfo(forPath path: String) -> AppBundleInfo? {
+        let now = Date()
         lock.lock()
-        if let cached = bundleCache[path] { lock.unlock(); return cached }
-        if noBundlePaths.contains(path) { lock.unlock(); return nil }
+        if var entry = bundleCache[path] {
+            if entry.expiresAt > now {
+                entry.lastUsed = now
+                bundleCache[path] = entry
+                lock.unlock()
+                return entry.info
+            }
+            bundleCache.removeValue(forKey: path)
+        }
+        if var entry = noBundlePaths[path] {
+            if entry.expiresAt > now {
+                entry.lastUsed = now
+                noBundlePaths[path] = entry
+                lock.unlock()
+                return nil
+            }
+            noBundlePaths.removeValue(forKey: path)
+        }
+        // Another thread is already reading this path's plist: wait for its
+        // result instead of issuing a duplicate read (TC-26).
+        if let pending = inFlightBundles[path] {
+            lock.unlock()
+            return awaitBundle(pending, path: path)
+        }
+        let lookup = InFlightBundleLookup()
+        inFlightBundles[path] = lookup
+        bundleResolveCounter += 1
         lock.unlock()
 
+        // Reads a real plist: the cache lock is never held across it.
         let info = Self.enclosingBundle(path: path)
+
         lock.lock()
-        if let info {
-            if bundleCache.count >= Self.bundleCacheLimit { bundleCache.removeAll(keepingCapacity: true) }
-            bundleCache[path] = info
-        } else {
-            if noBundlePaths.count >= Self.bundleCacheLimit { noBundlePaths.removeAll(keepingCapacity: true) }
-            noBundlePaths.insert(path)
-        }
+        insertBundleLocked(info, forPath: path, now: Date())
+        lock.unlock()
+
+        lookup.condition.lock()
+        lookup.info = info
+        lookup.finished = true
+        lookup.condition.broadcast()
+        lookup.condition.unlock()
+
+        lock.lock()
+        if inFlightBundles[path] === lookup { inFlightBundles.removeValue(forKey: path) }
         lock.unlock()
         return info
+    }
+
+    /// Waits (bounded) for an in-flight plist read, then resolves directly if the
+    /// leader is stuck past the budget, so a slow filesystem cannot return a
+    /// confidently wrong "no bundle".
+    private func awaitBundle(_ lookup: InFlightBundleLookup, path: String) -> AppBundleInfo? {
+        let deadline = Date().addingTimeInterval(Self.bundleWaitSeconds)
+        lookup.condition.lock()
+        while !lookup.finished {
+            if !lookup.condition.wait(until: deadline) { break }
+        }
+        let finished = lookup.finished
+        let info = lookup.info
+        lookup.condition.unlock()
+        if finished { return info }
+
+        Log.proxy.debug("bundle lookup for \(path) timed out waiting for an in-flight read")
+        lock.lock()
+        bundleResolveCounter += 1
+        lock.unlock()
+        let resolved = Self.enclosingBundle(path: path)
+        lock.lock()
+        insertBundleLocked(resolved, forPath: path, now: Date())
+        lock.unlock()
+        return resolved
+    }
+
+    private func insertBundleLocked(_ info: AppBundleInfo?, forPath path: String, now: Date) {
+        pruneBundleCacheLocked(now: now)
+        let expiresAt = now.addingTimeInterval(Self.bundleCacheTTL)
+        if let info {
+            noBundlePaths.removeValue(forKey: path)
+            bundleCache[path] = BundleEntry(info: info, expiresAt: expiresAt, lastUsed: now)
+            Self.trimBundleCache(&bundleCache, lastUsed: \.lastUsed)
+        } else {
+            bundleCache.removeValue(forKey: path)
+            noBundlePaths[path] = NoBundleEntry(expiresAt: expiresAt, lastUsed: now)
+            Self.trimBundleCache(&noBundlePaths, lastUsed: \.lastUsed)
+        }
+    }
+
+    private func pruneBundleCacheLocked(now: Date) {
+        var expiredBundles: [String] = []
+        for (path, entry) in bundleCache where entry.expiresAt <= now {
+            expiredBundles.append(path)
+        }
+        for path in expiredBundles { bundleCache.removeValue(forKey: path) }
+
+        var expiredNoBundle: [String] = []
+        for (path, entry) in noBundlePaths where entry.expiresAt <= now {
+            expiredNoBundle.append(path)
+        }
+        for path in expiredNoBundle { noBundlePaths.removeValue(forKey: path) }
+    }
+
+    /// Evicts the least-recently-used entries one at a time; never clears the
+    /// whole cache at the cap (TC-26).
+    private static func trimBundleCache<T>(_ cache: inout [String: T],
+                                           lastUsed: KeyPath<T, Date>) {
+        while cache.count > bundleCacheLimit {
+            var oldestKey: String?
+            var oldest = Date.distantFuture
+            for (key, entry) in cache where entry[keyPath: lastUsed] < oldest {
+                oldest = entry[keyPath: lastUsed]
+                oldestKey = key
+            }
+            guard let oldestKey else { break }
+            cache.removeValue(forKey: oldestKey)
+        }
     }
 
     // MARK: - Pure helpers (unit-testable)

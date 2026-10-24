@@ -286,6 +286,98 @@ for fd in burstAcceptedFDs { close(fd) }
 for fd in burstClientFDs { close(fd) }
 close(burstListen.fd)
 
+// 5. Bundle cache (TC-26): repeated lookups hit, concurrent misses coalesce, and
+// the size cap evicts least-recently-used entries instead of clearing everything.
+print("== bundle cache (TC-26) ==")
+let bundleLimit = AppResolver.bundleCacheLimit
+resolver.clearCache()
+
+let cacheApp = tmp + "/CacheApp.app"
+makeBundle(root: cacheApp, bundleId: "com.example.cacheapp", name: "Cache App")
+let cacheExe = cacheApp + "/Contents/MacOS/cacheapp"
+
+let firstBundle = resolver.bundleInfoForTesting(path: cacheExe)
+let firstResolves = resolver.bundleResolveCount
+let secondBundle = resolver.bundleInfoForTesting(path: cacheExe)
+check("bundle: first lookup reads the plist once",
+      firstBundle?.bundleId == "com.example.cacheapp" && firstResolves == 1)
+check("bundle: repeated lookup is a cache hit",
+      resolver.bundleResolveCount == 1 && secondBundle == firstBundle)
+check("bundle: cache holds exactly one entry", resolver.bundleCacheCount == 1)
+check("bundle: a hit is not stored as a no-bundle path", resolver.noBundlePathsCount == 0)
+
+resolver.clearCache()
+check("bundle: clearCache empties the cache",
+      resolver.bundleCacheCount == 0 && resolver.noBundlePathsCount == 0)
+check("bundle: clearCache resets the resolve counter", resolver.bundleResolveCount == 0)
+_ = resolver.bundleInfoForTesting(path: cacheExe)
+check("bundle: clearCache forces a re-resolve", resolver.bundleResolveCount == 1)
+
+resolver.clearCache()
+let coalesceIterations = 32
+let coalesceLock = NSLock()
+var coalescedResults: [AppBundleInfo?] = []
+DispatchQueue.concurrentPerform(iterations: coalesceIterations) { _ in
+    let info = resolver.bundleInfoForTesting(path: cacheExe)
+    coalesceLock.lock()
+    coalescedResults.append(info)
+    coalesceLock.unlock()
+}
+let coalescedMisses = coalescedResults.filter { $0?.bundleId != "com.example.cacheapp" }.count
+check("bundle: \(coalesceIterations) concurrent misses resolve once",
+      resolver.bundleResolveCount == 1)
+check("bundle: every coalesced caller sees the bundle",
+      coalescedResults.count == coalesceIterations && coalescedMisses == 0)
+check("bundle: coalesced burst leaves one cache entry", resolver.bundleCacheCount == 1)
+
+resolver.clearCache()
+let capPaths = (0..<bundleLimit).map { cacheApp + "/Contents/MacOS/cacheapp-\($0)" }
+for path in capPaths { _ = resolver.bundleInfoForTesting(path: path) }
+check("bundle: cache fills to the cap", resolver.bundleCacheCount == bundleLimit)
+let resolvesAtCap = resolver.bundleResolveCount
+_ = resolver.bundleInfoForTesting(path: capPaths[0])
+check("bundle: a full cache still serves hits", resolver.bundleResolveCount == resolvesAtCap)
+var overflowPaths: [String] = []
+for i in 0..<8 {
+    let path = cacheApp + "/Contents/MacOS/cacheapp-extra-\(i)"
+    overflowPaths.append(path)
+    _ = resolver.bundleInfoForTesting(path: path)
+}
+check("bundle: the cap is never cleared wholesale", resolver.bundleCacheCount == bundleLimit)
+let resolvesAfterOverflow = resolver.bundleResolveCount
+check("bundle: every overflowing path was resolved",
+      resolvesAfterOverflow == resolvesAtCap + overflowPaths.count)
+_ = resolver.bundleInfoForTesting(path: capPaths[0])
+check("bundle: the recently used entry survives LRU eviction",
+      resolver.bundleResolveCount == resolvesAfterOverflow)
+_ = resolver.bundleInfoForTesting(path: capPaths[1])
+check("bundle: the least recently used entry was evicted",
+      resolver.bundleResolveCount == resolvesAfterOverflow + 1)
+
+// The same policy applies to paths that have no enclosing bundle.
+print("== no-bundle cache (TC-26) ==")
+resolver.clearCache()
+let missingPaths = (0..<bundleLimit).map { tmp + "/missing-\($0)/Contents/MacOS/tool" }
+for path in missingPaths { _ = resolver.bundleInfoForTesting(path: path) }
+check("no-bundle: cache fills to the cap",
+      resolver.noBundlePathsCount == bundleLimit && resolver.bundleCacheCount == 0)
+let noBundleResolves = resolver.bundleResolveCount
+_ = resolver.bundleInfoForTesting(path: missingPaths[0])
+check("no-bundle: a full cache still serves hits",
+      resolver.bundleResolveCount == noBundleResolves)
+for i in 0..<8 {
+    _ = resolver.bundleInfoForTesting(path: tmp + "/missing-extra-\(i)/Contents/MacOS/tool")
+}
+check("no-bundle: the cap is never cleared wholesale",
+      resolver.noBundlePathsCount == bundleLimit)
+_ = resolver.bundleInfoForTesting(path: missingPaths[0])
+check("no-bundle: the recently used entry survives LRU eviction",
+      resolver.bundleResolveCount == noBundleResolves + 8)
+
+resolver.clearCache()
+check("no-bundle: clearCache empties the cache",
+      resolver.noBundlePathsCount == 0 && resolver.bundleCacheCount == 0)
+
 print("== negative cases ==")
 check("unmatched port pair resolves nil", resolver.resolve(localPort: 1, proxyPort: 1) == nil)
 check("dead PID resolves nil", resolver.identity(forPid: 999_999) == nil)
