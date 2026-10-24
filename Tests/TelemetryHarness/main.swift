@@ -15,6 +15,10 @@ import SQLite3
 
 setbuf(stdout, nil)
 
+/// Tells SQLite to copy the bound string immediately (the Swift `String` bytes
+/// are only valid for the duration of the bind call).
+let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 var failures = 0
 func check(_ name: String, _ condition: Bool) {
     if condition { print("  ok   \(name)") }
@@ -39,6 +43,19 @@ func pumpMain(seconds: TimeInterval) {
     while Date() < deadline {
         RunLoop.main.run(until: Date().addingTimeInterval(0.02))
     }
+}
+
+/// TM-17: the DB open/schema/migration setup runs asynchronously on the store's
+/// serial DB queue, so every test that inspects the database, a setup diagnostic
+/// (`telemetryUnavailable`, `dbQuarantineCount`) or a query result immediately
+/// after construction must first wait for that block (bounded).
+@discardableResult
+func readyStore(_ store: TelemetryStore, timeout: TimeInterval = 30) -> TelemetryStore {
+    if !store.waitUntilReady(timeout: timeout) {
+        failures += 1
+        print("  FAIL store setup did not complete within \(timeout)s")
+    }
+    return store
 }
 
 func openDB(_ path: String) -> OpaquePointer? {
@@ -105,7 +122,7 @@ let tmpDir = NSTemporaryDirectory()
 print("== fresh database writes app columns ==")
 let freshPath = tmpDir + "pm-telemetry-fresh-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: freshPath)
-let store = TelemetryStore(dbURL: URL(fileURLWithPath: freshPath), maxRows: 1000, retentionDays: 1)
+let store = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: freshPath), maxRows: 1000, retentionDays: 1))
 store.record(RequestEvent(host: "a.example", route: .tunnel, app: "Google Chrome", appBundle: "com.google.Chrome"))
 store.record(RequestEvent(host: "b.example", route: .direct, app: "node"))
 store.flushNow()
@@ -159,7 +176,7 @@ if let old = openDB(legacyPath) {
     check("create legacy DB", false)
 }
 
-let store2 = TelemetryStore(dbURL: URL(fileURLWithPath: legacyPath), maxRows: 1000, retentionDays: 1)
+let store2 = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: legacyPath), maxRows: 1000, retentionDays: 1))
 store2.record(RequestEvent(host: "new.example", route: .tunnel, app: "Safari", appBundle: "com.apple.Safari"))
 store2.flushNow()
 
@@ -177,7 +194,7 @@ if let db2 = openDB(legacyPath) {
 print("== locked DB keeps rows queued and writes them after unlock ==")
 let lockedPath = tmpDir + "pm-telemetry-locked-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: lockedPath)
-let lockedStore = TelemetryStore(dbURL: URL(fileURLWithPath: lockedPath), maxRows: 1000, retentionDays: 1)
+let lockedStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: lockedPath), maxRows: 1000, retentionDays: 1))
 let holder = openDB(lockedPath)
 check("holder connection opened", holder != nil)
 check("holder acquired the write lock", exec(holder, "BEGIN IMMEDIATE;") == SQLITE_OK)
@@ -201,8 +218,8 @@ if let db = openDB(lockedPath) {
 print("== bounded DB backlog while a writer lock is held (TM-09) ==")
 let backlogPath = tmpDir + "pm-telemetry-backlog-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: backlogPath)
-let backlogStore = TelemetryStore(dbURL: URL(fileURLWithPath: backlogPath),
-                                  maxRows: 1_000_000, retentionDays: 3650)
+let backlogStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: backlogPath),
+                                             maxRows: 1_000_000, retentionDays: 3650))
 let backlogHolder = openDB(backlogPath)
 check("backlog holder connection opened", backlogHolder != nil)
 check("backlog holder acquired the write lock", exec(backlogHolder, "BEGIN IMMEDIATE;") == SQLITE_OK)
@@ -261,7 +278,7 @@ pumpMain(seconds: 1.0)
 print("== retention trims to maxRows in bounded chunks ==")
 let capPath = tmpDir + "pm-telemetry-cap-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: capPath)
-let capStore = TelemetryStore(dbURL: URL(fileURLWithPath: capPath), maxRows: 100, retentionDays: 3650)
+let capStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: capPath), maxRows: 100, retentionDays: 3650))
 for i in 0..<12_000 {
     capStore.record(RequestEvent(host: "cap\(i).example", route: .direct))
 }
@@ -287,7 +304,7 @@ check("max-rows trim used multiple bounded chunks (12k rows, 5k per batch)",
 print("== retention removes expired rows and keeps recent ones ==")
 let expiryPath = tmpDir + "pm-telemetry-expiry-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: expiryPath)
-let expiryStore = TelemetryStore(dbURL: URL(fileURLWithPath: expiryPath), maxRows: 100_000, retentionDays: 1)
+let expiryStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: expiryPath), maxRows: 100_000, retentionDays: 1))
 let oldTs = Int64(Date().timeIntervalSince1970 * 1000) - 3 * 86_400_000
 for i in 0..<20 {
     expiryStore.record(RequestEvent(ts: oldTs, host: "old\(i).example"))
@@ -309,7 +326,7 @@ if let db = openDB(expiryPath) {
 print("== flushNow checkpoints/truncates the WAL and purge vacuums ==")
 let walPath = tmpDir + "pm-telemetry-wal-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: walPath)
-let walStore = TelemetryStore(dbURL: URL(fileURLWithPath: walPath), maxRows: 1000, retentionDays: 1)
+let walStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: walPath), maxRows: 1000, retentionDays: 1))
 for i in 0..<200 {
     walStore.record(RequestEvent(host: "wal\(i).example"))
 }
@@ -360,7 +377,7 @@ check("cutoff subtraction underflow falls back to Int64.min",
 print("== oversized event fields are clamped in the feed and DB (TM-08) ==")
 let clampPath = tmpDir + "pm-telemetry-clamp-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: clampPath)
-let clampStore = TelemetryStore(dbURL: URL(fileURLWithPath: clampPath), maxRows: 1000, retentionDays: 1)
+let clampStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: clampPath), maxRows: 1000, retentionDays: 1))
 let hugeField = String(repeating: "x", count: 60_000)
 clampStore.record(RequestEvent(host: hugeField, path: hugeField, error: hugeField,
                                app: hugeField, appBundle: hugeField))
@@ -391,8 +408,8 @@ if let db = openDB(clampPath) {
 print("== recentRequests byte budget trims below the row cap (TM-08) ==")
 let budgetPath = tmpDir + "pm-telemetry-budget-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: budgetPath)
-let budgetStore = TelemetryStore(dbURL: URL(fileURLWithPath: budgetPath),
-                                 maxRows: 100_000, retentionDays: 1)
+let budgetStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: budgetPath),
+                                            maxRows: 100_000, retentionDays: 1))
 for _ in 0..<3_000 {
     budgetStore.record(RequestEvent(host: hugeField, path: hugeField, error: hugeField,
                                     app: hugeField, appBundle: hugeField))
@@ -415,11 +432,12 @@ let missingDir = tmpDir + "pm-telemetry-missing-\(getpid())"
 let missingPath = missingDir + "/telemetry.sqlite"
 try? FileManager.default.removeItem(atPath: missingDir)
 let fdsBeforeOpenFailures = openFDCount()
-let badStore = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
+let badStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1))
 check("open failure marks telemetry unavailable", badStore.telemetryUnavailable)
 check("open failure does not report a quarantine", badStore.dbQuarantineCount == 0)
 for _ in 0..<5 {
-    _ = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
+    let failed = TelemetryStore(dbURL: URL(fileURLWithPath: missingPath), maxRows: 1000, retentionDays: 1)
+    _ = failed.waitUntilReady(timeout: 10)
 }
 let fdsAfterOpenFailures = openFDCount()
 check("repeated open failures do not leak file descriptors (\(fdsBeforeOpenFailures) -> \(fdsAfterOpenFailures))",
@@ -437,8 +455,8 @@ try? FileManager.default.removeItem(atPath: corruptPath + "-wal")
 try? FileManager.default.removeItem(atPath: corruptPath + "-shm")
 try? Data("this is definitely not a sqlite database".utf8)
     .write(to: URL(fileURLWithPath: corruptPath))
-let corruptStore = TelemetryStore(dbURL: URL(fileURLWithPath: corruptPath),
-                                  maxRows: 1000, retentionDays: 1)
+let corruptStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: corruptPath),
+                                             maxRows: 1000, retentionDays: 1))
 check("corrupt DB recovery leaves telemetry available", !corruptStore.telemetryUnavailable)
 check("corrupt DB was quarantined exactly once", corruptStore.dbQuarantineCount == 1)
 let corruptBaseName = URL(fileURLWithPath: corruptPath).lastPathComponent
@@ -463,7 +481,7 @@ for name in quarantinedFiles {
 print("== live limit change applies without relaunch ==")
 let livePath = tmpDir + "pm-telemetry-live-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: livePath)
-let liveStore = TelemetryStore(dbURL: URL(fileURLWithPath: livePath), maxRows: 500_000, retentionDays: 7)
+let liveStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: livePath), maxRows: 500_000, retentionDays: 7))
 let twoDaysAgo = Int64(Date().timeIntervalSince1970 * 1000) - 2 * 86_400_000
 liveStore.record(RequestEvent(ts: twoDaysAgo, host: "old-live.example"))
 liveStore.record(RequestEvent(host: "recent-live.example"))
@@ -486,7 +504,7 @@ if let db = openDB(livePath) {
 print("== live maxRows change trims down to the new cap ==")
 let liveCapPath = tmpDir + "pm-telemetry-live-cap-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: liveCapPath)
-let liveCapStore = TelemetryStore(dbURL: URL(fileURLWithPath: liveCapPath), maxRows: 100_000, retentionDays: 3650)
+let liveCapStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: liveCapPath), maxRows: 100_000, retentionDays: 3650))
 for i in 0..<50 {
     liveCapStore.record(RequestEvent(host: "live-cap\(i).example", route: .direct))
 }
@@ -510,7 +528,7 @@ check("setLimits clamps retentionDays to 1...3650", clamped.retentionDays == 365
 print("== purge drops an in-flight session instead of resurrecting it ==")
 let purgePath = tmpDir + "pm-telemetry-purge-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: purgePath)
-let purgeStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgePath), maxRows: 1000, retentionDays: 1)
+let purgeStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: purgePath), maxRows: 1000, retentionDays: 1))
 let purgedSession = purgeStore.beginSession(RequestEvent(host: "purged-live.example", route: .tunnel))
 purgeStore.record(RequestEvent(host: "purged-pending.example", route: .direct))
 purgeStore.purge()
@@ -538,7 +556,7 @@ purgeStore.endSession(markerSession, RequestEvent(host: "marker-live.example", r
 print("== purge + flushNow cannot re-insert a pre-purge batch ==")
 let purgeBatchPath = tmpDir + "pm-telemetry-purge-batch-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: purgeBatchPath)
-let purgeBatchStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgeBatchPath), maxRows: 1000, retentionDays: 1)
+let purgeBatchStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: purgeBatchPath), maxRows: 1000, retentionDays: 1))
 for i in 0..<1_200 {
     purgeBatchStore.record(RequestEvent(host: "purge-batch\(i).example", route: .direct))
 }
@@ -554,7 +572,7 @@ if let db = openDB(purgeBatchPath) {
 print("== purge preserves live active connections and clears stats ==")
 let purgeStatsPath = tmpDir + "pm-telemetry-purge-stats-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: purgeStatsPath)
-let purgeStatsStore = TelemetryStore(dbURL: URL(fileURLWithPath: purgeStatsPath), maxRows: 1000, retentionDays: 1)
+let purgeStatsStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: purgeStatsPath), maxRows: 1000, retentionDays: 1))
 let liveSession = purgeStatsStore.beginSession(RequestEvent(host: "stats-live.example", route: .tunnel))
 purgeStatsStore.record(RequestEvent(host: "stats-pre.example", route: .tunnel,
                                     bytesIn: 10, bytesOut: 20))
@@ -575,8 +593,8 @@ check("a purged session that ends later does not return to the feed",
 print("== analytics reads run on a read-only connection during a write lock (TM-04) ==")
 let analyticsPath = tmpDir + "pm-telemetry-analytics-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: analyticsPath)
-let analyticsStore = TelemetryStore(dbURL: URL(fileURLWithPath: analyticsPath),
-                                    maxRows: 1000, retentionDays: 1)
+let analyticsStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: analyticsPath),
+                                               maxRows: 1000, retentionDays: 1))
 for i in 0..<100 {
     analyticsStore.record(RequestEvent(host: "analytics\(i % 4).example", route: .tunnel))
 }
@@ -644,8 +662,8 @@ check("topApps still completes on the analytics path", appsDone)
 print("== 1,000 session begin/end cycles leave no bookkeeping behind (TM-05) ==")
 let churnPath = tmpDir + "pm-telemetry-churn-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: churnPath)
-let churnStore = TelemetryStore(dbURL: URL(fileURLWithPath: churnPath),
-                                maxRows: 1000, retentionDays: 1)
+let churnStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: churnPath),
+                                           maxRows: 1000, retentionDays: 1))
 var churnHandles: [TelemetryStore.SessionHandle] = []
 for i in 0..<1_000 {
     churnHandles.append(churnStore.beginSession(
@@ -683,9 +701,144 @@ if let db = openDB(churnPath) {
     check("open churn DB", false)
 }
 
+print("== DB setup runs off the caller's thread and gates queries safely (TM-17) ==")
+let asyncPath = tmpDir + "pm-telemetry-async-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: asyncPath)
+// Test seam: hold the setup block for 600 ms so "init returned first" is
+// deterministic instead of a race on how fast the migration happens to be.
+TelemetryStore.setupDelayForTestingMs = 600
+let asyncInitStart = Date()
+let asyncStore = TelemetryStore(dbURL: URL(fileURLWithPath: asyncPath), maxRows: 1000, retentionDays: 1)
+let asyncInitElapsed = Date().timeIntervalSince(asyncInitStart)
+TelemetryStore.setupDelayForTestingMs = 0
+check(String(format: "init returns before the DB setup runs (%.3fs)", asyncInitElapsed),
+      asyncInitElapsed < 0.5)
+check("store is not ready immediately after init", !asyncStore.isReady)
+
+// A query issued before readiness must not crash or touch a nil handle: it
+// falls back to `dbQueue`, which is FIFO behind the setup block.
+var earlySeriesDone = false
+var earlySeriesCount = 0
+asyncStore.chartSeries(rangeSeconds: 3600, bucketMs: 60_000) { series in
+    earlySeriesCount = series.reduce(0) { $0 + $1.count }
+    earlySeriesDone = true
+}
+let asyncReadyStart = Date()
+let asyncReady = asyncStore.waitUntilReady(timeout: 10)
+let asyncReadyElapsed = Date().timeIntervalSince(asyncReadyStart)
+check("waitUntilReady observes the asynchronous setup", asyncReady)
+check(String(format: "waitUntilReady actually waited for setup (%.3fs)", asyncReadyElapsed),
+      asyncReadyElapsed >= 0.3)
+check("isReady stays true after the setup", asyncStore.isReady)
+check("waitUntilReady latches after the setup",
+      asyncStore.waitUntilReady(timeout: 0.01))
+pumpMain(timeout: 5) { earlySeriesDone }
+check("chartSeries before readiness completes without crashing", earlySeriesDone)
+check("chartSeries before readiness returns no rows", earlySeriesCount == 0)
+asyncStore.record(RequestEvent(host: "async.example", route: .tunnel))
+asyncStore.flushNow()
+if let db = openDB(asyncPath) {
+    check("store is usable after the asynchronous setup",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='async.example'") == 1)
+    check("async setup created the per-app columns",
+          columns(db).contains("app") && columns(db).contains("app_bundle"))
+    sqlite3_close(db)
+} else {
+    check("open async-setup DB", false)
+}
+
+print("== a large pre-existing DB is migrated off the caller's thread (TM-17) ==")
+let bigPath = tmpDir + "pm-telemetry-big-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: bigPath)
+let bigRows = 50_000
+if let db = openDB(bigPath) {
+    exec(db, """
+    CREATE TABLE requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, scheme TEXT, method TEXT,
+        host TEXT NOT NULL, port INTEGER, path TEXT, route TEXT NOT NULL, status INTEGER,
+        bytes_in INTEGER DEFAULT 0, bytes_out INTEGER DEFAULT 0, duration_ms INTEGER,
+        error TEXT, src_port INTEGER
+    );
+    """)
+    exec(db, "BEGIN;")
+    var ins: OpaquePointer?
+    if sqlite3_prepare_v2(db, "INSERT INTO requests (ts, host, route, status) VALUES (?, ?, 'TUNNEL', 200);",
+                          -1, &ins, nil) == SQLITE_OK {
+        for i in 0..<bigRows {
+            sqlite3_reset(ins)
+            sqlite3_clear_bindings(ins)
+            sqlite3_bind_int64(ins, 1, Int64(i + 1))
+            "big.example".withCString { _ = sqlite3_bind_text(ins, 2, $0, -1, sqliteTransient) }
+            sqlite3_step(ins)
+        }
+    }
+    sqlite3_finalize(ins)
+    exec(db, "COMMIT;")
+    sqlite3_close(db)
+} else {
+    check("create large legacy DB", false)
+}
+let bigInitStart = Date()
+let bigStore = TelemetryStore(dbURL: URL(fileURLWithPath: bigPath),
+                              maxRows: 1_000_000, retentionDays: 3650)
+let bigInitElapsed = Date().timeIntervalSince(bigInitStart)
+check(String(format: "init on a %d-row DB returns immediately (%.3fs)", bigRows, bigInitElapsed),
+      bigInitElapsed < 1.0)
+check("large/cold DB setup completes", bigStore.waitUntilReady(timeout: 60))
+bigStore.record(RequestEvent(host: "after-big.example", route: .direct))
+bigStore.flushNow()
+if let db = openDB(bigPath) {
+    check("large legacy rows preserved by the async migration",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='big.example'") == bigRows)
+    check("large DB migration added the per-app columns",
+          columns(db).contains("app") && columns(db).contains("app_bundle"))
+    check("writes work after the large DB migration",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='after-big.example'") == 1)
+    sqlite3_close(db)
+} else {
+    check("open large DB", false)
+}
+
+print("== flushNow before readiness is bounded and still persists (TM-17) ==")
+let earlyFlushPath = tmpDir + "pm-telemetry-early-flush-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: earlyFlushPath)
+TelemetryStore.setupDelayForTestingMs = 2_500
+let earlyFlushStore = TelemetryStore(dbURL: URL(fileURLWithPath: earlyFlushPath),
+                                     maxRows: 1000, retentionDays: 1)
+TelemetryStore.setupDelayForTestingMs = 0
+earlyFlushStore.record(RequestEvent(host: "early.example", route: .tunnel))
+let earlyFlushStart = Date()
+earlyFlushStore.flushNow()
+let earlyFlushElapsed = Date().timeIntervalSince(earlyFlushStart)
+check(String(format: "flushNow is bounded while setup is still running (%.3fs)", earlyFlushElapsed),
+      earlyFlushElapsed < 2.45)
+check("flushNow did not block until the setup finished", !earlyFlushStore.isReady)
+check("setup finishes after the bounded flushNow", earlyFlushStore.waitUntilReady(timeout: 30))
+earlyFlushStore.flushNow()
+if let db = openDB(earlyFlushPath) {
+    check("the row queued by the bounded flushNow is persisted after readiness",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='early.example'") == 1)
+    sqlite3_close(db)
+} else {
+    check("open early-flush DB", false)
+}
+
+print("== a store released before its setup runs opens nothing (TM-17) ==")
+let abandonedPath = tmpDir + "pm-telemetry-abandoned-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: abandonedPath)
+TelemetryStore.setupDelayForTestingMs = 400
+var abandoned: TelemetryStore? = TelemetryStore(dbURL: URL(fileURLWithPath: abandonedPath),
+                                                maxRows: 1000, retentionDays: 1)
+check("store is not ready before its setup runs", abandoned?.isReady == false)
+abandoned = nil
+TelemetryStore.setupDelayForTestingMs = 0
+usleep(700_000)
+check("a store released before setup opened no DB file",
+      !FileManager.default.fileExists(atPath: abandonedPath))
+
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
              purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath,
-             analyticsPath, churnPath, backlogPath] {
+             analyticsPath, churnPath, backlogPath, asyncPath, bigPath, earlyFlushPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")

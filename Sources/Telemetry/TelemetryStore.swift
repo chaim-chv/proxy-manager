@@ -247,6 +247,19 @@ final class TelemetryStore: ObservableObject {
     private(set) var lastRetentionDeleteChunks = 0
 
     private var flusher: DispatchSourceTimer?
+    /// Set by the one-shot setup block once it has finished (whether or not the
+    /// DB could be opened). Guarded by `lock`; read through `isReady`.
+    private var setupComplete = false
+    /// Latched when the setup block finishes. A successful wait re-signals it,
+    /// so it behaves as a permanent "setup done" latch for later callers.
+    private let setupDone = DispatchSemaphore(value: 0)
+    private static let setupWaitTimeout: TimeInterval = 5
+    /// A cold/large DB must never gate quit behind its migration (TM-17).
+    private static let flushReadyTimeout: TimeInterval = 2
+    /// Test seam (TM-17): artificial delay at the very start of the setup block,
+    /// so a harness can prove `init` performs no DB work on the caller's thread
+    /// and that a slow setup never blocks the caller.
+    static var setupDelayForTestingMs: Int = 0
 
     /// Live-session bookkeeping (guarded by `lock`). `sessionIndex` maps an id
     /// to its position in `sessionOrder`, so removing a finished session is
@@ -261,6 +274,37 @@ final class TelemetryStore: ObservableObject {
         self.dbURL = dbURL
         self.maxRows = Self.clampMaxRows(maxRows)
         self.retentionDays = Self.clampRetentionDays(retentionDays)
+        // TM-17: opening a large/cold DB, creating indexes and migrating run on
+        // the store's serial DB queue, not on the caller's (main) thread, so
+        // launch is not gated on disk + SQLite work. Everything else that
+        // touches a handle is enqueued on this same queue, so it strictly
+        // follows this block. The weak-to-strong upgrade happens after the test
+        // delay, so a store released before the block runs opens nothing.
+        let delayMs = Self.setupDelayForTestingMs
+        dbQueue.async { [weak self] in
+            if delayMs > 0 { usleep(useconds_t(delayMs) * 1_000) }
+            guard let self = self else { return }
+            self.setUpDatabase()
+            self.startFlusher()
+            self.markReady()
+        }
+    }
+
+    deinit {
+        flusher?.cancel()
+        // The setup block holds `self` strongly while it runs, so either it has
+        // finished (handles valid) or it never started (all handles nil).
+        sqlite3_finalize(insertStmt)
+        if let db = db { sqlite3_close(db) }
+        // No analytics query can be in flight here: the query blocks capture
+        // `self` strongly for their duration, which would keep `deinit` from
+        // running.
+        if let analytics = analyticsDB { sqlite3_close(analytics) }
+    }
+
+    /// One-shot DB setup. Runs on `dbQueue` and is the only place that opens the
+    /// handles, so no other queue can re-open/recover concurrently.
+    private func setUpDatabase() {
         openDatabase()
         createSchema()
         migrateSchema()
@@ -268,17 +312,34 @@ final class TelemetryStore: ObservableObject {
         // here would leak the previous statement.
         if insertStmt == nil { prepareStatements() }
         openAnalyticsConnection()
-        startFlusher()
     }
 
-    deinit {
-        flusher?.cancel()
-        sqlite3_finalize(insertStmt)
-        if let db = db { sqlite3_close(db) }
-        // No analytics query can be in flight here: the query blocks capture
-        // `self` strongly for their duration, which would keep `deinit` from
-        // running.
-        if let analytics = analyticsDB { sqlite3_close(analytics) }
+    /// True once the asynchronous setup block has finished (whether or not the
+    /// DB could be opened; `telemetryUnavailable` reports that separately).
+    var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return setupComplete
+    }
+
+    private func markReady() {
+        lock.lock()
+        setupComplete = true
+        lock.unlock()
+        setupDone.signal()
+    }
+
+    /// Waits (bounded) for the asynchronous setup block. Returns false on
+    /// timeout; callers must then treat the DB as unavailable for now.
+    @discardableResult
+    func waitUntilReady(timeout: TimeInterval = TelemetryStore.setupWaitTimeout) -> Bool {
+        if isReady { return true }
+        guard timeout > 0 else { return isReady }
+        if setupDone.wait(timeout: .now() + timeout) == .success {
+            // Keep the latch open for later callers.
+            setupDone.signal()
+        }
+        return isReady
     }
 
     private func openDatabase() {
@@ -1246,6 +1307,10 @@ final class TelemetryStore: ObservableObject {
 
     /// Persist any buffered events synchronously. Called on quit so the last
     /// sub-second of telemetry is not lost.
+    ///
+    /// TM-17: a cold/large DB setup (or a still-running migration) must not hold
+    /// quit for seconds, so the wait for the setup block is bounded. On timeout
+    /// the events go back to the accumulator instead of being silently dropped.
     func flushNow() {
         lock.lock()
         let gen = generation
@@ -1255,6 +1320,25 @@ final class TelemetryStore: ObservableObject {
         pending.removeAll(keepingCapacity: true)
         lock.unlock()
         let all = accumulated + buffered
+
+        guard waitUntilReady(timeout: Self.flushReadyTimeout) else {
+            var dropped = 0
+            lock.lock()
+            // A purge while we waited discarded these events (generation bump).
+            if gen == generation {
+                dbAccumulator.insert(contentsOf: all, at: 0)
+                dropped = trimDbAccumulatorLocked()
+            }
+            lock.unlock()
+            if !all.isEmpty {
+                noteDatabaseFailure("telemetry DB setup still running; \(all.count) event(s) were not flushed")
+            }
+            if dropped > 0 { noteAccumulatorDrop(dropped) }
+            return
+        }
+
+        // `dbQueue` is serial and the setup block was enqueued first, so this
+        // also drains anything an earlier tick dispatched.
         dbQueue.sync {
             insertBatch(all, generation: gen)
             if let db = db {
