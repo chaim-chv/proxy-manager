@@ -2,6 +2,8 @@
 
 `Sources/System/SystemProxyManager.swift`, `Sources/System/ShellEnvInjector.swift`, `Sources/System/GuiEnvInjector.swift`
 
+> **Background prompts are forbidden (2026-10-25).** An `osascript … with administrator privileges` request can trigger a macOS `authd` deadlock when it runs while the screen is locked, the session is inactive, or the Mac is asleep. Every mutation API takes `allowAdminPrompt` (**default `false`**); only an explicit user action may pass `true`, and `runAdmin` additionally requires `SessionState.canPrompt`. Background callers (auto-enable at login, wake/network re-apply, port change, rollback) never prompt — they use the helper or direct `networksetup` and otherwise **defer** a retry; quit and the watchdog use the prompt-free restore paths. See [`tasks/authd-unlock-deadlock/`](tasks/authd-unlock-deadlock/README.md).
+
 Sets/clears the macOS system proxy (so browsers/system apps route through `127.0.0.1:8888`), injects `HTTP_PROXY`/`HTTPS_PROXY` into shell rc files (so CLI tools route through it), and publishes the proxy env to the GUI session via `launchctl` (so Finder/Dock apps route through it).
 
 ## System proxy
@@ -13,19 +15,24 @@ Sets/clears the macOS system proxy (so browsers/system apps route through `127.0
 
 Command building is centralized in `NetworksetupCommands` (in `HelperProtocol.swift`) as **argv arrays** — never a shell string on the helper path.
 
-### Least-privilege mutation path (helper → direct → osascript)
+### Least-privilege mutation path (helper → direct → user-initiated admin)
 
 `runMutations` executes every mutation with the least privilege that works:
 
-1. **Helper daemon** (`HelperXPCClient`, root) — used when registered (signed installs). Registration is a one-time admin grant, so toggles never re-prompt.
+1. **Helper daemon** (`HelperXPCClient`, root) — used when `helperIsReady()` (registered **and** answering a `ping`). Registration is a one-time foreground user action, so toggles never re-prompt. A **transport** failure (`.unavailable`, `.timedOut`) falls back to direct and caches the helper as unusable for the session; a **`.remote`** rejection is a real command error and propagates instead of being masked.
 2. **`networksetup` run directly as the current user** (`runDirect`, argv-only). HTTP(S)/PAC proxy settings for the logged-in user's network services are stored **per-user** and need **no root** — this is also why `./revert.sh` never asks for a password. Prompt-free for ad-hoc/dev builds.
-3. **`osascript "do shell script … with administrator privileges"`** — only when direct access genuinely fails (non-admin account, MDM-managed services), because it pops a native admin dialog on every call.
+3. **`osascript "do shell script … with administrator privileges"`** — only when direct access genuinely fails **and** the caller is an explicit user action (`allowAdminPrompt: true`) **and** `SessionState.canPrompt` is true. Otherwise the call throws `ProxyAuthorizationError.deferred` (a deferral, not a failure) and `AppModel` retries prompt-free when the session becomes interactive. The admin wait is bounded at **30 s**.
 
-`useHelper()` caches helper availability; a runtime helper failure flips to the direct path for the rest of the session.
+`SessionState` (`Sources/System/SessionState.swift`) observes `NSWorkspace` sleep/wake/session notifications and the `com.apple.screenIsUnlocked` distributed notification, and reads `CGSessionCopyCurrentDictionary()` for the authoritative console/locked flags. While an auto-enable or deferral is pending, `AppModel` re-checks every 2 s (prompt-free) so a missed unlock notification cannot strand it. `isInteractive` = on console + unlocked + awake + session active. `canPrompt` additionally requires the app to be active or an explicit UI action within 60 s (`noteUserAction()`; menu-bar menus do not always make the app frontmost). `runAdmin` re-checks `canPrompt` as defense in depth.
+
+`AppModel` forwards this as `userInitiated`: `toggle()` and onboarding pass `true`; launch auto-enable, wake/network re-apply, port/host rebind, every rollback, and quit pass `false`. A deferral is recorded (`deferredIntent`, `authorizationDeferred`) and retried prompt-free on session activation; the status menu's **Retry** (`retryDeferredApply()`) is the only deferred path that may prompt, because the user just clicked it.
+
+`helperIsReady()` caches the helper verdict for the session; `invalidateHelperCache()` (called after a foreground Install Helper) re-probes it.
 
 - The direct path (`runDirect`) launches `/usr/sbin/networksetup` via `Process.arguments` per service and stops at the first failure, throwing stderr so callers can escalate. It runs argv-only — no shell, so service names can't inject commands. Both `runDirect` and `runRead` use a **bounded wait** (20 s) so a hung `networksetup` cannot block the app or quit.
-- The osascript path passes the escaped command **inline** (`runAdmin`) — it no longer writes a user-writable temp script (that was a TOCTOU root-escalation vector) — and bounds the wait at 180 s.
+- The osascript path passes the escaped command **inline** (`runAdmin`) — it no longer writes a user-writable temp script (that was a TOCTOU root-escalation vector) — and bounds the wait at **30 s** (`runner.run("/usr/bin/osascript", …, 30, true)`), killing the whole process tree on timeout so no `networksetup` child keeps mutating after the app reports failure.
 - Service names are single-quoted (`quote()` handles embedded `'`) on the shell/osascript path.
+- **Every decision is logged** under `subsystem == "com.proxymanager.app"` as `auth path=…`: `helper` (ready/unavailable, ok), `direct` (ok), `deferred` (with `reason=background|session-not-interactive|canPrompt-false`), and `admin` (attempt/ok). A deferral is also surfaced to the UI (`authorizationDeferred`), so the next incident is diagnosable without a debugger.
 
 ## Shell env injection
 
@@ -53,7 +60,7 @@ See `docs/app-model-lifecycle.md` for the full lifecycle and crash-recovery stor
 
 ## Crash watchdog restore
 
-`SystemProxyManager.restoreWithoutPrompt(snapshot:)` is the watchdog's restore path: helper XPC **only if already registered** (never `register()` — that would pop an admin prompt from a background process), otherwise `networksetup` directly as the user. It never falls back to `osascript`. `currentProxyPointsAtLocalhost(port:)` (read-only) lets the watchdog confirm the dangling proxy is ours before touching it — it matches the **configured port** (0 = any, for legacy armed state), so a user's own local proxy on another port is not clobbered. See `docs/app-model-lifecycle.md`.
+`SystemProxyManager.restoreWithoutPrompt(snapshot:)` / `clearWithoutPrompt(services:)` are the watchdog's paths: helper XPC **only if already registered and answering** (never `register()` — that would pop an admin prompt from a background process), and on **any** helper error (transport or `.remote`) fall back to `networksetup` directly as the user. They never fall back to `osascript`. `currentProxyPointsAtLocalhost(port:)` (read-only) lets the watchdog confirm the dangling proxy is ours before touching it — it matches the **configured port** (0 = any, for legacy armed state), so a user's own local proxy on another port is not clobbered. See `docs/app-model-lifecycle.md`.
 
 ## Audit changes (2026-09-15)
 

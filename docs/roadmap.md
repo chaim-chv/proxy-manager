@@ -14,9 +14,9 @@ Durable lessons for the already-fixed bugs live in [`AGENTS.md`](../AGENTS.md)
 - **Routing**: reject port-bearing patterns; lowercase host in `matches` (which requires a pre-normalized host).
 - **Config**: synchronize `config`; timestamped corrupt backups; handle `ensureDirectories` errors.
 - **UI**: `suffix(N).reversed()` feed; validate `portBinding` instead of silent clamp.
-- **Quit**: `shutdownForQuit()` does its (bounded) admin work on `workQueue`, but `workQueue.sync` blocks the main thread on quit (up to 15 s XPC / 180 s osascript); `disable()` is already async.
+- **Quit**: `shutdownForQuit()` does its (bounded) admin work on `workQueue`, but `workQueue.sync` blocks the main thread on quit (up to 15 s XPC / 30 s osascript); `disable()` is already async.
 
-## 2. Known gaps (from the system-proxy audit)
+## 2. Open gaps (from the system-proxy audit)
 
 - **Snapshot only covers services present at enable time.** A service that disappears before disable keeps `127.0.0.1` and reappears with it. A full fix needs persisted per-service cleanup on launch.
 - **Helper authorization is PID-based**, not audit-token-based (`Sources/Helper/main.swift`). It is a root-`networksetup` boundary; audit-token validation is the robust form.

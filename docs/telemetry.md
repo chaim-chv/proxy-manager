@@ -18,7 +18,7 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 
 - `record(_:)` / session begin/end are **O(1)**: `NSLock` + append + a `StatsSnapshot` delta. No SQLite, no dispatch, no UI work per request.
 - `updateSession` is the only per-iteration telemetry call; it is two locked `Int64` adds per `poll` iteration that moved data (see `docs/performance.md`).
-- A single `DispatchSourceTimer` flusher at **10 Hz**:
+- A single `DispatchSourceTimer` flusher — **10 Hz / 25 ms leeway** while routing is active or a window is open, dropping to **5 s / 2 s leeway** when idle (`setFlusherIdle(_:)`, driven by `AppModel.updateTelemetryFlusherMode()`), so App Nap can coalesce wakeups:
   - drains completions → publishes `recentRequests` + `stats` on main (one batched update), and
   - republishes `liveRequests` rows that changed.
   - accumulates into `dbAccumulator`; every **1000** rows it flushes to SQLite as **one transaction** using a **prepared statement**.

@@ -5,9 +5,9 @@
 ## Build (`build.sh <version>`)
 
 - No Xcode project — compiles all `Sources/**/*.swift` (except `Sources/Helper/`) with `xcrun swiftc -swift-version 5 -O -target <arch>-apple-macosx14.0`.
-- **Two binaries**: the app (`Contents/MacOS/ProxyManager`) and the helper daemon (`Contents/Library/LaunchDaemons/com.proxymanager.helper`), plus the daemon's `com.proxymanager.helper.plist`.
+- **Two binaries**: the app (`Contents/MacOS/ProxyManager`) and the helper daemon (`Contents/Library/HelperTools/com.proxymanager.helper`), plus the daemon's plist at `Contents/Library/LaunchDaemons/com.proxymanager.helper.plist` whose `BundleProgram` points at `Contents/Library/HelperTools/com.proxymanager.helper` (the canonical `SMAppService.daemon` layout).
 - Links and embeds the vendored **Sparkle** framework (`Vendor/Sparkle/Sparkle.framework` → `Contents/Frameworks/`), adds the `@executable_path/../Frameworks` rpath to the app only, and writes the `SUFeedURL` / `SUPublicEDKey` / auto-update keys into `Info.plist`.
-- Generates `Info.plist` (bundle id `com.proxymanager.app`) with `CFBundleShortVersionString` / `CFBundleVersion` = `<version>` and `BuildDate` = the UTC build date (`YYYY-MM-DD`, override with `BUILD_DATE`), copies `Resources/*.lproj`, then signs **inside-out** (Sparkle XPC services → `Autoupdate` → `Updater.app` → framework → helper → app). `--deep` is intentionally **not** used — it is deprecated and would smear Sparkle's XPC entitlements. See [updates.md](updates.md).
+- Generates `Info.plist` (bundle id `com.proxymanager.app`) with `CFBundleShortVersionString` / `CFBundleVersion` = `<version>` and `BuildDate` = the UTC build date (`YYYY-MM-DD`, override with `BUILD_DATE`), copies `Resources/*.lproj`, then signs **inside-out** with `--options runtime` (Sparkle XPC services → `Autoupdate` → `Updater.app` → framework → helper → app). `--deep` is intentionally **not** used — it is deprecated and would smear Sparkle's XPC entitlements. See [updates.md](updates.md).
 
 ### Options
 
@@ -21,8 +21,10 @@
 
 ## Signing / helper
 
-- Ad-hoc signing (`-`) is fine for development; the helper daemon can't register via `SMAppService.daemon` without a Developer ID, so the app runs `networksetup` **directly as the current user** (prompt-free — per-user proxy settings need no root). The elevated `osascript` dialog is only used if that direct path fails.
-- For the full experience: `IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh 1.0.0`, install to `/Applications`. First toggle prompts once to install the daemon.
+> **Helper layout (canonical `SMAppService.daemon`):** the daemon binary is built into `Contents/Library/HelperTools/com.proxymanager.helper`; `Contents/Library/LaunchDaemons/com.proxymanager.helper.plist` carries `BundleProgram` pointing at it, and both the app and helper are signed `--options runtime` with the same identity/Team ID. An ad-hoc build prints a warning that the helper cannot register (ad-hoc signatures carry no Team ID) and that direct `networksetup` is used instead; see [`tasks/authd-unlock-deadlock/`](tasks/authd-unlock-deadlock/README.md).
+
+- Ad-hoc signing (`-`) is fine for development; the helper daemon can't register via `SMAppService.daemon` without a Developer ID/Team ID, so the app runs `networksetup` **directly as the current user** (prompt-free — per-user proxy settings need no root). If that fails, the app **defers**; it only shows the elevated `osascript` dialog for an explicit user action in an interactive session.
+- For the full experience: `IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build.sh 1.0.0`, install to `/Applications`. Settings → System → **Administrator access** installs/approves the daemon once; after that toggles use it without prompting.
 
 ## CI (`release.yml`)
 
