@@ -13,4 +13,5 @@ enum Log {
     static let telemetry = Logger(subsystem: "com.proxymanager.app", category: "telemetry")
     static let system = Logger(subsystem: "com.proxymanager.app", category: "system")
     static let tunnel = Logger(subsystem: "com.proxymanager.app", category: "tunnel")
+    static let integration = Logger(subsystem: "com.proxymanager.app", category: "integration")
 }

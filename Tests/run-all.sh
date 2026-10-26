@@ -102,6 +102,12 @@ run_harness RegressionHarness \
   Sources/System/HelperProtocol.swift \
   Tests/RegressionHarness/main.swift
 
+run_harness IntegrationHarness \
+  Sources/Config/ConfigModels.swift Sources/Config/Presets.swift \
+  Sources/Integration/*.swift \
+  Sources/Support/Log.swift \
+  Tests/IntegrationHarness/main.swift
+
 run_harness ProxyE2E \
   Sources/Config/ConfigModels.swift Sources/Routing/RoutingEngine.swift \
   Sources/Routing/AppIdentity.swift Sources/Routing/AppResolver.swift \

@@ -52,6 +52,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx14.0 \
 | `Tests/UIHarness/main.swift` | Truncation-tooltip decision logic (`TruncationDetector`, shared by `TruncatableText` and the AppKit feed cells): single-line width and multi-line height boundaries with the sub-pixel epsilon, zero/empty guards, `requiredWidth` measurement, and the "tooltip only when clipped" rule |
 | `Tests/SessionGateHarness/main.swift` | Authd-deadlock safety invariants with a fake process runner: a background mutation never spawns `osascript`; a user-initiated mutation defers while locked/asleep; an interactive user action may prompt; the prompt-free watchdog restore/clear paths never prompt; `runAdmin` is guarded and bounded at 30 s; no lifetime App Nap token; short activity tokens pair on success and throw; source scans assert the watchdog/AppModel/SystemProxyManager never re-introduce a background prompt |
 | `Tests/WindowTrackerHarness/main.swift` | `AppWindowTracker`: a hidden window does not count, showing/closing/reopening the Dashboard or Settings updates the open state, order-out/order-in is tracked, multiple open windows keep the Dock icon, and the last close clears it |
+| `Tests/IntegrationHarness/main.swift` | Integration router: action registry invariants, URL/Intent/scope exposure, argument validation and normalization, idempotency, the 500-rule cap, rate limits, and audit redaction |
 
 All of the above pass on the current code. A failing check is a regression — do not loosen the assertion to match the bug.
 
