@@ -155,6 +155,7 @@ enum DemoMode {
 
         model.showOnboarding = (screen == "onboarding")
         switch screen {
+        case "settings-general": model.settingsSelection = .general
         case "settings-tunnel", "settings-tunnel-managed": model.settingsSelection = .tunnel
         case "settings-targets": model.settingsSelection = .targets
         case "settings-apps": model.settingsSelection = .apps
@@ -193,7 +194,7 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about":
+        case "settings-general", "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about":
             if screen == "settings-apps" {
                 model.revealAppRuleID = model.config.apps.rules.first?.id
             }

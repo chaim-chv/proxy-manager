@@ -73,7 +73,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var summary: String {
         switch self {
-        case .general: return "Startup behavior and resetting the app."
+        case .general: return "The master routing switch, startup behavior, and resetting the app."
         case .appearance: return "The menu bar icon and the app's light or dark look."
         case .tunnel: return "The encrypted pipe that carries your selected traffic to a remote machine."
         case .proxy: return "The local router that sends allow-listed hosts to the tunnel and everything else direct."
@@ -331,6 +331,8 @@ struct GeneralSettingsView: View {
     var body: some View {
         SettingsPage(title: SettingsSection.general.title, summary: SettingsSection.general.summary) {
             SettingsContent {
+                RoutingMasterGroup()
+
                 SettingsGroup {
                     SettingsToggleRow(
                         title: "Launch at login",
@@ -385,6 +387,110 @@ struct GeneralSettingsView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+// MARK: - Routing master switch
+
+/// The app-wide routing switch, at the top of General. It is intentionally
+/// separate from the per-app (Apps) and per-host (Targets) rules: those decide
+/// *what* is routed, this decides *whether* routing is on at all.
+private struct RoutingMasterGroup: View {
+    @EnvironmentObject var model: AppModel
+
+    private var isBusy: Bool { model.state == .starting || model.state == .stopping }
+
+    var body: some View {
+        SettingsGroup(
+            title: "Routing",
+            help: "The master switch for the whole app. On: allow-listed hosts go through the tunnel, everything else goes direct, and macOS/the terminal are pointed at the local proxy. Off: your original proxy settings are restored and the injected environment is removed."
+        ) {
+            VStack(spacing: 0) {
+                SettingsRow {
+                    Text("Route my traffic")
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { DemoMode.isEnabled ? model.state.isActive : model.routingIntended },
+                        set: { model.setRoutingEnabled($0) }
+                    ))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .disabled(isBusy)
+                }
+                Divider()
+                SettingsRow {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(statusTitle)
+                                .font(.callout.weight(.medium))
+                            if isBusy {
+                                ProgressView()
+                                    .controlSize(.mini)
+                            }
+                        }
+                        SettingsCaption(text: statusDetail)
+                    }
+                    Spacer()
+                    if model.authorizationDeferred {
+                        Button("Retry") { model.retryDeferredApply() }
+                    } else if model.state == .off, model.routingIntended {
+                        Button("Try Again") { model.setRoutingEnabled(true) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var statusTitle: String {
+        switch model.state {
+        case .off: return model.routingIntended ? "Off — couldn't start" : "Off"
+        case .starting: return "Starting…"
+        case .on: return "On"
+        case .degraded: return "Degraded"
+        case .stopping: return "Stopping…"
+        }
+    }
+
+    private var statusColor: Color {
+        switch model.state {
+        case .on: return .green
+        case .degraded: return .orange
+        case .starting, .stopping: return .yellow
+        case .off: return model.routingIntended ? .red : Color(nsColor: .tertiaryLabelColor)
+        }
+    }
+
+    private var statusDetail: String {
+        if model.authorizationDeferred {
+            return "macOS needs authorization for the last change. Unlock the Mac, then retry."
+        }
+        switch model.state {
+        case .starting:
+            return "Applying the macOS system proxy and the shell/GUI environment…"
+        case .on:
+            return "Allow-listed hosts go through the tunnel; everything else goes direct."
+        case .stopping:
+            return "Restoring your original proxy settings and removing the injected environment…"
+        case .degraded:
+            if let error = model.lastError { return error }
+            return model.tunnelUp
+                ? "Routing is applied, but the last recovery step failed. Turn routing off and on to retry."
+                : "The tunnel is down. Routed hosts "
+                    + (model.config.policy.failClosedWhenTunnelDown
+                        ? "are blocked until it returns."
+                        : "fall back to a direct connection.")
+        case .off:
+            if let error = model.lastError, model.routingIntended {
+                return "Routing couldn't start: \(error)"
+            }
+            if model.routingIntended {
+                return "Waiting to retry — routing starts again when the network is available."
+            }
+            return "Nothing is routed. Turn this on to apply the system proxy and environment."
         }
     }
 }
