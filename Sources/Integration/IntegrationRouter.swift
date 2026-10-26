@@ -16,7 +16,8 @@ final class IntegrationRouter {
         var changed: Bool
     }
 
-    private let host: IntegrationHost
+    // Weak: the app owns the router, and the router must not keep it alive.
+    private weak var host: IntegrationHost?
     private let audit: IntegrationAudit?
     private let limiter: IntegrationRateLimiter
     private let now: () -> Date
@@ -55,6 +56,10 @@ final class IntegrationRouter {
             }
             try authorize(spec, source: source)
 
+            guard let host else {
+                throw IntegrationError(.internalError, "integration host unavailable")
+            }
+
             let snapshot = host.integrationSnapshot()
             validated = try IntegrationValidator.validate(
                 request: request, spec: spec, snapshot: snapshot,
@@ -76,7 +81,8 @@ final class IntegrationRouter {
                 }
             }
 
-            let outcome = try execute(spec: spec, args: validated, snapshot: snapshot)
+            let outcome = try execute(spec: spec, args: validated,
+                                        snapshot: snapshot, host: host)
             data = outcome.data
             changed = outcome.changed
         } catch let error as IntegrationError {
@@ -154,7 +160,8 @@ final class IntegrationRouter {
 
     private func execute(spec: IntegrationActionSpec,
                          args: [String: IntegrationValue],
-                         snapshot: IntegrationSnapshot) throws -> Outcome {
+                         snapshot: IntegrationSnapshot,
+                         host: IntegrationHost) throws -> Outcome {
         switch spec.id {
         case "ping":
             return Outcome(data: [
@@ -174,24 +181,24 @@ final class IntegrationRouter {
 
         case "routing.enable":
             let alreadyOn = snapshot.isOn && snapshot.routingIntended
-            if !alreadyOn { host.setRoutingEnabled(true) }
+            if !alreadyOn { host.setRoutingIntent(true) }
             let after = host.integrationSnapshot()
             return Outcome(data: ["state": .string(after.state)], changed: !alreadyOn)
 
         case "routing.disable":
             let alreadyOff = !snapshot.routingIntended && snapshot.state == "off"
-            if !alreadyOff { host.setRoutingEnabled(false) }
+            if !alreadyOff { host.setRoutingIntent(false) }
             let after = host.integrationSnapshot()
             return Outcome(data: ["state": .string(after.state)], changed: !alreadyOff)
 
         case "routing.toggle":
             let before = snapshot.state
-            host.toggleRouting()
+            host.toggleRoutingIntent()
             let after = host.integrationSnapshot().state
             return Outcome(data: ["state": .string(after)], changed: before != after)
 
         case "routing.retry":
-            host.retryRouting()
+            host.retryRoutingIntent()
             let after = host.integrationSnapshot()
             return Outcome(data: ["state": .string(after.state)], changed: true)
 
@@ -228,7 +235,7 @@ final class IntegrationRouter {
                         "pattern": .string(existing.pattern),
                     ], changed: false)
                 }
-                _ = host.updateTarget(id: existing.id, pattern: nil, enabled: enabled)
+                _ = host.updateTargetRule(id: existing.id, pattern: nil, enabled: enabled)
                 return Outcome(data: [
                     "id": .string(existing.id.uuidString),
                     "pattern": .string(existing.pattern),
@@ -242,13 +249,13 @@ final class IntegrationRouter {
 
         case "targets.remove":
             if let raw = args["id"]?.stringValue, let id = UUID(uuidString: raw) {
-                guard host.removeTarget(id: id) else {
+                guard host.removeTargetRule(id: id) else {
                     throw IntegrationError(.notFound, "no target with id \(raw)", field: "id")
                 }
                 return Outcome(data: ["removed": .int(1)], changed: true)
             }
             let pattern = args["pattern"]!.stringValue!
-            guard host.removeTarget(pattern: pattern) else {
+            guard host.removeTargetRule(pattern: pattern) else {
                 throw IntegrationError(.notFound, "no target matching \(pattern)", field: "pattern")
             }
             return Outcome(data: ["removed": .int(1)], changed: true)
@@ -264,7 +271,7 @@ final class IntegrationRouter {
             let changed = (pattern != nil && pattern != existing.pattern)
                 || (enabled != nil && enabled != existing.enabled)
             if changed {
-                guard host.updateTarget(id: id, pattern: pattern, enabled: enabled) else {
+                guard host.updateTargetRule(id: id, pattern: pattern, enabled: enabled) else {
                     throw IntegrationError(.notFound, "no target with id \(raw)", field: "id")
                 }
             }
@@ -278,7 +285,7 @@ final class IntegrationRouter {
             guard !snapshot.targets.isEmpty else {
                 return Outcome(data: ["removed": .int(0)], changed: false)
             }
-            host.clearTargets()
+            host.clearTargetRules()
             return Outcome(data: ["removed": .int(snapshot.targets.count)], changed: true)
 
         case "presets.list":
@@ -295,7 +302,7 @@ final class IntegrationRouter {
 
         case "presets.apply":
             let name = args["name"]!.stringValue!
-            guard let added = host.applyPreset(idOrName: name) else {
+            guard let added = host.applyTargetPreset(idOrName: name) else {
                 throw IntegrationError(.notFound, "no preset named '\(name)'", field: "name")
             }
             return Outcome(data: ["added": .int(added)], changed: added > 0)
@@ -332,22 +339,22 @@ final class IntegrationRouter {
                 if existing.mode == mode && existing.enabled == enabled {
                     return Outcome(data: ["id": .string(existing.id.uuidString)], changed: false)
                 }
-                _ = host.upsertAppRule(key: key, kind: kind, mode: mode, enabled: enabled)
+                _ = host.setAppRule(key: key, kind: kind, mode: mode, enabled: enabled)
                 return Outcome(data: ["id": .string(existing.id.uuidString)], changed: true)
             }
-            let id = host.upsertAppRule(key: key, kind: kind, mode: mode, enabled: enabled)
+            let id = host.setAppRule(key: key, kind: kind, mode: mode, enabled: enabled)
             return Outcome(data: ["id": .string(id.uuidString)], changed: true)
 
         case "apps.rule.remove":
             if let raw = args["id"]?.stringValue, let id = UUID(uuidString: raw) {
-                guard host.removeAppRule(id: id) else {
+                guard host.deleteAppRule(id: id) else {
                     throw IntegrationError(.notFound, "no app rule with id \(raw)", field: "id")
                 }
                 return Outcome(data: ["removed": .int(1)], changed: true)
             }
             let key = args["key"]!.stringValue!
             let kind = AppRuleKeyKind(rawValue: args["keyKind"]!.stringValue!)!
-            guard host.removeAppRule(key: key, kind: kind) else {
+            guard host.deleteAppRule(key: key, kind: kind) else {
                 throw IntegrationError(.notFound, "no app rule for \(key)", field: "key")
             }
             return Outcome(data: ["removed": .int(1)], changed: true)
@@ -379,7 +386,7 @@ final class IntegrationRouter {
             return Outcome(data: ["pane": .string(pane)], changed: false)
 
         case "app.activate":
-            host.activate()
+            host.activateApp()
             if let pane = args["pane"]?.stringValue {
                 host.openPane(pane, section: nil, revealPattern: nil, revealAppRuleID: nil)
             }

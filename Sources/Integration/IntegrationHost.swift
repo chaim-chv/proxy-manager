@@ -64,34 +64,34 @@ protocol IntegrationHost: AnyObject {
     func integrationSnapshot() -> IntegrationSnapshot
 
     // Routing
-    func setRoutingEnabled(_ enabled: Bool)
-    func toggleRouting()
-    func retryRouting()
+    func setRoutingIntent(_ enabled: Bool)
+    func toggleRoutingIntent()
+    func retryRoutingIntent()
 
     // Targets
     @discardableResult
     func addTarget(pattern: String, enabled: Bool) -> (id: UUID, added: Bool)
     @discardableResult
-    func removeTarget(id: UUID) -> Bool
+    func removeTargetRule(id: UUID) -> Bool
     @discardableResult
-    func removeTarget(pattern: String) -> Bool
+    func removeTargetRule(pattern: String) -> Bool
     @discardableResult
-    func updateTarget(id: UUID, pattern: String?, enabled: Bool?) -> Bool
-    func clearTargets()
+    func updateTargetRule(id: UUID, pattern: String?, enabled: Bool?) -> Bool
+    func clearTargetRules()
     /// Returns how many rules the preset added, or `nil` when the name is unknown.
     @discardableResult
-    func applyPreset(idOrName: String) -> Int?
+    func applyTargetPreset(idOrName: String) -> Int?
 
     // Per-app routing
     func setAppsEnabled(_ enabled: Bool)
     func setAppsDefaultMode(_ mode: AppRoutingMode)
     @discardableResult
-    func upsertAppRule(key: String, kind: AppRuleKeyKind,
+    func setAppRule(key: String, kind: AppRuleKeyKind,
                        mode: AppRoutingMode, enabled: Bool) -> UUID
     @discardableResult
-    func removeAppRule(id: UUID) -> Bool
+    func deleteAppRule(id: UUID) -> Bool
     @discardableResult
-    func removeAppRule(key: String, kind: AppRuleKeyKind) -> Bool
+    func deleteAppRule(key: String, kind: AppRuleKeyKind) -> Bool
 
     // Reads that need app services
     func explain(host: String, bundleID: String?) -> IntegrationExplanation
@@ -100,5 +100,5 @@ protocol IntegrationHost: AnyObject {
     // Windows
     func openPane(_ pane: String, section: String?,
                   revealPattern: String?, revealAppRuleID: UUID?)
-    func activate()
+    func activateApp()
 }

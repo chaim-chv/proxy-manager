@@ -419,6 +419,25 @@ struct LockSettings: Codable, Equatable {
     }
 }
 
+/// External control. Off by default: enabling it opens a local control socket
+/// that another app can ask to change routing, targets or per-app rules.
+struct IntegrationSettings: Codable, Equatable {
+    var enabled: Bool = false
+    var urlSchemeEnabled: Bool = true
+    var xpcEnabled: Bool = true
+    var auditEnabled: Bool = true
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = c.tolerant(.enabled, false)
+        urlSchemeEnabled = c.tolerant(.urlSchemeEnabled, true)
+        xpcEnabled = c.tolerant(.xpcEnabled, true)
+        auditEnabled = c.tolerant(.auditEnabled, true)
+    }
+}
+
 struct AppConfig: Codable, Equatable {
     var version: Int = 1
     var proxy: ProxySettings = ProxySettings()
@@ -429,6 +448,7 @@ struct AppConfig: Codable, Equatable {
     var monitor: MonitorSettings = MonitorSettings()
     var lock: LockSettings = LockSettings()
     var apps: AppSettings = AppSettings()
+    var integration: IntegrationSettings = IntegrationSettings()
 
     init() {}
 
@@ -450,6 +470,7 @@ struct AppConfig: Codable, Equatable {
         monitor = c.tolerant(.monitor, MonitorSettings())
         lock = c.tolerant(.lock, LockSettings())
         apps = c.tolerant(.apps, AppSettings())
+        integration = c.tolerant(.integration, IntegrationSettings())
     }
 
     // The app is generic: no domains are assumed. Users pick their own targets

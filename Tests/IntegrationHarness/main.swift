@@ -67,17 +67,17 @@ final class FakeHost: IntegrationHost {
         )
     }
 
-    func setRoutingEnabled(_ enabled: Bool) {
+    func setRoutingIntent(_ enabled: Bool) {
         intended = enabled
         state = enabled ? "on" : "off"
     }
 
-    func toggleRouting() {
-        if state == "on" || state == "degraded" { setRoutingEnabled(false) }
-        else if state == "off" { setRoutingEnabled(true) }
+    func toggleRoutingIntent() {
+        if state == "on" || state == "degraded" { setRoutingIntent(false) }
+        else if state == "off" { setRoutingIntent(true) }
     }
 
-    func retryRouting() {
+    func retryRoutingIntent() {
         state = intended ? "on" : "off"
     }
 
@@ -90,19 +90,19 @@ final class FakeHost: IntegrationHost {
         return (target.id, true)
     }
 
-    func removeTarget(id: UUID) -> Bool {
+    func removeTargetRule(id: UUID) -> Bool {
         let before = targets.count
         targets.removeAll { $0.id == id }
         return targets.count != before
     }
 
-    func removeTarget(pattern: String) -> Bool {
+    func removeTargetRule(pattern: String) -> Bool {
         let before = targets.count
         targets.removeAll { $0.pattern == pattern }
         return targets.count != before
     }
 
-    func updateTarget(id: UUID, pattern: String?, enabled: Bool?) -> Bool {
+    func updateTargetRule(id: UUID, pattern: String?, enabled: Bool?) -> Bool {
         guard let index = targets.firstIndex(where: { $0.id == id }) else { return false }
         let old = targets[index]
         targets[index] = IntegrationTarget(
@@ -113,11 +113,11 @@ final class FakeHost: IntegrationHost {
         return true
     }
 
-    func clearTargets() {
+    func clearTargetRules() {
         targets.removeAll()
     }
 
-    func applyPreset(idOrName: String) -> Int? {
+    func applyTargetPreset(idOrName: String) -> Int? {
         guard let preset = TargetPreset.all.first(where: {
             $0.id == idOrName || $0.name.caseInsensitiveCompare(idOrName) == .orderedSame
         }) else { return nil }
@@ -139,7 +139,7 @@ final class FakeHost: IntegrationHost {
         appsDefault = mode
     }
 
-    func upsertAppRule(key: String, kind: AppRuleKeyKind,
+    func setAppRule(key: String, kind: AppRuleKeyKind,
                        mode: AppRoutingMode, enabled: Bool) -> UUID {
         if let index = appRules.firstIndex(where: { $0.key == key && $0.keyKind == kind }) {
             let old = appRules[index]
@@ -153,13 +153,13 @@ final class FakeHost: IntegrationHost {
         return rule.id
     }
 
-    func removeAppRule(id: UUID) -> Bool {
+    func deleteAppRule(id: UUID) -> Bool {
         let before = appRules.count
         appRules.removeAll { $0.id == id }
         return appRules.count != before
     }
 
-    func removeAppRule(key: String, kind: AppRuleKeyKind) -> Bool {
+    func deleteAppRule(key: String, kind: AppRuleKeyKind) -> Bool {
         let before = appRules.count
         appRules.removeAll { $0.key == key && $0.keyKind == kind }
         return appRules.count != before
@@ -194,7 +194,7 @@ final class FakeHost: IntegrationHost {
         lastPane = (pane, section, revealPattern)
     }
 
-    func activate() {
+    func activateApp() {
         activated += 1
     }
 }
@@ -206,6 +206,17 @@ let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
 func makeRouter(_ host: FakeHost, audit: IntegrationAudit? = nil,
                 limiter: IntegrationRateLimiter = IntegrationRateLimiter()) -> IntegrationRouter {
     IntegrationRouter(host: host, audit: audit, limiter: limiter, now: { fixedDate })
+}
+
+func connectControl(_ path: String) -> Int32? {
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    ControlSocket.setNoSigPipe(fd)
+    guard ControlSocket.connect(fd, path: path) else {
+        close(fd)
+        return nil
+    }
+    return fd
 }
 
 func args(_ pairs: [String: IntegrationValue]) -> [String: IntegrationValue] { pairs }
@@ -572,6 +583,160 @@ do {
                caps.data["actions"]?.arrayValue?.count, IntegrationActions.all.count)
     check("capabilities declares the protocol version",
           caps.data["protocolVersion"] == .int(IntegrationProtocol.version))
+}
+
+// MARK: - Permissions
+
+print("== Permissions ==")
+do {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("integration-permissions-\(UUID().uuidString)")
+    let file = directory.appendingPathComponent("permissions.json")
+    let store = IntegrationPermissionStore(fileURL: file)
+    let identity = ControlIdentity(
+        pid: 42, bundleID: "com.example.app", teamID: "TEAM123",
+        requirement: "identifier \"com.example.app\" and anchor apple generic",
+        displayName: "Example", path: "/Applications/Example.app"
+    )
+
+    check("unknown identity has no scope", store.scope(for: identity) == nil)
+    store.grant(identity, scope: .control)
+    checkEqual("grant is remembered", store.scope(for: identity), .control)
+    checkEqual("grant survives a reload", IntegrationPermissionStore(fileURL: file).scope(for: identity), .control)
+    checkEqual("store lists one identity", store.all().count, 1)
+
+    var impostor = identity
+    impostor.requirement = "identifier \"com.example.app\" and cdhash H\"deadbeef\""
+    check("a different requirement is a different identity", store.scope(for: impostor) == nil)
+
+    store.revoke(key: store.all()[0].key)
+    check("revoke removes the grant", store.scope(for: identity) == nil)
+    try? FileManager.default.removeItem(at: directory)
+}
+
+// MARK: - Framing
+
+print("== Framing ==")
+do {
+    var fds: [Int32] = [-1, -1]
+    check("socketpair", socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0)
+    let payload = Data("hello".utf8)
+    try ControlFraming.writeFrame(fds[0], payload)
+    let read = try ControlFraming.readFrame(fds[1])
+    checkEqual("frame round-trips", read, payload)
+    close(fds[0])
+    close(fds[1])
+}
+do {
+    var fds: [Int32] = [-1, -1]
+    _ = socketpair(AF_UNIX, SOCK_STREAM, 0, &fds)
+    let tooBig = UInt32(ControlFraming.maxFrameBytes + 1).bigEndian
+    var header = withUnsafeBytes(of: tooBig) { Data($0) }
+    header.append(Data(repeating: 0, count: 1))
+    header.withUnsafeBytes { _ = Darwin.write(fds[0], $0.baseAddress, header.count) }
+    var threw = false
+    do { _ = try ControlFraming.readFrame(fds[1], timeoutMs: 500) }
+    catch ControlTransportError.frameTooLarge { threw = true }
+    catch { }
+    check("oversized frame is rejected", threw)
+    close(fds[0])
+    close(fds[1])
+}
+
+// MARK: - Control socket
+
+print("== Control socket ==")
+do {
+    // `sun_path` is 104 bytes on macOS, and the system temp directory is
+    // already long; keep the socket path short.
+    let directory = URL(fileURLWithPath: "/tmp/pmint-\(UUID().uuidString.prefix(8))")
+    try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let socketPath = directory.appendingPathComponent("control.sock").path
+    let tokenPath = directory.appendingPathComponent("control.token").path
+    let host = FakeHost()
+    let router = IntegrationRouter(host: host)
+    let server = ControlSocketServer(socketPath: socketPath, tokenPath: tokenPath) { identity, request in
+        router.perform(request, source: .xpc(
+            pid: identity.pid, bundleID: identity.bundleID,
+            teamID: identity.teamID, scope: .control
+        ))
+    }
+    check("server starts", server.start())
+
+    let token = (try? String(contentsOfFile: tokenPath, encoding: .utf8)) ?? ""
+    check("token file has a token", token.count == 64)
+
+    let attributes = try? FileManager.default.attributesOfItem(atPath: socketPath)
+    check("socket is 0600",
+          (attributes?[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+    let identity = ControlIdentity(pid: 7, bundleID: "com.example.app", teamID: "TEAM123",
+                                   requirement: "identifier \"com.example.app\"",
+                                   displayName: "Example", path: "/Applications/Example.app")
+
+    func roundTrip(token: String, action: String,
+                   args: [String: IntegrationValue] = [:]) -> Result<IntegrationResult, Error> {
+        guard let fd = connectControl(socketPath) else {
+            return .failure(ControlTransportError.closed)
+        }
+        defer { close(fd) }
+        do {
+            let envelope = ControlRequest(
+                token: token, identity: identity,
+                request: IntegrationRequest(action: action, args: args)
+            )
+            try ControlFraming.writeFrame(fd, ControlFraming.encode(envelope))
+            let reply = try ControlFraming.decode(
+                ControlResponse.self, from: ControlFraming.readFrame(fd)
+            )
+            return .success(reply.result)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    func runOffMain(_ work: @escaping () -> Void, seconds: TimeInterval = 5) {
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            work()
+            done.signal()
+        }
+        let deadline = Date().addingTimeInterval(seconds)
+        while done.wait(timeout: .now() + 0.05) == .timedOut, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    var outcome: Result<IntegrationResult, Error>?
+    runOffMain { outcome = roundTrip(token: token, action: "routing.enable") }
+    switch outcome {
+    case .success(let result):
+        check("request over the socket succeeds", result.ok)
+        checkEqual("routing is on", host.state, "on")
+    default:
+        check("request over the socket succeeds", false)
+    }
+
+    var status: IntegrationResult?
+    runOffMain {
+        if case .success(let result) = roundTrip(token: token, action: "status") {
+            status = result
+        }
+    }
+    check("status over the socket", status?.ok == true)
+    checkEqual("status reports the state", status?.data["state"], .string("on"))
+
+    var denied: Result<IntegrationResult, Error>?
+    runOffMain { denied = roundTrip(token: "not-the-token", action: "status") }
+    if case .success = denied {
+        check("wrong token is rejected", false)
+    } else {
+        check("wrong token is rejected", true)
+    }
+
+    server.stop()
+    check("server stops", !server.isRunning)
+    try? FileManager.default.removeItem(at: directory)
 }
 
 // MARK: - Result

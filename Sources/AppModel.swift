@@ -53,6 +53,11 @@ final class AppModel: ObservableObject {
     let shellEnvInjector: ShellEnvInjector
     let guiEnvInjector: GuiEnvInjector
 
+    /// External control runtime (routing, targets, per-app rules and window
+    /// navigation only). Lazy so `configStore` is ready; demo builds no-op.
+    lazy var integration = IntegrationCoordinator(host: self,
+                                                  supportDir: configStore.supportDir)
+
     // The system-proxy snapshot of the user's ORIGINAL settings. Only ever
     // touched on `workQueue` (also persisted to disk via ConfigStore).
     private var snapshot: SystemProxySnapshot?
@@ -179,6 +184,14 @@ final class AppModel: ObservableObject {
         applyIconMode()
         updateTelemetryFlusherMode()
         DemoMode.apply(to: self)
+
+        // The coordinator builds the socket lazily; deferring to the next main
+        // run-loop turn keeps `init` free of a self-capturing lazy access, and
+        // reading the config there applies whatever the user already changed.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.integration.apply(self.config.integration)
+        }
     }
 
     /// Applies the configured light/dark appearance (nil = follow the system).
@@ -437,6 +450,25 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(false, forKey: wasOnKey)
             cancelEnableRetry()
             if state.isActive { disable(userInitiated: true) }
+        }
+    }
+
+    /// Routing intent from an external caller.
+    ///
+    /// Deliberately parallel to `setRoutingEnabled`: it never records a user
+    /// action and never allows an authorization prompt. An integration caller
+    /// is not a present user, and a remote `enable` that could raise the admin
+    /// dialog would be a phishing primitive.
+    func setRoutingIntentFromIntegration(_ enabled: Bool) {
+        if DemoMode.isEnabled { return }
+        if enabled {
+            UserDefaults.standard.set(true, forKey: wasOnKey)
+            pendingAutoEnable = false
+            if state == .off { enable(userInitiated: false) }
+        } else {
+            UserDefaults.standard.set(false, forKey: wasOnKey)
+            cancelEnableRetry()
+            if state.isActive { disable(userInitiated: false) }
         }
     }
 
@@ -746,6 +778,7 @@ final class AppModel: ObservableObject {
         let cfg = config
         syncProxySettings()
         syncManagedTunnel(cfg)
+        integration.apply(cfg.integration)
         scheduleSave()
         applyAppearance()
         applyIconMode()
@@ -1221,6 +1254,7 @@ final class AppModel: ObservableObject {
         // or the SSH runner, so quit must not either (disarming here would
         // clear the real app's watchdog marker).
         if DemoMode.isEnabled { return }
+        integration.stop()
         // A queued backoff retry must never run during/after quit.
         enableRetry?.cancel()
         enableRetry = nil
@@ -1468,6 +1502,12 @@ final class AppModel: ObservableObject {
     func retryDeferredApply() {
         SessionState.shared.noteUserAction()
         retryDeferredGrant(promptAllowed: true)
+    }
+
+    /// Prompt-free retry for an external caller. Same recovery, no user-action
+    /// stamp and no prompt.
+    func retryDeferredFromIntegration() {
+        retryDeferredGrant(promptAllowed: false)
     }
 
     /// Launches auto-enable only when the session is interactive; otherwise it
