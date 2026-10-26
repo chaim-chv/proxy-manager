@@ -89,6 +89,12 @@ final class AppModel: ObservableObject {
     /// Main-thread: bounded re-check while an auto-enable or deferred mutation is
     /// pending, so a missed unlock notification cannot strand it. Never prompts.
     private var deferredRetryTimer: DispatchSourceTimer?
+    /// Main-thread: backoff retry after a failed *background* enable (no network
+    /// services yet, a transient `networksetup` failure). A user-initiated
+    /// failure is surfaced in the UI instead and is never retried behind them.
+    private var enableRetry: DispatchWorkItem?
+    /// Main-thread: grows 5 s → 5 min and resets after a successful enable.
+    private var enableRetryDelay: TimeInterval = 5
     private enum DeferredIntent { case enable, disable }
     // Serializes managed-tunnel side effects (Keychain delete, SSH apply/stop)
     // so concurrent callers cannot interleave an auth change with a spawn.
@@ -154,7 +160,11 @@ final class AppModel: ObservableObject {
             refreshHelperState()
 
             if UserDefaults.standard.bool(forKey: wasOnKey) {
+                Log.app.notice("launch: routing intent=on")
                 scheduleAutoEnableWhenInteractive()
+            } else {
+                Log.app.notice("launch: routing intent=off")
+                recoverDanglingProxyIfNeeded()
             }
         }
 
@@ -241,10 +251,15 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async { [weak self] in self?.sessionBecameInteractive() }
             return
         }
-        if pendingAutoEnable, state == .off, SessionState.shared.isInteractive {
+        // A launch auto-enable, a failed background attempt, or a deferred
+        // enable all leave `routingIntended` true with the state off. This is
+        // the one prompt-free retry that survives a missed unlock/wake event.
+        if state == .off, SessionState.shared.isInteractive, routingIntended {
+            if pendingAutoEnable {
+                Log.app.notice("auto-enable: session is interactive; enabling prompt-free")
+            }
             pendingAutoEnable = false
             ensureDeferredRetryTimer()
-            Log.app.notice("auto-enable: session is interactive; enabling prompt-free")
             enable(userInitiated: false)
             return
         }
@@ -256,7 +271,16 @@ final class AppModel: ObservableObject {
     /// later sets `.stopping` synchronously on main *before* enqueueing its
     /// work item, so this capture cannot miss a stop that should have won.
     private func reapplyAfterSystemChange(reason: String) {
-        guard state.isActive else { return }
+        // Once the app is off it used to stay off: nothing brought it back even
+        // though the user never turned routing off. A wake/network change is the
+        // best moment to repair that (the network stack is usable again).
+        guard state.isActive else {
+            if state == .off, routingIntended {
+                Log.app.notice("\(reason): routing is off but was requested on; re-enabling")
+                enable(userInitiated: false)
+            }
+            return
+        }
         let port = config.proxy.port
         let bindHost = config.proxy.bindHost
         let watchdog = config.system.crashWatchdog
@@ -383,15 +407,94 @@ final class AppModel: ObservableObject {
 
     // MARK: - Toggle
 
+    /// The user's last deliberate choice: routing should be on. This is the
+    /// launch auto-enable intent, the Settings master switch, and the retry
+    /// gate. Only an explicit "off" (or `revert.sh`) clears it — a failed
+    /// attempt must not silently flip the user's preference.
+    var routingIntended: Bool { UserDefaults.standard.bool(forKey: wasOnKey) }
+
     /// Explicit user toggle (status menu, dashboard). This is the only place
     /// that may allow an admin prompt.
     func toggle() {
         SessionState.shared.noteUserAction()
         switch state {
-        case .off: enable(userInitiated: true)
-        case .on, .degraded: disable(userInitiated: true)
+        case .off: setRoutingEnabled(true)
+        case .on, .degraded: setRoutingEnabled(false)
         default: break
         }
+    }
+
+    /// The Settings master switch. Turning off always clears the intent, even
+    /// when the app already reports off (e.g. a previous attempt failed), so a
+    /// pending retry cannot turn routing back on behind the user's back.
+    func setRoutingEnabled(_ enabled: Bool) {
+        if DemoMode.isEnabled { return }
+        SessionState.shared.noteUserAction()
+        if enabled {
+            UserDefaults.standard.set(true, forKey: wasOnKey)
+            if state == .off { enable(userInitiated: true) }
+        } else {
+            UserDefaults.standard.set(false, forKey: wasOnKey)
+            cancelEnableRetry()
+            if state.isActive { disable(userInitiated: true) }
+        }
+    }
+
+    /// Repairs the case where the system proxy still points at our port while
+    /// the launch intent reads off (an interrupted quit or a lost preferences
+    /// file). Without this the machine would keep sending traffic to a listener
+    /// nothing started. A persisted recovery snapshot is required as proof that
+    /// *we* applied the proxy — never hijack a user's own local proxy that
+    /// happens to use the same port on a clean first run.
+    private func recoverDanglingProxyIfNeeded() {
+        let port = config.proxy.port
+        workQueue.async { [weak self] in
+            guard let self else { return }
+            guard let snap = self.configStore.loadSnapshot(), !snap.isEmpty else { return }
+            guard self.systemProxyManager.proxyCheck(port: port) == .ours else { return }
+            DispatchQueue.main.async {
+                guard self.state == .off else { return }
+                Log.app.notice("launch: the system proxy still points at us; restoring routing")
+                UserDefaults.standard.set(true, forKey: self.wasOnKey)
+                self.enable(userInitiated: false)
+            }
+        }
+    }
+
+    /// Bounded exponential backoff (5 s → 5 min) for a background enable that
+    /// failed for a transient reason. Only called for background attempts; a
+    /// user-initiated failure is surfaced in the UI instead.
+    private func scheduleEnableRetry() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !DemoMode.isEnabled else { return }
+            guard self.state == .off, self.routingIntended, self.deferredIntent == nil else { return }
+            self.enableRetry?.cancel()
+            let delay = self.enableRetryDelay
+            self.enableRetryDelay = min(self.enableRetryDelay * 2, 300)
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.enableRetry = nil
+                guard self.state == .off, self.routingIntended else { return }
+                guard SessionState.shared.isInteractive else {
+                    self.scheduleEnableRetry()
+                    return
+                }
+                Log.app.notice("routing: retrying enable after a failed attempt")
+                self.enable(userInitiated: false)
+            }
+            self.enableRetry = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    }
+
+    private func cancelEnableRetry(resetBackoff: Bool = false) {
+        let apply = { [weak self] in
+            guard let self else { return }
+            self.enableRetry?.cancel()
+            self.enableRetry = nil
+            if resetBackoff { self.enableRetryDelay = 5 }
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
 
     /// The host the system proxy must point at to reach the local listener.
@@ -410,6 +513,10 @@ final class AppModel: ObservableObject {
     func enable(userInitiated: Bool = false) {
         guard state == .off else { return }
         if userInitiated { SessionState.shared.noteUserAction() }
+        // Record the intent before trying: a transient failure (no services yet
+        // right after wake, a locked keychain, a `networksetup` hiccup) must not
+        // erase the user's "keep routing on" choice.
+        UserDefaults.standard.set(true, forKey: wasOnKey)
         pendingAutoEnable = false
         ensureDeferredRetryTimer()
         setState(.starting)
@@ -471,6 +578,7 @@ final class AppModel: ObservableObject {
                                   rcFiles: cfg.system.managedShellRcs)
                 self.syncGuiEnv(enabled: cfg.system.injectGuiEnv, tunnelHost: cfg.tunnel.effectiveHost)
                 self.clearDeferredState()
+                self.cancelEnableRetry(resetBackoff: true)
                 self.finalizeState(self.tunnelSupervisor.isTunnelUp ? .on : .degraded, recoveryFailed: false)
                 Log.app.notice("enable(): routing enabled (tunnelUp=\(self.tunnelSupervisor.isTunnelUp))")
             } catch {
@@ -508,7 +616,9 @@ final class AppModel: ObservableObject {
                         self.clearSnapshotBestEffort()
                         self.appliedPort = 0
                         self.appliedBindHost = ""
-                        UserDefaults.standard.set(false, forKey: self.wasOnKey)
+                        // Keep `wasOnKey`: this was a failed *attempt*, not an
+                        // explicit "off". A wake/network change, the next launch,
+                        // or the bounded retry below will try again.
                         WatchdogController.disarm()
                         self.proxyServer.stop()
                         // A successful rollback leaves the system proxy exactly
@@ -555,6 +665,10 @@ final class AppModel: ObservableObject {
                     Log.app.error("enable(): failed before touching the system proxy; recovery state preserved")
                 }
                 self.setLastError(error.localizedDescription)
+                // A user-initiated failure is visible in Settings/menu and must
+                // not re-enable behind their back; a background attempt retries
+                // with backoff so a transient wake-time failure self-heals.
+                if !userInitiated { self.scheduleEnableRetry() }
             }
         }
     }
@@ -564,7 +678,13 @@ final class AppModel: ObservableObject {
     ///   instead of prompting.
     func disable(userInitiated: Bool = false) {
         guard state.isActive else { return }
-        if userInitiated { SessionState.shared.noteUserAction() }
+        if userInitiated {
+            SessionState.shared.noteUserAction()
+            // The user asked for off: clear the intent even if the restore
+            // below fails, so no retry/launch path turns routing back on.
+            UserDefaults.standard.set(false, forKey: wasOnKey)
+            cancelEnableRetry()
+        }
         setState(.stopping)
         let cfg = config
         Log.app.notice("disable(): stopping")
@@ -1101,6 +1221,9 @@ final class AppModel: ObservableObject {
         // or the SSH runner, so quit must not either (disarming here would
         // clear the real app's watchdog marker).
         if DemoMode.isEnabled { return }
+        // A queued backoff retry must never run during/after quit.
+        enableRetry?.cancel()
+        enableRetry = nil
         // Flush the debounced config write before blocking main on
         // `workQueue`: `scheduleSave`'s item runs on main, so the synchronous
         // block below would otherwise strand an edit made in the last 500 ms
@@ -1201,9 +1324,11 @@ final class AppModel: ObservableObject {
             case .discardStale, .nothing:
                 // The proxy is provably clean (or nothing was applied): the old
                 // "original" must not survive to overwrite a later user change.
+                // Keep the intent, though: only an explicit "off" clears it, and
+                // a background enable that failed before applying should retry
+                // on the next launch.
                 clearSnapshotBestEffort()
                 WatchdogController.disarm()
-                UserDefaults.standard.set(false, forKey: self.wasOnKey)
                 proxyServer.stop()
             case .keepRecovery:
                 if snap != nil { UserDefaults.standard.set(true, forKey: self.wasOnKey) }

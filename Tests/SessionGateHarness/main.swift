@@ -247,6 +247,24 @@ check(appSource.contains("noteUserAction()"),
       "explicit user actions are recorded before prompting")
 check(appSource.contains("ensureDeferredRetryTimer"),
       "a pending auto-enable/deferral has a bounded re-check")
+check(appSource.contains("func setRoutingEnabled"),
+      "the Settings master switch goes through one intent-aware path")
+check(appSource.contains("scheduleEnableRetry"),
+      "a failed background enable retries with backoff")
+check(appSource.contains("recoverDanglingProxyIfNeeded"),
+      "launch repairs a system proxy left pointing at us")
+if let enableStart = appSource.range(of: "func enable(userInitiated: Bool = false)"),
+   let disableStart = appSource.range(of: "func disable(userInitiated: Bool = false)") {
+    let enableBody = appSource[enableStart.lowerBound..<disableStart.lowerBound]
+    let intentWrite = enableBody.range(of: "set(true, forKey: wasOnKey)")
+    let starting = enableBody.range(of: "setState(.starting)")
+    check(intentWrite != nil && starting != nil && intentWrite!.lowerBound < starting!.lowerBound,
+          "enable records the routing intent before changing state")
+    check(!enableBody.contains("set(false, forKey:"),
+          "a failed enable never clears the routing intent")
+} else {
+    check(false, "could not locate enable()/disable() for intent checks")
+}
 
 let watchdogSource = source("Sources/Support/Watchdog.swift")
 check(!watchdogSource.contains("osascript"), "watchdog never references osascript")
