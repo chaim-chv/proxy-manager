@@ -19,7 +19,8 @@ import AppKit
 /// Environment variables (all optional):
 ///   PROXYMANAGER_DEMO=1            enable the demo (required)
 ///   PROXYMANAGER_SCREEN            dashboard | dashboard-detail |
-///                                  settings-tunnel | settings-tunnel-managed |
+///                                  settings-general | settings-tunnel |
+///                                  settings-tunnel-managed |
 ///                                  settings-targets | settings-apps |
 ///                                  settings-about | about-panel |
 ///                                  onboarding                    (default dashboard)

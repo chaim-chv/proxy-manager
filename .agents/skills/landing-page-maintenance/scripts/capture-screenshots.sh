@@ -27,6 +27,7 @@ fi
 
 # screen-key:PROXYMANAGER_SCREEN
 SCREENS=(
+  "general:settings-general"
   "dashboard:dashboard"
   "dashboard-detail:dashboard-detail"
   "tunnel:settings-tunnel"

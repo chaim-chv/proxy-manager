@@ -6,6 +6,7 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 
 | Key | `PROXYMANAGER_SCREEN` | What it shows | Native size (px) | Used on the page |
 |---|---|---|---|---|
+| `general` | `settings-general` | Settings → General: the Routing master switch, on, with its live status line | 1800×1280 | Screenshots → “The master switch” |
 | `dashboard` | `dashboard` | Dashboard: stats strip, request-rate chart, top tunneled hosts, live feed | 2240×1496 | Hero image |
 | `dashboard-detail` | `dashboard-detail` | Dashboard with a request selected and the detail inspector open | 2240×1496 | Screenshots → “Per-request detail” |
 | `targets` | `settings-targets` | Settings → Targets: rule list, wildcard, disabled rule, match preview | 1800×1280 | Screenshots → “Your allow-list, editable live” |
@@ -14,12 +15,11 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 | `tunnel-managed` | `settings-tunnel-managed` | Settings → Tunnel in “Run the tunnel for me” (SSH) mode, running | 1800×1280 | Managed-tunnel spotlight |
 | `onboarding` | `onboarding` | First-run wizard, step 2 (choose targets from presets) | 1240×920 | Screenshots → “Set up in about a minute” |
 
-Appearances: `dark`, `light` → 7 screens × 2 = **14 files**.
+Appearances: `dark`, `light` → 8 screens × 2 = **16 files**.
 
 Two more demo screens exist for ad-hoc capture (not part of the site set, so not
-in `SCREENS`): `settings-general` (Settings → General, with the Routing master
-switch), `settings-about` (Settings → About) and `about-panel` (the standard
-About panel).
+in `SCREENS`): `settings-about` (Settings → About) and `about-panel` (the
+standard About panel).
 
 ## Fake data used
 
@@ -38,9 +38,11 @@ Seeded by `Sources/Support/DemoMode.swift` (deterministic RNG, fixed seed):
 - **Stats:** Tunneled / Direct / Blocked counts, total bytes, and Active count
   are derived from the seeded events.
 - **Config:** manual tunnel at `127.0.0.1:1080`, supervised, watchdog off, shell
-  env off — so nothing real is ever touched. The `tunnel-managed` screen instead
-  seeds MANAGED SSH mode (`bastion.example.com`, key auth) and marks SSH as
-  running; no SSH process is ever spawned.
+  env off — so nothing real is ever touched. The app state is forced to `on` with
+  the tunnel marked up, so the General screen's Routing switch reads **On** with a
+  green status. The `tunnel-managed` screen instead seeds MANAGED SSH mode
+  (`bastion.example.com`, key auth) and marks SSH as running; no SSH process is
+  ever spawned.
 
 ## Adding or changing a screen
 
