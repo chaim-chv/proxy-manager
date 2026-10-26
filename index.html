@@ -189,6 +189,19 @@
             <p>Pick a preset or start empty; add your own hosts later.</p>
           </div>
         </article>
+
+        <article class="shot reverse">
+          <div class="shot-media" data-tilt>
+            <picture>
+              <source srcset="assets/general-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/general-light.png" alt="Settings → General: the Routing master switch at the top, switched on, with a green live status line underneath." data-dark="assets/general-dark.png" data-light="assets/general-light.png" loading="lazy" width="1800" height="1280">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>The master switch</h3>
+            <p>Turn routing on or off from Settings, not just the menu bar. The live status underneath shows a spinner while it applies, and the reason with <em>Try Again</em> when it can’t start.</p>
+          </div>
+        </article>
       </div>
     </div>
   </section>
@@ -227,7 +240,7 @@
       </div>
 
       <ol class="steps">
-        <li><strong>Turn it on.</strong> One switch starts the proxy, sets the macOS system proxy, and exports <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> for CLI tools.</li>
+        <li><strong>Turn it on.</strong> One switch — in the menu bar, the dashboard, or Settings → General — starts the proxy, sets the macOS system proxy, and exports <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> for CLI tools.</li>
         <li><strong>Traffic is classified.</strong> Each connection is matched to its app first (<em>Tunnel all</em> / <em>Direct all</em>), then to the host allow-list; everything else goes straight out, streamed with backpressure.</li>
         <li><strong>Watch it work.</strong> Every request shows up live. Turning it off restores your original settings.</li>
       </ol>
@@ -240,9 +253,10 @@
           <li><strong>Bounded memory.</strong> Fixed 256 KB buffers per direction, with half-close handled so responses are never truncated.</li>
           <li><strong>Telemetry off the hot path.</strong> Per-request recording is a lock and an append; a single batched writer flushes SQLite.</li>
           <li><strong>Per-app identity, resolved locally.</strong> With per-app routing on, each connection is matched to its originating app by a local process scan — helpers resolve to their host app. Off by default, so the hot path is unchanged.</li>
-          <li><strong>Crash-safe.</strong> A watchdog restores your original proxy settings in milliseconds if the app dies.</li>
-          <li><strong>Loopback by default.</strong> The proxy binds to <code>127.0.0.1</code> and blocks non-loopback clients from private destinations.</li>
-          <li><strong>No admin prompts.</strong> Proxy toggles use per-user settings, so a normal setup never asks for a password.</li>
+          <li><strong>Crash-safe.</strong> A watchdog user agent restores your original proxy settings within milliseconds if the app dies. The app keeps its saved recovery state until a restore actually succeeds, so a transient failure can’t erase it.</li>
+          <li><strong>Your choice sticks.</strong> A failed attempt doesn’t silently flip the switch off — background tries retry quietly, and routing returns on unlock, wake, or a network change.</li>
+          <li><strong>Loopback by default.</strong> The proxy binds to <code>127.0.0.1</code> and blocks non-loopback clients from loopback, link-local, and private destinations, checked against the resolved address.</li>
+          <li><strong>No prompts in the background.</strong> Proxy toggles change per-user settings, so a normal setup never asks for a password. Anything that would need authorization from the background — at login, on wake, while the screen is locked — waits until you are at the keyboard.</li>
         </ul>
       </div>
     </div>
@@ -287,6 +301,10 @@
           <p>Yes. In Settings → Apps, each app can be set to <em>Tunnel all</em>, <em>Use target rules</em> (follow the host allow-list), or <em>Direct all</em>, and apps with no rule use a default you choose. You can also set the frontmost app's mode straight from the menu bar. It's off until you turn it on.</p>
         </details>
         <details>
+          <summary>Will it ask for my password?</summary>
+          <p>Normally no. The macOS proxy settings it changes are per-user, so a standard setup needs no admin approval. Anything that would need authorization from the background — at login, on wake, or while the screen is locked — is deferred until you are back at the keyboard. On a signed install in <code>/Applications</code> the optional privileged helper asks once, when it is installed, and is silent after that.</p>
+        </details>
+        <details>
           <summary>Will it work with curl, node, and other CLI tools?</summary>
           <p>Yes. It writes <code>HTTP_PROXY</code>/<code>HTTPS_PROXY</code> into your shell rc files, so new terminal sessions route through it automatically.</p>
         </details>
@@ -300,7 +318,7 @@
         </details>
         <details>
           <summary>What happens if the app crashes while routing is on?</summary>
-          <p>A tiny crash watchdog restores your original proxy settings within milliseconds, so your internet is never left pointing at a dead local port.</p>
+          <p>A tiny crash watchdog restores your original proxy settings within milliseconds, so your internet is never left pointing at a dead local port. The app also keeps its saved recovery state until a restore has actually succeeded, so a transient failure can’t erase it.</p>
         </details>
         <details>
           <summary>How do updates work?</summary>

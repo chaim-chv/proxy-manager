@@ -75,6 +75,7 @@
     <p><strong>Is my data private?</strong> Yes. There is no telemetry and no analytics; TLS is passed through untouched and metadata stays on your machine. See the <a href="privacy.html">privacy policy</a>.</p>
     <p><strong>Do I need my own tunnel?</strong> Proxy Manager routes to a SOCKS5 proxy that you provide — for example <code>ssh -D 1080 user@host</code>. Or switch on “Run the tunnel for me” and let the app create and supervise the SSH tunnel for you. See the <a href="index.html#faq">FAQ</a> for more.</p>
     <p><strong>Can I route traffic per app?</strong> Yes. In Settings → Apps, each app can be set to <em>Tunnel all</em>, <em>Use target rules</em> (follow the host allow-list), or <em>Direct all</em>, with a default for apps you don’t list. You can also set the frontmost app’s mode from the menu bar. It’s off until you turn it on.</p>
+    <p><strong>Will it ask for my password?</strong> Normally no. The macOS proxy settings it changes are per-user, so a standard setup needs no admin approval. Anything that would need authorization from the background — at login, on wake, or while the screen is locked — waits until you are back at the keyboard. A signed install in <code>/Applications</code> can use the optional privileged helper, which asks for approval once when it is installed.</p>
 
     <h2>Contributing and source</h2>
     <p>Proxy Manager is open source under the MIT license. Everything — the app, this website, and the release history — lives at <a href="https://github.com/chaim-chv/proxy-manager" rel="noopener">chaim-chv/proxy-manager</a>. Commit conventions and the release process are described in <a href="https://github.com/chaim-chv/proxy-manager/blob/main/CONTRIBUTING.md" rel="noopener">CONTRIBUTING.md</a>.</p>
@@ -93,7 +94,7 @@
             <span data-dl-version></span>
           </span>
         </div>
-        <p class="footer-tag">Route only the hostnames you choose through your SOCKS5 tunnel. Everything else stays direct.</p>
+        <p class="footer-tag">Route only the traffic you choose — by hostname or by app — through your SOCKS5 tunnel. Everything else stays direct.</p>
       </div>
       <nav class="footer-col" aria-label="Product">
         <h4>Product</h4>
