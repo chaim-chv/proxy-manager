@@ -38,6 +38,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case targets = "Targets"
     case apps = "Apps"
     case system = "System"
+    case integration = "Integration"
     case monitoring = "Monitoring"
     case about = "About"
 
@@ -52,6 +53,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .targets: return "scope"
         case .apps: return "square.grid.2x2"
         case .system: return "terminal"
+        case .integration: return "puzzlepiece.extension"
         case .monitoring: return "chart.bar"
         case .about: return "info.circle"
         }
@@ -66,6 +68,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .targets: return "Targets"
         case .apps: return "Apps"
         case .system: return "System"
+        case .integration: return "Integration"
         case .monitoring: return "Monitoring"
         case .about: return "About"
         }
@@ -80,6 +83,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .targets: return "Only these hostnames go through the tunnel."
         case .apps: return "Route traffic by the app that made the request."
         case .system: return "How routing is wired into macOS and your terminal."
+        case .integration: return "Let other apps and the operating system control routing, targets and per-app rules."
         case .monitoring: return "What gets recorded and how long it's kept."
         case .about: return "How Proxy Manager works, in plain words."
         }
@@ -93,7 +97,7 @@ extension SettingsSection {
         ("general", nil, [.general]),
         ("connection", "Connection", [.tunnel, .proxy]),
         ("routing", "Routing", [.targets, .apps]),
-        ("system", "System", [.appearance, .system, .monitoring]),
+        ("system", "System", [.appearance, .system, .integration, .monitoring]),
         ("about", nil, [.about]),
     ]
 }
@@ -160,6 +164,7 @@ struct SettingsView: View {
         case .targets: TargetsView()
         case .apps: AppsSettingsView()
         case .system: SystemSettingsView()
+        case .integration: IntegrationSettingsView()
         case .monitoring: MonitoringSettingsView()
         case .about: AboutSettingsView()
         }

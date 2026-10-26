@@ -15,6 +15,7 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 | [telemetry.md](telemetry.md) | SQLite store, batched flush, live feed, stats |
 | [system-integration.md](system-integration.md) | System proxy (networksetup), shell env injection, snapshot |
 | [privileged-helper.md](privileged-helper.md) | Helper daemon, XPC protocol, authorization |
+| [integration.md](integration.md) | External control: router, actions, XPC agent, consent, audit |
 | [app-model-lifecycle.md](app-model-lifecycle.md) | State machine, enable/disable, crash recovery |
 | [config.md](config.md) | JSON config store, models, snapshot persistence |
 | [tunnel-supervisor.md](tunnel-supervisor.md) | SOCKS5 health probe, tunnel restart |

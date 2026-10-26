@@ -17,6 +17,7 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 DAEMONS_DIR="$APP_BUNDLE/Contents/Library/LaunchDaemons"
+LAUNCH_AGENTS_DIR="$APP_BUNDLE/Contents/Library/LaunchAgents"
 # Canonical SMAppService.daemon location. The plist stays in LaunchDaemons;
 # `BundleProgram` points here (relative to the app bundle).
 HELPER_TOOLS_DIR="$APP_BUNDLE/Contents/Library/HelperTools"
@@ -46,7 +47,9 @@ fi
 APP_SOURCES=()
 while IFS= read -r -d '' f; do
     APP_SOURCES+=("$f")
-done < <(find Sources -name '*.swift' -not -path 'Sources/Helper/*' -print0 | sort -z)
+done < <(find Sources -name '*.swift' \
+    -not -path 'Sources/Helper/*' \
+    -not -path 'Sources/ControlAgent/*' -print0 | sort -z)
 
 # Helper sources: shared protocol + the helper target.
 HELPER_SOURCES=(Sources/System/HelperProtocol.swift)
@@ -77,7 +80,7 @@ fi
 echo "🔨 Building $APP_NAME v$VERSION for $ARCH (macOS $MIN_MACOS+)..."
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR" "$FRAMEWORKS_DIR" "$HELPER_TOOLS_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DAEMONS_DIR" "$LAUNCH_AGENTS_DIR" "$FRAMEWORKS_DIR" "$HELPER_TOOLS_DIR"
 
 if [ -n "${SPARKLE_PUBLIC_KEY:-}" ]; then
     SPARKLE_KEY_PLIST="    <key>SUPublicEDKey</key>
@@ -181,6 +184,37 @@ ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 unset EXTRA_LINK_FLAGS
 compile "$ARCH" "$HELPER_TOOLS_DIR/$HELPER_NAME" "${HELPER_SOURCES[@]}"
 
+# The control agent is an unprivileged per-user LaunchAgent that exposes the
+# XPC Mach service and relays to the app's local socket. Ad-hoc builds can
+# compile and sign it, but `SMAppService.agent` cannot register without a Team ID.
+AGENT_NAME="com.proxymanager.control-agent"
+AGENT_SOURCES=(
+    Sources/Integration/IntegrationValue.swift
+    Sources/Integration/IntegrationProtocol.swift
+    Sources/Integration/ControlProtocol.swift
+    Sources/Support/Log.swift
+    Sources/ControlAgent/main.swift
+)
+compile "$ARCH" "$HELPER_TOOLS_DIR/$AGENT_NAME" "${AGENT_SOURCES[@]}"
+
+cat > "$LAUNCH_AGENTS_DIR/$AGENT_NAME.plist" <<EOF2
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$AGENT_NAME</string>
+    <key>BundleProgram</key>
+    <string>Contents/Library/HelperTools/$AGENT_NAME</string>
+    <key>MachServices</key>
+    <dict>
+        <key>com.proxymanager.control</key>
+        <true/>
+    </dict>
+</dict>
+</plist>
+EOF2
+
 # Embed the launch daemon plist (used by SMAppService.daemon).
 cat > "$DAEMONS_DIR/$HELPER_NAME.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -229,6 +263,7 @@ sign_sparkle() {
 
 sign_sparkle
 codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$HELPER_TOOLS_DIR/$HELPER_NAME"
+codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$HELPER_TOOLS_DIR/$AGENT_NAME"
 codesign --force $SIGN_RUNTIME --sign "$IDENTITY" "$APP_BUNDLE"
 
 if [ "$IDENTITY" = "-" ]; then

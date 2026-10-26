@@ -1,8 +1,15 @@
 import Foundation
+import ServiceManagement
 
 /// Owns the integration runtime: the permission store, the router and the local
 /// control socket. `AppModel` only calls `apply(_:)` with the current settings,
 /// so the coordinator (not the model) decides what is running.
+enum IntegrationAgentState: Equatable {
+    case disabled
+    case ready
+    case unavailable(String)
+}
+
 final class IntegrationCoordinator {
     private weak var host: IntegrationHost?
     private let supportDir: URL
@@ -13,6 +20,8 @@ final class IntegrationCoordinator {
     private var routerUsesAudit: Bool?
     private var server: ControlSocketServer?
     private var applied: IntegrationSettings?
+    private let agent = SMAppService.agent(plistName: "com.proxymanager.control-agent.plist")
+    private(set) var agentState: IntegrationAgentState = .disabled
 
     init(host: IntegrationHost, supportDir: URL,
          consent: IntegrationConsentProviding? = nil) {
@@ -42,9 +51,12 @@ final class IntegrationCoordinator {
 
         guard settings.enabled, settings.xpcEnabled else {
             stopServer()
+            unregisterAgent()
             return
         }
         guard let host else { return }
+
+        registerAgent()
 
         let audit = settings.auditEnabled ? IntegrationAudit(directory: supportDir) : nil
         if router == nil || routerUsesAudit != settings.auditEnabled {
@@ -55,9 +67,53 @@ final class IntegrationCoordinator {
         startServer(router: router)
     }
 
+    /// Stops the runtime endpoint but keeps the agent registered: registration
+    /// is a user preference, and a registered agent is what lets another app
+    /// relaunch Proxy Manager after it was quit.
     func stop() {
         stopServer()
         applied = nil
+    }
+
+    // MARK: - XPC agent
+
+    /// Registration is silent for an agent (unlike the privileged daemon), but
+    /// it still needs a Developer-ID signature: an ad-hoc build has no Team ID
+    /// and `SMAppService` refuses to register it.
+    private func registerAgent() {
+        switch agent.status {
+        case .enabled:
+            agentState = .ready
+        case .requiresApproval:
+            agentState = .unavailable("Approve Proxy Manager in Login Items & Extensions")
+        case .notRegistered, .notFound:
+            do {
+                try agent.register()
+                agentState = agent.status == .enabled
+                    ? .ready
+                    : .unavailable("Waiting for approval in Login Items & Extensions")
+                Log.integration.notice("control: registered the XPC agent")
+            } catch {
+                agentState = .unavailable(error.localizedDescription)
+                Log.integration.error("control: agent registration failed: \(error.localizedDescription, privacy: .public)")
+            }
+        @unknown default:
+            agentState = .unavailable("Unknown agent status")
+        }
+    }
+
+    private func unregisterAgent() {
+        guard agent.status == .enabled || agent.status == .requiresApproval else {
+            agentState = .disabled
+            return
+        }
+        do {
+            try agent.unregister()
+            Log.integration.notice("control: unregistered the XPC agent")
+        } catch {
+            Log.integration.error("control: agent unregister failed: \(error.localizedDescription, privacy: .public)")
+        }
+        agentState = .disabled
     }
 
     // MARK: - Server

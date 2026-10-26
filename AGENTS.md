@@ -37,6 +37,8 @@ ProxyManager/
 │   ├── Socks/                 ← raw BSD sockets + RFC 1928 SOCKS5 client
 │   ├── Proxy/                 ← HTTP CONNECT/forward proxy core + relay + parser
 │   ├── System/                ← system proxy mgr, XPC client, shell + GUI env injectors, helper protocol
+│   ├── Integration/           ← external control router, socket, permissions, consent, adapters
+│   ├── ControlAgent/          ← per-user XPC agent (separate binary, relays to the app)
 │   ├── Helper/                ← privileged helper daemon (separate binary)
 │   ├── Telemetry/             ← batched SQLite telemetry + live feed
 │   ├── Tunnel/                ← SOCKS5 health probe + supervisor + SSH tunnel runner + keychain
@@ -143,6 +145,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 | Telemetry / SQLite | `docs/telemetry.md` |
 | System proxy + shell env | `docs/system-integration.md` |
 | Privileged helper + XPC | `docs/privileged-helper.md` |
+| External integration (router, XPC agent, consent, audit) | `docs/integration.md` |
 | App state machine / lifecycle / crash recovery | `docs/app-model-lifecycle.md` |
 | Config persistence | `docs/config.md` |
 | Tunnel health supervisor | `docs/tunnel-supervisor.md` |
