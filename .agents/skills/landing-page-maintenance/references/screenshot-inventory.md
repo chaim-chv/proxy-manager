@@ -13,7 +13,7 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 | `apps` | `settings-apps` | Settings → Apps: per-app rules (Chrome/Safari/Slack/node) with the routing detail pane open | 1800×1280 | Screenshots → “Route by app” |
 | `tunnel` | `settings-tunnel` | Settings → Tunnel: manual SOCKS5 config, healthy status, supervision | 1800×1280 | Screenshots → “Bring your own tunnel” |
 | `tunnel-managed` | `settings-tunnel-managed` | Settings → Tunnel in “Run the tunnel for me” (SSH) mode, running | 1800×1280 | Managed-tunnel spotlight |
-| `onboarding` | `onboarding` | First-run wizard, step 2 (choose targets from presets) | 1240×920 | Screenshots → “Set up in about a minute” |
+| `onboarding` | `onboarding` | First-run wizard, "Choose what to route" (presets) | 1240×976 | Screenshots → “Set up in about a minute” |
 
 Appearances: `dark`, `light` → 8 screens × 2 = **16 files**.
 
