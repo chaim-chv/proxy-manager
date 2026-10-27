@@ -14,6 +14,20 @@ OUTPUT_DIR="${OUTPUT_DIR:-.}"
 # demo build; see .agents/skills/landing-page-maintenance).
 SWIFT_FLAGS="${SWIFT_FLAGS:-}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
+CONST_VALUES_DIR="$(mktemp -d)"
+trap 'rm -rf "$CONST_VALUES_DIR"' EXIT
+# Protocols whose members feed App Intents metadata. The compiler only emits
+# .swiftconstvalues for nominal types conforming to a name in this list.
+cat > "$CONST_VALUES_DIR/protocols.yaml" <<'YAML'
+- AppIntent
+- AppEntity
+- AppEnum
+- AppShortcutsProvider
+- AppIntentsPackage
+- EntityQuery
+- EntityPropertyQuery
+- AppValue
+YAML
 MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 RESOURCES_DIR="$APP_BUNDLE/Contents/Resources"
 DAEMONS_DIR="$APP_BUNDLE/Contents/Library/LaunchDaemons"
@@ -158,6 +172,7 @@ compile() {
         -O \
         -target "${target}-apple-macosx${MIN_MACOS}" \
         $SWIFT_FLAGS \
+        ${COMPILE_EXTRA[@]+"${COMPILE_EXTRA[@]}"} \
         -framework AppKit \
         -framework SwiftUI \
         -framework Charts \
@@ -177,14 +192,53 @@ APP_LINK_FLAGS=(-F "$SPARKLE_DIR" -framework Sparkle
 if [ "${UNIVERSAL:-0}" = "1" ] && [ "$ARCH" = "arm64" ]; then
     echo "🛠  Building universal (arm64 + x86_64)…"
     EXTRA_LINK_FLAGS=("${APP_LINK_FLAGS[@]}")
+    COMPILE_EXTRA=(-whole-module-optimization
+        -emit-const-values-path "$CONST_VALUES_DIR/$APP_NAME-arm64.swiftconstvalues"
+        -Xfrontend -const-gather-protocols-file -Xfrontend "$CONST_VALUES_DIR/protocols.yaml")
     compile arm64 "$MACOS_DIR/$APP_NAME.arm64" "${APP_SOURCES[@]}"
+    COMPILE_EXTRA=(-whole-module-optimization
+        -emit-const-values-path "$CONST_VALUES_DIR/$APP_NAME-x86_64.swiftconstvalues"
+        -Xfrontend -const-gather-protocols-file -Xfrontend "$CONST_VALUES_DIR/protocols.yaml")
     compile x86_64 "$MACOS_DIR/$APP_NAME.x86_64" "${APP_SOURCES[@]}"
     lipo -create -output "$MACOS_DIR/$APP_NAME" \
         "$MACOS_DIR/$APP_NAME.arm64" "$MACOS_DIR/$APP_NAME.x86_64"
     rm -f "$MACOS_DIR/$APP_NAME.arm64" "$MACOS_DIR/$APP_NAME.x86_64"
 else
     EXTRA_LINK_FLAGS=("${APP_LINK_FLAGS[@]}")
+    COMPILE_EXTRA=(-whole-module-optimization
+        -emit-const-values-path "$CONST_VALUES_DIR/$APP_NAME-$ARCH.swiftconstvalues"
+        -Xfrontend -const-gather-protocols-file -Xfrontend "$CONST_VALUES_DIR/protocols.yaml")
     compile "$ARCH" "$MACOS_DIR/$APP_NAME" "${APP_SOURCES[@]}"
+fi
+COMPILE_EXTRA=()
+
+# App Intents metadata. Xcode runs this automatically; a swiftc build does not,
+# and without Metadata.appintents Shortcuts/Siri/Spotlight never see the actions.
+# The processor reads the compiler-emitted .swiftconstvalues plus the sources.
+APP_INTENTS_TOOL="$(xcrun -f appintentsmetadataprocessor 2>/dev/null || true)"
+if [ -n "$APP_INTENTS_TOOL" ]; then
+    INTENTS_SOURCES="$CONST_VALUES_DIR/sources.txt"
+    for f in "${APP_SOURCES[@]}"; do printf '%s\n' "$PWD/$f"; done > "$INTENTS_SOURCES"
+    INTENTS_CONSTS="$CONST_VALUES_DIR/consts.txt"
+    ls "$CONST_VALUES_DIR"/*.swiftconstvalues > "$INTENTS_CONSTS" 2>/dev/null || : > "$INTENTS_CONSTS"
+    XCODE_BUILD_VERSION="$(xcodebuild -version 2>/dev/null | awk '/Build version/ {print $3}')"
+    if ! "$APP_INTENTS_TOOL" \
+        --output "$RESOURCES_DIR" \
+        --toolchain-dir "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain" \
+        --module-name "$APP_NAME" \
+        --sdk-root "$(xcrun --show-sdk-path)" \
+        --xcode-version "${XCODE_BUILD_VERSION:-26.0}" \
+        --platform-family macOS \
+        --deployment-target "$MIN_MACOS" \
+        --target-triple "${ARCH}-apple-macosx${MIN_MACOS}" \
+        --source-file-list "$INTENTS_SOURCES" \
+        --swift-const-vals-list "$INTENTS_CONSTS" \
+        --force; then
+        echo "⚠️  App Intents metadata generation failed; Shortcuts will not list the actions." >&2
+        if [ "$IDENTITY" != "-" ]; then exit 1; fi
+    fi
+else
+    echo "⚠️  appintentsmetadataprocessor not found; skipping App Intents metadata." >&2
 fi
 
 # Embed Sparkle. `ditto` (not `cp -R`) preserves the framework's symlinks,

@@ -86,6 +86,14 @@ final class IntegrationCoordinator {
                               source: .urlScheme(senderPID: nil))
     }
 
+    /// A command from an App Intent. Same gating as the URL adapter: `nil`
+    /// means external control is off, which the intent turns into a dialog.
+    func performIntent(_ action: String,
+                       args: [String: IntegrationValue] = [:]) -> IntegrationResult? {
+        guard let settings = applied, settings.enabled, let router else { return nil }
+        return router.perform(action: action, args: args, source: .appIntent)
+    }
+
     func stop() {
         stopServer()
         applied = nil

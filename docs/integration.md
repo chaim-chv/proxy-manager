@@ -9,9 +9,8 @@ exposed — those stay UI-only.
 The source of truth for the action list is `Sources/Integration/IntegrationAction.swift`.
 `capabilities` returns the same data at runtime.
 
-> **Status:** the router, the local control socket, the XPC agent and the
-> `proxymanager://` URL scheme are implemented. App Intents are next; the
-> registry already records which actions they may expose.
+> **Status:** all three transports are implemented — the local control socket
+> and XPC agent, the `proxymanager://` URL scheme, and App Intents.
 
 ## Architecture
 
@@ -101,6 +100,35 @@ proxymanager://v1/app/activate
 - No reply channel. Use XPC when the caller needs a result.
 - When external control or the URL switch is off, the event is ignored (logged,
   not audited).
+
+### App Intents (Shortcuts, Siri, Spotlight)
+
+| Intent | Effect |
+|---|---|
+| `SetRoutingIntent(enabled)` | `routing.enable` / `routing.disable` |
+| `ToggleRoutingIntent()` | `routing.toggle` |
+| `RoutingStatusIntent()` | `status` |
+| `AddTargetIntent(host)` | `targets.add` (confirms) |
+| `RemoveTargetIntent(host)` | `targets.remove` |
+| `ListTargetsIntent()` | `targets.list`, returns the patterns |
+| `SetAppRoutingIntent(bundleIdentifier, mode)` | enables per-app routing and upserts the rule (confirms) |
+| `OpenProxyManagerIntent(pane)` | `ui.open` |
+
+Suggested phrases: “Toggle Proxy Manager routing”, “Check Proxy Manager status”,
+“Add a Proxy Manager target”, “Open Proxy Manager”. The rest appear in the
+Shortcuts gallery.
+
+- Intents run in the app's process and call the same router, so the master
+  switch still gates them. With external control off they return a dialog
+  pointing at Settings → Integration.
+- Confirmation uses the specific-message API on macOS 15+; on macOS 14 it is the
+  generic prompt.
+- **Build requirement:** a `swiftc` build has no Xcode metadata phase. `build.sh`
+  compiles with whole-module optimization and
+  `-Xfrontend -const-gather-protocols-file`, then runs
+  `appintentsmetadataprocessor` into `Contents/Resources/Metadata.appintents`.
+  Without that bundle Shortcuts never lists the actions. A release build fails
+  if the metadata cannot be produced; an ad-hoc build warns and continues.
 
 ### Local socket (development and tests)
 
