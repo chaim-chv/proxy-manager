@@ -5,4 +5,5 @@ import Foundation
 enum AppLinks {
     static let homepage = URL(string: "https://chaim-chv.github.io/proxy-manager/")!
     static let source = URL(string: "https://github.com/chaim-chv/proxy-manager")!
+    static let integrationDocs = URL(string: "https://github.com/chaim-chv/proxy-manager/blob/main/docs/integration.md")!
 }

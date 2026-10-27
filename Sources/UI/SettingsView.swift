@@ -1134,6 +1134,8 @@ struct AboutSettingsView: View {
                 Divider()
                 conceptsSection
                 Divider()
+                externalAccessSection
+                Divider()
                 privacySection
                 Divider()
                 creditsSection
@@ -1252,6 +1254,25 @@ struct AboutSettingsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    // MARK: External access
+
+    private var externalAccessSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("External access")
+                .font(.headline)
+
+            Text("Off by default. Settings → Integration lets other apps and the operating system control only routing, targets, per-app rules, status and window navigation. The tunnel, proxy internals, system settings, appearance and history are never exposed. Each app is approved once, every request is audited, and an external call can never raise an administrator prompt.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            concept("URL links", "`proxymanager://v1/routing/toggle` and `…/ui/open?pane=settings` — routing and window actions only, because a URL is unauthenticated.")
+            concept("Shortcuts and Siri", "App Intents for routing, targets, per-app mode and opening a pane.")
+            concept("Apps and the CLI", "An XPC service, `com.proxymanager.control`, plus a local socket for development. Requires a Developer-ID build.")
+            linkRow("Integration docs", "docs/integration.md", AppLinks.integrationDocs)
         }
     }
 

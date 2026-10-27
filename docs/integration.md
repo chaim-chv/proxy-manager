@@ -233,11 +233,23 @@ with `unsupported`.
 
 Settings → **Integration**:
 
-- master switch (off by default)
-- XPC clients toggle and registration state
-- audit log toggle
-- approved identities with **Revoke**
-- live socket state
+| Switch | What it stops |
+|---|---|
+| **Allow external control** | everything: socket, XPC agent, URL links and Shortcuts |
+| **Apps and CLI (XPC)** | agent registration and the local socket |
+| **URL links** | `proxymanager://` delivery |
+| **Shortcuts and Siri** | the App Intents |
+| **Keep an audit log** | audit writes only; requests still run |
+
+The master switch is off by default. Turning it off stops the socket and
+unregisters the agent; URL and Shortcut calls then return "external control is
+off". Approvals are kept, so turning it back on does not re-prompt.
+
+`revert.sh` goes further: it boots the agent out and removes `control.sock`,
+`control.token` and `integration-permissions.json`.
+
+The pane also shows live socket and agent state, and the approved identities
+with **Revoke**.
 
 Unified log: `log stream --predicate 'subsystem == "com.proxymanager.app" AND category == "integration"'`.
 

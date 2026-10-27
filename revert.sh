@@ -55,6 +55,10 @@ CONFIG="$SUPPORT_DIR/config.json"
 SSH_PID_FILE="$SUPPORT_DIR/ssh.pid"
 GUI_ENV_SNAPSHOT="$SUPPORT_DIR/gui-env-snapshot.json"
 WATCHDOG_LABEL="com.proxymanager.watchdog"
+CONTROL_AGENT_LABEL="com.proxymanager.control-agent"
+CONTROL_SOCKET="$SUPPORT_DIR/control.sock"
+CONTROL_TOKEN="$SUPPORT_DIR/control.token"
+INTEGRATION_PERMISSIONS="$SUPPORT_DIR/integration-permissions.json"
 BUNDLE_ID="com.proxymanager.app"
 GUI_ENV_KEYS="HTTP_PROXY HTTPS_PROXY ALL_PROXY WSS_PROXY NO_PROXY PROXY_MANAGER_ACTIVE"
 
@@ -122,6 +126,20 @@ unload_watchdog() {
     fi
     rm -f "$HOME/Library/LaunchAgents/$WATCHDOG_LABEL.plist"
     rm -f "$SUPPORT_DIR/watchdog.json"
+}
+
+# ── 0b. External control ─────────────────────────────────────────────────────
+# Registered with SMAppService.agent. bootout stops the running instance;
+# removing the socket, token and approvals makes the API unreachable even if
+# launchd still knows the on-demand service. The app itself unregisters the
+# agent when the Settings switch is turned off.
+unload_control_agent() {
+    if "$LAUNCHCTL" bootout "gui/$(id -u)/$CONTROL_AGENT_LABEL" 2>/dev/null; then
+        say "control agent unloaded"
+    else
+        say "control agent not loaded"
+    fi
+    rm -f "$CONTROL_SOCKET" "$CONTROL_TOKEN" "$INTEGRATION_PERMISSIONS"
 }
 
 # ── 1a. Restore the saved originals (snapshot exists) ────────────────────────
@@ -712,6 +730,7 @@ marker_stamp() {
 echo "🧹 Reverting Proxy Manager effects…"
 
 unload_watchdog
+unload_control_agent
 
 did_clear=0
 if [ "$RESET_TO_DIRECT" -eq 1 ]; then

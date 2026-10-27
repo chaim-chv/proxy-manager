@@ -106,6 +106,12 @@ When enabled, the app also writes `~/.config/proxy-manager/env.sh` and adds a gu
 
 In Settings → Tunnel, switch to **"Run the tunnel for me"** and fill in the SSH host, port, username, and either a key file path or a password (stored in the macOS Keychain). The app then runs `ssh -N -D <socksHost>:<socksPort> <username>@<sshHost>` in the background, supervises it, and restarts it automatically if the connection drops (with backoff). Key-file auth is preferred; for password auth the app feeds the Keychain password to `ssh` via a one-shot askpass helper — it's never put on the command line.
 
+## Control from other apps
+
+Integration is **off by default**. Settings → Integration can expose routing, targets, per-app rules, status reads and window navigation to three adapters — `proxymanager://` links, Shortcuts/Siri actions, and an XPC service for apps and CLIs (`com.proxymanager.control`). Each app is approved once, every request is audited, and external calls can never raise an administrator prompt. Turn the master switch off, or switch off individual adapters, to close it completely.
+
+See [docs/integration.md](docs/integration.md) for the action list, security model and client examples.
+
 ## Configuration
 
 The app's configuration lives in `~/Library/Application Support/ProxyManager/config.json` (it can also be edited in the sidebar-based Settings UI, which is the recommended way):

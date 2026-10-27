@@ -90,7 +90,8 @@ final class IntegrationCoordinator {
     /// means external control is off, which the intent turns into a dialog.
     func performIntent(_ action: String,
                        args: [String: IntegrationValue] = [:]) -> IntegrationResult? {
-        guard let settings = applied, settings.enabled, let router else { return nil }
+        guard let settings = applied, settings.enabled, settings.intentsEnabled,
+              let router else { return nil }
         return router.perform(action: action, args: args, source: .appIntent)
     }
 

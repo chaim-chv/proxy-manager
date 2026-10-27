@@ -21,28 +21,38 @@ struct IntegrationSettingsView: View {
                 ) {
                     VStack(spacing: 0) {
                         SettingsToggleRow(
-                            title: "Allow other apps to control Proxy Manager",
-                            help: "The master switch. Turning it off stops the local control socket and unregisters the XPC agent; existing approvals are kept.",
+                            title: "Allow external control",
+                            help: "The master switch. Turning it off stops the local control socket, unregisters the XPC agent, and makes the URL scheme and Shortcuts refuse to run. Existing app approvals are kept, so turning it back on does not re-prompt.",
                             isOn: model.binding(\.integration.enabled)
                         )
                         Divider()
                         SettingsToggleRow(
-                            title: "Allow XPC clients (apps and the CLI)",
+                            title: "Apps and CLI (XPC)",
                             help: "Registers a per-user launch agent that exposes the com.proxymanager.control Mach service. Needs a Developer-ID signed build; an ad-hoc build can still use the local socket for development.",
                             isOn: model.binding(\.integration.xpcEnabled)
                         )
+                        .disabled(!model.config.integration.enabled)
                         Divider()
                         SettingsToggleRow(
-                            title: "Allow the proxymanager:// URL scheme",
+                            title: "URL links (proxymanager://)",
                             help: "Lets any link or script run `open proxymanager://v1/routing/toggle`, open a pane, and similar. A URL is unauthenticated, so it can only reach routing and window actions — never targets, app rules or tunnel settings.",
                             isOn: model.binding(\.integration.urlSchemeEnabled)
                         )
+                        .disabled(!model.config.integration.enabled)
+                        Divider()
+                        SettingsToggleRow(
+                            title: "Shortcuts and Siri",
+                            help: "Makes the App Intents available in Shortcuts, Siri and Spotlight. They run in the app and go through the same checks as the other transports.",
+                            isOn: model.binding(\.integration.intentsEnabled)
+                        )
+                        .disabled(!model.config.integration.enabled)
                         Divider()
                         SettingsToggleRow(
                             title: "Keep an audit log",
                             help: "Writes one line per request to integration-audit.jsonl (0600) next to the config: caller, action, arguments, outcome and duration. Arguments that look like secrets are redacted.",
                             isOn: model.binding(\.integration.auditEnabled)
                         )
+                        .disabled(!model.config.integration.enabled)
                     }
                 }
 

@@ -425,6 +425,7 @@ struct IntegrationSettings: Codable, Equatable {
     var enabled: Bool = false
     var urlSchemeEnabled: Bool = true
     var xpcEnabled: Bool = true
+    var intentsEnabled: Bool = true
     var auditEnabled: Bool = true
 
     init() {}
@@ -434,6 +435,7 @@ struct IntegrationSettings: Codable, Equatable {
         enabled = c.tolerant(.enabled, false)
         urlSchemeEnabled = c.tolerant(.urlSchemeEnabled, true)
         xpcEnabled = c.tolerant(.xpcEnabled, true)
+        intentsEnabled = c.tolerant(.intentsEnabled, true)
         auditEnabled = c.tolerant(.auditEnabled, true)
     }
 }

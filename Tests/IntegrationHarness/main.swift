@@ -801,6 +801,25 @@ do {
           error("proxymanager://v1/ui/open?\(many)") != nil)
 }
 
+// MARK: - Config
+
+print("== Config ==")
+do {
+    let legacy = #"{"version":1,"targets":[{"pattern":"example.com","enabled":true}]}"#
+    let config = try! JSONDecoder().decode(AppConfig.self, from: Data(legacy.utf8))
+    check("legacy config keeps integration off", !config.integration.enabled)
+    check("legacy config enables the adapters by default",
+          config.integration.urlSchemeEnabled
+              && config.integration.xpcEnabled
+              && config.integration.intentsEnabled)
+    check("legacy config keeps the audit log on", config.integration.auditEnabled)
+    check("legacy targets survive", config.targets.count == 1)
+
+    let future = #"{"integration":{"enabled":true,"futureSwitch":1},"targets":[]}"#
+    let futureConfig = try! JSONDecoder().decode(AppConfig.self, from: Data(future.utf8))
+    check("a future config field does not break decode", futureConfig.integration.enabled)
+}
+
 // MARK: - Result
 
 print("")
