@@ -35,7 +35,12 @@ final class IntegrationCoordinator {
 
     var socketPath: String { supportDir.appendingPathComponent("control.sock").path }
     var tokenPath: String { supportDir.appendingPathComponent("control.token").path }
-    var isRunning: Bool { server?.isRunning ?? false }
+    var isRunning: Bool {
+        #if SCREENSHOT_MODE
+        if DemoMode.isEnabled { return true }
+        #endif
+        return server?.isRunning ?? false
+    }
     var permissionsSnapshot: [IntegrationPermission] { permissions.all() }
 
     func revoke(_ key: String) {
@@ -45,6 +50,14 @@ final class IntegrationCoordinator {
     /// Idempotent: called from every `commitConfig`, so it must do nothing when
     /// the settings did not change.
     func apply(_ settings: IntegrationSettings) {
+        #if SCREENSHOT_MODE
+        if DemoMode.isEnabled {
+            // The demo never starts the socket or registers the agent; show the
+            // healthy state the pane would have after a real toggle.
+            agentState = .ready
+            return
+        }
+        #endif
         guard !DemoMode.isEnabled else { return }
         guard settings != applied else { return }
         applied = settings

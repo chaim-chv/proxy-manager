@@ -71,6 +71,7 @@ enum DemoMode {
         supportDirOverride = support
         envDirOverride = env
         writeConfig(to: support)
+        writeIntegrationPermissions(to: support)
     }
 
     private static func writeConfig(to support: URL) {
@@ -93,11 +94,50 @@ enum DemoMode {
         config.apps.recordInTelemetry = true
         config.apps.rules = demoAppRules()
         config.monitor.recordPaths = true
+        config.integration.enabled = true
+        config.integration.urlSchemeEnabled = true
+        config.integration.xpcEnabled = true
+        config.integration.intentsEnabled = true
+        config.integration.auditEnabled = true
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else { return }
         try? data.write(to: support.appendingPathComponent("config.json"), options: .atomic)
+    }
+
+    /// A realistic approval list for the Settings → Integration screenshot.
+    /// The real store keys entries by requirement hash; the pane only reads the
+    /// display fields, and the coordinator never starts in demo mode.
+    private static func writeIntegrationPermissions(to support: URL) {
+        let entries: [[String: Any]] = [
+            [
+                "key": "demo-raycast",
+                "requirement": "identifier \"com.raycast.macos\" and anchor apple generic",
+                "bundleID": "com.raycast.macos",
+                "teamID": "DEMO123456",
+                "displayName": "Raycast",
+                "path": "/Applications/Raycast.app",
+                "scope": "control",
+                "firstSeen": "2026-10-01T09:12:00.000Z",
+                "lastSeen": "2026-10-26T18:40:00.000Z",
+            ],
+            [
+                "key": "demo-terminal",
+                "requirement": "identifier \"com.apple.Terminal\" and anchor apple",
+                "bundleID": "com.apple.Terminal",
+                "teamID": "DEMO123456",
+                "displayName": "Terminal",
+                "path": "/System/Applications/Utilities/Terminal.app",
+                "scope": "read",
+                "firstSeen": "2026-10-02T11:05:00.000Z",
+                "lastSeen": "2026-10-25T21:14:00.000Z",
+            ],
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: entries,
+                                                     options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: support.appendingPathComponent("integration-permissions.json"),
+                        options: .atomic)
     }
 
     private static func demoTargets() -> [TargetRule] {
@@ -161,6 +201,7 @@ enum DemoMode {
         case "settings-targets": model.settingsSelection = .targets
         case "settings-apps": model.settingsSelection = .apps
         case "settings-about": model.settingsSelection = .about
+        case "settings-integration": model.settingsSelection = .integration
         default: break
         }
 
@@ -195,7 +236,7 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-general", "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about":
+        case "settings-general", "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about", "settings-integration":
             if screen == "settings-apps" {
                 model.revealAppRuleID = model.config.apps.rules.first?.id
             }

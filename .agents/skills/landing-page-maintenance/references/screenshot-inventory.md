@@ -11,11 +11,12 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 | `dashboard-detail` | `dashboard-detail` | Dashboard with a request selected and the detail inspector open | 2240×1496 | Screenshots → “Per-request detail” |
 | `targets` | `settings-targets` | Settings → Targets: rule list, wildcard, disabled rule, match preview | 1800×1280 | Screenshots → “Your allow-list, editable live” |
 | `apps` | `settings-apps` | Settings → Apps: per-app rules (Chrome/Safari/Slack/node) with the routing detail pane open | 1800×1280 | Screenshots → “Route by app” |
+| `integration` | `settings-integration` | Settings → Integration: the master switch on, per-adapter toggles, agent/socket status, and two approved apps | 1800×1280 | Screenshots → “Control it from anywhere” |
 | `tunnel` | `settings-tunnel` | Settings → Tunnel: manual SOCKS5 config, healthy status, supervision | 1800×1280 | Screenshots → “Bring your own tunnel” |
 | `tunnel-managed` | `settings-tunnel-managed` | Settings → Tunnel in “Run the tunnel for me” (SSH) mode, running | 1800×1280 | Managed-tunnel spotlight |
 | `onboarding` | `onboarding` | First-run wizard, "Choose what to route" (presets) | 1240×976 | Screenshots → “Set up in about a minute” |
 
-Appearances: `dark`, `light` → 8 screens × 2 = **16 files**.
+Appearances: `dark`, `light` → 9 screens × 2 = **18 files**.
 
 Two more demo screens exist for ad-hoc capture (not part of the site set, so not
 in `SCREENS`): `settings-about` (Settings → About) and `about-panel` (the
