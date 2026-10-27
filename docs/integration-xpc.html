@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apps & CLI — Proxy Manager</title>
+<meta name="description" content="The com.proxymanager.control XPC service for other applications.">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1116" media="(prefers-color-scheme: dark)">
+<meta property="og:title" content="Apps & CLI — Proxy Manager">
+<meta property="og:description" content="The com.proxymanager.control XPC service for other applications.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Proxy Manager">
+<meta property="og:url" content="https://chaim-chv.github.io/proxy-manager/docs/integration-xpc.html">
+<link rel="canonical" href="https://chaim-chv.github.io/proxy-manager/docs/integration-xpc.html">
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../styles.css">
+<script src="../app.js" defer></script>
+<script defer src="https://um.csp-monitor.com/script.js" data-website-id="aea845ca-8926-47d6-b314-d040d14397a2"></script>
+</head>
+<body>
+
+<a class="github-corner" href="https://github.com/chaim-chv/proxy-manager" aria-label="View source on GitHub">
+  <svg viewBox="0 0 250 250" aria-hidden="true">
+    <path class="ribbon" d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"/>
+    <path class="octo-arm" d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2"/>
+    <path class="octo" d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z"/>
+  </svg>
+</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="../index.html">
+      <img class="brand-mark" src="../assets/mark.svg" alt="" width="26" height="26">
+      <span>Proxy Manager<span class="brand-alpha">alpha</span></span>
+    </a>
+    <nav class="nav" aria-label="Sections">
+      <a href="../index.html#screenshots">Screenshots</a>
+      <a href="../index.html#how">How it works</a>
+      <a href="index.html" aria-current="page">Docs</a>
+      <a href="../index.html#faq">FAQ</a>
+    </nav>
+    <div class="header-actions">
+      <a class="github-icon" href="https://github.com/chaim-chv/proxy-manager" aria-label="GitHub repository" rel="noopener">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      </a>
+      <button class="theme-toggle" data-theme-toggle type="button" aria-label="Color theme" title="Color theme">
+        <svg class="i-system" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+        <svg class="i-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8"/></svg>
+        <svg class="i-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5Z"/></svg>
+      </button>
+      <a class="btn btn-primary" href="https://github.com/chaim-chv/proxy-manager/releases/latest" data-dl-main rel="noopener">Download</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="wrap page-head">
+    <p class="eyebrow">Documentation</p>
+    <h1>Apps & CLI</h1>
+    <p class="lede">The com.proxymanager.control XPC service for other applications.</p>
+  </div>
+
+  <div class="wrap docs-layout">
+    <nav class="docs-sidebar" aria-label="Documentation">
+      <p class="docs-sidebar-title">Documentation</p>
+      <a href="index.html">Overview</a>
+      <a href="integration.html">External access</a>
+      <a href="integration-url.html">URL links</a>
+      <a href="integration-shortcuts.html">Shortcuts &amp; Siri</a>
+      <a href="integration-xpc.html" aria-current="page">Apps &amp; CLI</a>
+      <p class="docs-sidebar-title">Project</p>
+      <a href="https://github.com/chaim-chv/proxy-manager" rel="noopener">Source</a>
+      <a href="https://github.com/chaim-chv/proxy-manager/blob/main/docs/integration.md" rel="noopener">Deep dive</a>
+    </nav>
+    <article class="docs-content prose">
+      
+<p class="docs-note">The XPC service needs a Developer-ID signed build installed in /Applications. An ad-hoc build reports the agent as unavailable and keeps the local socket for development.</p>
+
+<h2>How it fits together</h2>
+<pre><code>your app  ──Mach com.proxymanager.control──▶  control agent  ──▶  Proxy Manager
+                                              (approved per app)     (router)</code></pre>
+<p>The agent is an unprivileged per-user LaunchAgent. It proves who is calling from the code signature, relays the request to the running app, and starts the app if it is not running. It owns no state.</p>
+
+<h2>Requirements</h2>
+<ul>
+  <li>Proxy Manager <strong>Allow external control</strong> and <strong>Apps and CLI (XPC)</strong> are on.</li>
+  <li>A Developer-ID signed app in <code>/Applications</code> — <code>SMAppService.agent</code> refuses an ad-hoc build.</li>
+  <li>Your app must be allowed to look up the Mach service. Sandboxed apps need <code>com.apple.security.temporary-exception.mach-lookup.global-name = com.proxymanager.control</code>. Unsandboxed apps and command-line tools need nothing.</li>
+</ul>
+
+<h2>Connect</h2>
+<pre><code>@objc protocol ControlAgentProtocol {
+    func ping(withReply reply: @escaping (Bool) -&gt; Void)
+    func perform(_ request: Data, withReply reply: @escaping (Data) -&gt; Void)
+}
+
+let connection = NSXPCConnection(machServiceName: "com.proxymanager.control")
+connection.remoteObjectInterface = NSXPCInterface(with: ControlAgentProtocol.self)
+connection.resume()
+
+let agent = connection.remoteObjectProxyWithErrorHandler { error in
+    // service unavailable, or the app could not be launched
+} as! ControlAgentProtocol
+
+agent.perform(try JSONEncoder().encode(request)) { data in
+    let result = try JSONDecoder().decode(IntegrationResult.self, from: data)
+}</code></pre>
+
+<h2>The request</h2>
+<pre><code>{
+  "v": 1,
+  "id": "8F2C…",
+  "action": "targets.add",
+  "args": { "pattern": "api.example.com" }
+}</code></pre>
+<p>The agent adds the caller's identity and a per-launch token; the app decides consent and executes. Responses are the same envelope as the URL and Shortcuts adapters: <code>ok</code>, <code>changed</code>, <code>data</code>, <code>error</code>, <code>auditId</code>, <code>durationMs</code>.</p>
+
+<h2>First call</h2>
+<p>An unknown app triggers the approval sheet in Proxy Manager. The call blocks until the user answers, so give it a generous timeout — 30 seconds rather than the usual two. Approvals are keyed by designated requirement and can be revoked in Settings → Integration. A <em>Read Only</em> grant can list and explain; <em>Control</em> can mutate.</p>
+
+<h2>Protocol version</h2>
+<p><code>capabilities</code> returns every action with its arguments, the protocol version and which adapters may reach it. A request whose <code>v</code> is newer than the app's is refused with <code>unsupported</code>. Actions are additive; an id is never repurposed.</p>
+
+<h2>Development</h2>
+<p>Without a Developer ID, use the local socket directly. It lives at <code>~/Library/Application Support/ProxyManager/control.sock</code>, is 0600, accepts the same user only, and requires the per-launch token from <code>control.token</code> in the same folder.</p>
+<pre><code>{ "v": 1, "token": "…",
+  "identity": { "pid": 4711, "bundleID": "com.acme.tool", "teamID": "ABCDE12345",
+                "requirement": "identifier \"com.acme.tool\"",
+                "displayName": "Acme Tool", "path": "/Applications/Acme Tool.app" },
+  "request": { "v": 1, "id": "…", "action": "status", "args": {} } }</code></pre>
+<p>Frames are a 4-byte big-endian length followed by UTF-8 JSON, capped at 256 KB. The app answers with <code>{ "v": 1, "result": { … } }</code>.</p>
+
+<h2>Rules</h2>
+<ul>
+  <li>No administrator prompts. An external call is never a present user.</li>
+  <li>Only routing, targets, per-app rules, status and window navigation — never the tunnel, proxy internals or system settings.</li>
+  <li>Rate limits: 240 reads and 30 mutations per minute per caller, with a tighter limit on routing toggles.</li>
+  <li>Every request is audited with redacted arguments. A write failure degrades the audit but does not block the request.</li>
+</ul>
+
+    </article>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-cols">
+      <div class="footer-col footer-brand-col">
+        <div class="footer-brand">
+          <img src="../assets/mark.svg" alt="" width="22" height="22">
+          <span>Proxy Manager</span>
+        </div>
+        <p class="footer-tag">Route only the traffic you choose — by hostname or by app — through your SOCKS5 tunnel. Everything else stays direct.</p>
+      </div>
+      <nav class="footer-col" aria-label="Product">
+        <h4>Product</h4>
+        <a href="../index.html#screenshots">Screenshots</a>
+        <a href="../index.html#how">How it works</a>
+        <a href="index.html">Documentation</a>
+        <a href="../privacy.html">Privacy</a>
+        <a href="../index.html#faq">FAQ</a>
+      </nav>
+      <nav class="footer-col" aria-label="Source">
+        <h4>Source</h4>
+        <a href="https://github.com/chaim-chv/proxy-manager" rel="noopener">GitHub</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/releases" rel="noopener">Releases</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/issues" rel="noopener">Issues</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/blob/main/CONTRIBUTING.md" rel="noopener">Contributing</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/blob/main/LICENSE" rel="noopener">MIT License</a>
+      </nav>
+      <nav class="footer-col" aria-label="Privacy and help">
+        <h4>Privacy &amp; help</h4>
+        <a href="../privacy.html">Privacy</a>
+        <a href="../support.html">Support</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/issues/new" rel="noopener">Report a bug</a>
+        <a href="https://github.com/chaim-chv/proxy-manager/blob/main/README.md#installation" rel="noopener">Build from source</a>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <p class="footer-note">
+        100% vibe-coded by <a href="https://github.com/chaim-chv/" rel="noopener">@chaim-chv</a> © 2026 ·
+        built with <a href="https://opencode.ai/" rel="noopener">OpenCode</a> and DeepSeek · MIT
+      </p>
+      <p class="footer-legal">Proxy Manager is an independent open-source project, not affiliated with Apple Inc. Apple, Mac, and macOS are trademarks of Apple Inc.</p>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
