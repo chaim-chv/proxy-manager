@@ -9,8 +9,8 @@ exposed — those stay UI-only.
 The source of truth for the action list is `Sources/Integration/IntegrationAction.swift`.
 `capabilities` returns the same data at runtime.
 
-> **Status:** the router, the local control socket and the XPC agent are
-> implemented. The URL scheme (P2) and App Intents (P3) adapters are next; the
+> **Status:** the router, the local control socket, the XPC agent and the
+> `proxymanager://` URL scheme are implemented. App Intents are next; the
 > registry already records which actions they may expose.
 
 ## Architecture
@@ -79,6 +79,28 @@ The source of truth for the action list is `Sources/Integration/IntegrationActio
 - Sandboxed clients need
   `com.apple.security.temporary-exception.mach-lookup.global-name =
   com.proxymanager.control`. Unsandboxed apps and CLIs need nothing.
+
+### URL scheme
+
+```
+proxymanager://v1/routing/toggle
+proxymanager://v1/ui/open?pane=settings&section=targets
+proxymanager://v1/app/activate
+```
+
+- Register: `CFBundleURLTypes` (`proxymanager`) in `build.sh`.
+- Delivered as a `kAEGetURL` Apple event, handled in
+  `applicationWillFinishLaunching`; events captured during launch are queued
+  until the coordinator is ready, so cold and warm launches behave the same.
+- `v1` is the URL host; the path maps `a/b` to `a.b`. A bare `proxymanager://v1`
+  opens the dashboard.
+- Limits: 2 048 characters, 20 arguments, duplicate arguments rejected.
+- **The router exposes only `routing.*`, `ui.open` and `app.activate` to this
+  transport.** Targets, app rules and presets are not reachable from a URL: it
+  is unauthenticated, so `targets.add` would be an exfiltration primitive.
+- No reply channel. Use XPC when the caller needs a result.
+- When external control or the URL switch is off, the event is ignored (logged,
+  not audited).
 
 ### Local socket (development and tests)
 

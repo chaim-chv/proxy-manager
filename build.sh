@@ -116,6 +116,17 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
     <string>en</string>
     <key>CFBundleDisplayName</key>
     <string>Proxy Manager</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.proxymanager.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>proxymanager</string>
+            </array>
+        </dict>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>$MIN_MACOS</string>
     <key>LSUIElement</key>

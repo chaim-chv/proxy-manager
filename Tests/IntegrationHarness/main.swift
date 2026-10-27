@@ -739,6 +739,68 @@ do {
     try? FileManager.default.removeItem(at: directory)
 }
 
+// MARK: - URL scheme
+
+print("== URL scheme ==")
+do {
+    func parse(_ string: String) -> Result<URLCommand, URLCommandError> {
+        guard let url = URL(string: string) else {
+            return .failure(.malformed("test URL is invalid"))
+        }
+        return URLCommandParser.parse(url)
+    }
+    func action(_ string: String) -> String? {
+        if case .success(let command) = parse(string) { return command.action }
+        return nil
+    }
+    func args(_ string: String) -> [String: IntegrationValue]? {
+        if case .success(let command) = parse(string) { return command.args }
+        return nil
+    }
+    func error(_ string: String) -> URLCommandError? {
+        if case .failure(let error) = parse(string) { return error }
+        return nil
+    }
+
+    checkEqual("path action",
+               action("proxymanager://v1/routing/toggle"), "routing.toggle")
+    checkEqual("dotted action",
+               action("proxymanager://v1/targets.add"), "targets.add")
+    checkEqual("trailing slash is ignored",
+               action("proxymanager://v1/routing/toggle/"), "routing.toggle")
+    checkEqual("bare link opens the dashboard",
+               action("proxymanager://v1"), "ui.open")
+    checkEqual("bare link pane", args("proxymanager://v1")?["pane"], .string("dashboard"))
+    checkEqual("query arguments",
+               args("proxymanager://v1/targets/list?enabledOnly=true")?["enabledOnly"],
+               .string("true"))
+    checkEqual("percent-decoded value",
+               args("proxymanager://v1/targets/add?pattern=API.Example.com%3A443")?["pattern"],
+               .string("API.Example.com:443"))
+    checkEqual("settings section",
+               args("proxymanager://v1/ui/open?pane=settings&section=targets")?["section"],
+               .string("targets"))
+
+    checkEqual("foreign scheme", error("https://v1/routing/toggle"), .notOurScheme)
+    checkEqual("unknown version",
+               error("proxymanager://v2/routing/toggle"), .unsupportedVersion("v2"))
+    check("duplicate argument rejected",
+          error("proxymanager://v1/ui/open?a=1&a=2") != nil)
+    check("fragment rejected",
+          error("proxymanager://v1/routing/toggle#x") != nil)
+    check("port rejected",
+          error("proxymanager://v1:80/routing/toggle") != nil)
+    check("userinfo rejected",
+          error("proxymanager://user@v1/routing/toggle") != nil)
+    check("uppercase action rejected",
+          error("proxymanager://v1/Routing/Toggle") != nil)
+    check("too long rejected",
+          error("proxymanager://v1/ui/open?pane=" + String(repeating: "a", count: 2100)) != nil)
+    let many = (0...21).map { "a\($0)=1" }.joined(separator: "&")
+    check("too many arguments rejected",
+          error("proxymanager://v1/ui/open?\(many)") != nil)
+}
+
 // MARK: - Result
 
 print("")

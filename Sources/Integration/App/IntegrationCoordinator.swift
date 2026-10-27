@@ -49,20 +49,27 @@ final class IntegrationCoordinator {
         guard settings != applied else { return }
         applied = settings
 
-        guard settings.enabled, settings.xpcEnabled else {
+        guard settings.enabled else {
             stopServer()
             unregisterAgent()
             return
         }
         guard let host else { return }
 
-        registerAgent()
-
+        // The router is needed for every transport, including the URL scheme
+        // when XPC is off.
         let audit = settings.auditEnabled ? IntegrationAudit(directory: supportDir) : nil
         if router == nil || routerUsesAudit != settings.auditEnabled {
             router = IntegrationRouter(host: host, audit: audit)
             routerUsesAudit = settings.auditEnabled
         }
+
+        guard settings.xpcEnabled else {
+            stopServer()
+            unregisterAgent()
+            return
+        }
+        registerAgent()
         guard let router else { return }
         startServer(router: router)
     }
@@ -70,6 +77,15 @@ final class IntegrationCoordinator {
     /// Stops the runtime endpoint but keeps the agent registered: registration
     /// is a user preference, and a registered agent is what lets another app
     /// relaunch Proxy Manager after it was quit.
+    /// A command from the `proxymanager://` adapter. Returns `nil` when the
+    /// master switch or the URL switch is off, so the caller stays silent.
+    func performURL(_ command: URLCommand) -> IntegrationResult? {
+        guard let settings = applied, settings.enabled, settings.urlSchemeEnabled,
+              let router else { return nil }
+        return router.perform(action: command.action, args: command.args,
+                              source: .urlScheme(senderPID: nil))
+    }
+
     func stop() {
         stopServer()
         applied = nil

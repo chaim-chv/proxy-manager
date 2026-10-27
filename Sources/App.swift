@@ -8,6 +8,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var escapeMonitor: Any?
     private var powerOffObserver: NSObjectProtocol?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Register before any window appears: a cold launch from
+        // `open proxymanager://…` can deliver the event before didFinishLaunching.
+        URLSchemeHandler.shared.install()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Native menu-bar status item + menu (custom-view NSMenu). See
         // StatusMenuController.swift for why this is AppKit, not SwiftUI.
@@ -16,6 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeSystemPowerOff()
         if AppModel.shared.showOnboarding {
             OnboardingWindowController.shared.show()
+        }
+        // Let AppModel's deferred `integration.apply` run first, then drain any
+        // URL commands captured during launch.
+        DispatchQueue.main.async {
+            URLSchemeHandler.shared.markReady()
         }
     }
 

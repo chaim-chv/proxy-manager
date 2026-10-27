@@ -33,6 +33,12 @@ struct IntegrationSettingsView: View {
                         )
                         Divider()
                         SettingsToggleRow(
+                            title: "Allow the proxymanager:// URL scheme",
+                            help: "Lets any link or script run `open proxymanager://v1/routing/toggle`, open a pane, and similar. A URL is unauthenticated, so it can only reach routing and window actions — never targets, app rules or tunnel settings.",
+                            isOn: model.binding(\.integration.urlSchemeEnabled)
+                        )
+                        Divider()
+                        SettingsToggleRow(
                             title: "Keep an audit log",
                             help: "Writes one line per request to integration-audit.jsonl (0600) next to the config: caller, action, arguments, outcome and duration. Arguments that look like secrets are redacted.",
                             isOn: model.binding(\.integration.auditEnabled)
