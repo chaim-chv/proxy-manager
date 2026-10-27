@@ -253,6 +253,22 @@ with **Revoke**.
 
 Unified log: `log stream --predicate 'subsystem == "com.proxymanager.app" AND category == "integration"'`.
 
+## Website reference
+
+The public docs site renders the action table from this registry, between the
+`BEGIN ACTIONS` / `END ACTIONS` markers in `docs/integration.html` on
+`gh-pages`. Regenerate it whenever an action, argument or risk changes:
+
+```bash
+xcrun swiftc -swift-version 5 -O \
+  Sources/Config/ConfigModels.swift \
+  Sources/Integration/IntegrationValue.swift \
+  Sources/Integration/IntegrationProtocol.swift \
+  Sources/Integration/IntegrationAction.swift \
+  Tools/integration-reference/main.swift -o /tmp/actions
+/tmp/actions
+```
+
 ## Tests
 
 `Tests/IntegrationHarness` covers the exposure matrix, validation,
