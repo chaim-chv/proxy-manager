@@ -1158,7 +1158,7 @@ struct AboutSettingsView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            linkRow("Homepage", "chaim-chv.github.io/proxy-manager", AppLinks.homepage)
+            linkRow("Homepage", "proxy-manager.chv.ovh", AppLinks.homepage)
             linkRow("Source code", "github.com/chaim-chv/proxy-manager", AppLinks.source)
         }
     }
@@ -1272,7 +1272,7 @@ struct AboutSettingsView: View {
             concept("URL links", "`proxymanager://v1/routing/toggle` and `…/ui/open?pane=settings` — routing and window actions only, because a URL is unauthenticated.")
             concept("Shortcuts and Siri", "App Intents for routing, targets, per-app mode and opening a pane.")
             concept("Apps and the CLI", "An XPC service, `com.proxymanager.control`, plus a local socket for development. Requires a Developer-ID build.")
-            linkRow("Integration docs", "docs/integration.md", AppLinks.integrationDocs)
+            linkRow("Integration docs", "proxy-manager.chv.ovh/docs/integration.html", AppLinks.integrationDocs)
         }
     }
 

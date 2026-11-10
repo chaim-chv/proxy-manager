@@ -366,7 +366,7 @@ final class StatusMenuController: NSObject {
             result.append(NSAttributedString(string: prefix, attributes: label))
             result.append(NSAttributedString(string: title, attributes: [.font: small, .link: url]))
         }
-        append("Homepage  ", "chaim-chv.github.io/proxy-manager", AppLinks.homepage)
+        append("Homepage  ", "proxy-manager.chv.ovh", AppLinks.homepage)
         result.append(NSAttributedString(string: "\n", attributes: label))
         append("Source  ", "github.com/chaim-chv/proxy-manager", AppLinks.source)
         return result

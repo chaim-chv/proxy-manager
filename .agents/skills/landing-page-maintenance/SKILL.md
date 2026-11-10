@@ -12,7 +12,7 @@ mode** with generated fake data.
 
 - Site (gh-pages): `index.html`, `privacy.html`, `support.html`, `styles.css`,
   `app.js`, `assets/*` — served at
-  <https://chaim-chv.github.io/proxy-manager/>.
+  <https://proxy-manager.chv.ovh/>.
 - **Multi-page, no templating.** `privacy.html` and `support.html` each carry a
   hand-copied header/footer. When you change the header, footer, or support band
   on `index.html`, apply the same change to the other two (only the nav/brand
