@@ -195,12 +195,12 @@
           <div class="shot-media" data-tilt>
             <picture>
               <source srcset="assets/general-dark.png" media="(prefers-color-scheme: dark)">
-              <img src="assets/general-light.png" alt="Settings → General: the Routing master switch at the top, switched on, with a green live status line underneath." data-dark="assets/general-dark.png" data-light="assets/general-light.png" loading="lazy" width="1800" height="1280">
+              <img src="assets/general-light.png" alt="Settings → General: the Routing master switch and the live internet status, both switched on, above launch-at-login and update settings." data-dark="assets/general-dark.png" data-light="assets/general-light.png" loading="lazy" width="1800" height="1280">
             </picture>
           </div>
           <div class="shot-copy">
             <h3>The master switch</h3>
-            <p>Turn routing on or off from Settings, not just the menu bar. The live status underneath shows a spinner while it applies, and the reason with <em>Try Again</em> when it can’t start.</p>
+            <p>Turn routing on or off from Settings, not just the menu bar. The live status underneath shows a spinner while it applies, and the reason with <em>Try Again</em> when it can’t start. Below it, the internet check shows whether the internet itself is reachable — a connected Wi-Fi network with a dead router uplink is visible instead of silent.</p>
           </div>
         </article>
 
@@ -266,6 +266,7 @@
           <li><strong>Streaming, not buffering.</strong> <code>CONNECT</code> tunnels are relayed byte-for-byte with backpressure, so SSE and LLM token streams arrive as they are produced. WebSocket sessions (<code>ws://</code> and <code>wss://</code>) relay full-duplex too.</li>
           <li><strong>Bounded memory.</strong> Fixed 256 KB buffers per direction, with half-close handled so responses are never truncated.</li>
           <li><strong>Telemetry off the hot path.</strong> Per-request recording is a lock and an append; a single batched writer flushes SQLite.</li>
+          <li><strong>Internet, not just Wi-Fi.</strong> An optional active check (Apple’s captive-portal probe, with a Mozilla fallback) distinguishes a working uplink from a connected network. The responses are 8–69 bytes, bypass the local proxy, are never recorded, and can be turned off in Settings.</li>
           <li><strong>Per-app identity, resolved locally.</strong> With per-app routing on, each connection is matched to its originating app by a local process scan — helpers resolve to their host app. Off by default, so the hot path is unchanged.</li>
           <li><strong>Crash-safe.</strong> A watchdog user agent restores your original proxy settings within milliseconds if the app dies. The app keeps its saved recovery state until a restore actually succeeds, so a transient failure can’t erase it.</li>
           <li><strong>Your choice sticks.</strong> A failed attempt doesn’t silently flip the switch off — background tries retry quietly, and routing returns on unlock, wake, or a network change.</li>
@@ -285,6 +286,7 @@
         <li><strong>Local-only.</strong> Binds to <code>127.0.0.1</code>; private destinations are blocked for non-loopback clients.</li>
         <li><strong>Metadata only, on disk.</strong> Host, app, size, timing, and status in a local SQLite file. No bodies or headers.</li>
         <li><strong>Secrets in the Keychain.</strong> An SSH password is never written to the config or a command line.</li>
+        <li><strong>No hidden reporting.</strong> The optional internet check only asks Apple (or Mozilla) whether the network is reachable; it sends no identifiers or traffic data. One switch turns it off.</li>
       </ul>
     </div>
   </section>

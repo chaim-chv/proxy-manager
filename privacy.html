@@ -67,7 +67,7 @@
     <p>Proxy Manager collects no data about you. It has no telemetry, no analytics, no account, and no server that sees your traffic. The app is open source under the MIT license, so you can verify every claim on this page in the code.</p>
 
     <h2>The app</h2>
-    <p>Everything the app does happens locally on your Mac. It runs an HTTP proxy bound to <code>127.0.0.1</code> and routes only the hostnames on your allow-list — and, when you enable per-app routing, the apps you choose — through your SOCKS5 tunnel. Everything else connects directly.</p>
+    <p>Everything the app does with your traffic happens locally on your Mac. It runs an HTTP proxy bound to <code>127.0.0.1</code> and routes only the hostnames on your allow-list — and, when you enable per-app routing, the apps you choose — through your SOCKS5 tunnel. Everything else connects directly.</p>
     <ul>
       <li><strong>TLS is passed through.</strong> <code>CONNECT</code> streams are relayed byte-for-byte; the app never sees plaintext payloads.</li>
       <li><strong>Metadata only, on disk.</strong> Per-request records (host, method, route decision, status, byte counts, and timing) are written to a local SQLite file at <code>~/Library/Application Support/ProxyManager/telemetry.sqlite</code>. When per-app routing is on, the originating app’s name and bundle identifier are recorded too. No request bodies and no headers are captured. Retention is 7 days by default and configurable in Settings.</li>
@@ -75,7 +75,11 @@
       <li><strong>Secrets in the Keychain.</strong> If you use “Run the tunnel for me,” an SSH password is stored in the macOS Keychain and fed to <code>ssh</code> through a one-shot helper. It is never written to the config or a command line. Key-file auth stores nothing.</li>
       <li><strong>System proxy safety.</strong> Before changing the macOS proxy, the app saves your original settings locally so it can always restore them. A small watchdog does the same if the app crashes.</li>
     </ul>
-    <p>Nothing here is uploaded, logged remotely, or shared.</p>
+    <p>Nothing here is uploaded, logged remotely, or shared. The only outbound requests are the optional internet check and Sparkle’s update check, both described below.</p>
+
+    <h2>Internet status check</h2>
+    <p>If you leave the optional internet status check on, the app periodically requests a tiny fixed page from <a href="https://captive.apple.com/hotspot-detect.html" rel="noopener">Apple</a> — falling back to <a href="https://detectportal.firefox.com/success.txt" rel="noopener">Mozilla</a> if Apple is unreachable — to tell whether the internet itself works, not just whether Wi-Fi is connected. These requests contain no identifiers, cookies, or information about your traffic; they bypass the local proxy and are never added to telemetry. The response is a few dozen bytes.</p>
+    <p>Like any HTTP request, the check reveals your IP address to the operator of the endpoint (Apple, or Mozilla if Apple is unreachable). Proxy Manager has no server of its own and receives nothing from this check. You can turn it off in Settings → General → Internet, which stops the requests entirely.</p>
 
     <h2>Automatic updates</h2>
     <p>Proxy Manager uses <a href="https://sparkle-project.org/" rel="noopener">Sparkle</a>, the open-source update framework, to check for new versions. An update check fetches a small static file (the appcast) from GitHub Releases. That request carries no personal information, no identifiers, and nothing about your traffic. Updates are EdDSA-signed and verified before installing. You can turn automatic checks off in Settings → General.</p>
