@@ -406,6 +406,19 @@ struct MonitorSettings: Codable, Equatable {
     }
 }
 
+/// Live internet-reachability monitoring. On by default; off means no probe
+/// traffic, no status row in the menu, and no Internet group status in Settings.
+struct ConnectivitySettings: Codable, Equatable {
+    var enabled: Bool = true
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = c.tolerant(.enabled, true)
+    }
+}
+
 /// Reserved: app-lock is not implemented yet. Persisted so a future build can
 /// add it without a schema migration; nothing reads `enabled` today.
 struct LockSettings: Codable, Equatable {
@@ -448,6 +461,7 @@ struct AppConfig: Codable, Equatable {
     var system: SystemSettings = SystemSettings()
     var targets: [TargetRule] = AppConfig.defaultTargets()
     var monitor: MonitorSettings = MonitorSettings()
+    var connectivity: ConnectivitySettings = ConnectivitySettings()
     var lock: LockSettings = LockSettings()
     var apps: AppSettings = AppSettings()
     var integration: IntegrationSettings = IntegrationSettings()
@@ -470,6 +484,7 @@ struct AppConfig: Codable, Equatable {
             targets = AppConfig.defaultTargets()
         }
         monitor = c.tolerant(.monitor, MonitorSettings())
+        connectivity = c.tolerant(.connectivity, ConnectivitySettings())
         lock = c.tolerant(.lock, LockSettings())
         apps = c.tolerant(.apps, AppSettings())
         integration = c.tolerant(.integration, IntegrationSettings())

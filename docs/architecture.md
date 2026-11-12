@@ -39,6 +39,7 @@ CLI tool (HTTP_PROXY env) ──────────────────
 | System integration | `Sources/System/SystemProxyManager.swift`, `ShellEnvInjector.swift` | `networksetup` (helper → direct-as-user → osascript), shell env injection, snapshot |
 | Privileged helper | `Sources/Helper/`, `Sources/System/HelperXPCClient.swift`, `HelperProtocol.swift` | Root daemon over NSXPC |
 | Tunnel supervisor | `Sources/Tunnel/TunnelSupervisor.swift` | 10 s SOCKS5 health probe |
+| Connectivity monitor | `Sources/System/ConnectivityMonitor.swift`, `ConnectivityState.swift` | Active internet-reachability probe (Wi-Fi link vs actual internet), adaptive 5–20 s cadence, Settings/menu status, `connectivity.enabled` toggle |
 | SSH tunnel runner | `Sources/Tunnel/SSHTunnelRunner.swift`, `SSHKeychain.swift` | "Run the tunnel for me" — spawns/supervises `ssh -N -D`, Keychain password |
 | Config | `Sources/Config/` | JSON config + system-proxy snapshot + presets |
 | Logging | `Sources/Support/Log.swift` | Unified log (`os.Logger`) categories |

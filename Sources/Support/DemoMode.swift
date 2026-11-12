@@ -190,6 +190,7 @@ enum DemoMode {
     static func apply(to model: AppModel) {
         guard isEnabled else { return }
         seedTelemetry(model.telemetry)
+        ConnectivityMonitor.shared.seedDemo()
 
         let managed = (screen == "settings-tunnel-managed")
         if managed { configureManagedTunnel(model) }

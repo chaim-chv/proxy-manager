@@ -97,6 +97,10 @@ run_harness SettingsMenuHarness \
   Sources/UI/SettingsMenuCommand.swift \
   Tests/SettingsMenuHarness/main.swift
 
+run_harness ConnectivityHarness \
+  Sources/System/ConnectivityState.swift \
+  Tests/ConnectivityHarness/main.swift
+
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/Routing/RoutingEngine.swift \

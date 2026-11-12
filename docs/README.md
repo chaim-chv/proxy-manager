@@ -19,6 +19,7 @@ Area-specific deep dives. **Read the relevant doc before touching that part of t
 | [app-model-lifecycle.md](app-model-lifecycle.md) | State machine, enable/disable, crash recovery |
 | [config.md](config.md) | JSON config store, models, snapshot persistence |
 | [tunnel-supervisor.md](tunnel-supervisor.md) | SOCKS5 health probe, tunnel restart |
+| [connectivity.md](connectivity.md) | Active internet-reachability monitor (Wi-Fi vs internet), probes, Settings/menu status |
 | [ui.md](ui.md) | App shell, menu bar, dashboard, settings, targets, apps, onboarding |
 | [build-and-distribution.md](build-and-distribution.md) | build.sh, signing, helper embedding, CI |
 | [updates.md](updates.md) | Sparkle auto-updates, appcast, EdDSA signing keys |

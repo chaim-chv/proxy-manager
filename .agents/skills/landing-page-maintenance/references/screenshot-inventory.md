@@ -6,7 +6,7 @@ Every PNG in `gh-pages/assets/` is produced by the demo build. Filenames follow
 
 | Key | `PROXYMANAGER_SCREEN` | What it shows | Native size (px) | Used on the page |
 |---|---|---|---|---|
-| `general` | `settings-general` | Settings → General: the Routing master switch, on, with its live status line | 1800×1280 | Screenshots → “The master switch” |
+| `general` | `settings-general` | Settings → General: the Routing master switch and the Internet status with its monitor toggle, both on | 1800×1280 | Screenshots → “The master switch” |
 | `dashboard` | `dashboard` | Dashboard: stats strip, request-rate chart, top tunneled hosts, live feed | 2240×1496 | Hero image |
 | `dashboard-detail` | `dashboard-detail` | Dashboard with a request selected and the detail inspector open | 2240×1496 | Screenshots → “Per-request detail” |
 | `targets` | `settings-targets` | Settings → Targets: rule list, wildcard, disabled rule, match preview | 1800×1280 | Screenshots → “Your allow-list, editable live” |

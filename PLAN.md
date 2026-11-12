@@ -169,7 +169,7 @@ The tunnel is an existing SOCKS5 proxy (e.g. `ssh -D`), or the app can run and s
 ### 6.1 Menu bar app (native AppKit status menu + SwiftUI windows)
 
 - The menu-bar item is an **AppKit `NSStatusItem` + `NSMenu`**, not a SwiftUI `MenuBarExtra`: a `.menu`-style extra can't tint custom status rows, keep a row open for live toggling, or show native key equivalents. Icon (SF Symbol) reflects state: green `circle.fill` = ON, orange `exclamationmark.triangle.fill` = degraded, `hourglass` = starting/stopping, gray `circle` = OFF.
-- Menu layout: inert status rows with colored dots (**Routing** state, **Tunnel** up/down, red **error** line) → **Routing** toggle and **Launch at Login** as plain `NSMenuItem`s with native `state` checkmarks (disabled/grayed during starting/stopping) → **Restart Tunnel** (supervised only) → Dashboard ⌘D / Settings ⌘, / About / Check for Updates… / Quit ⌘Q. Plain items give native hover highlighting and native checkmarks; the menu closes on selection (standard macOS). Menu items are updated in place from Combine sinks (never rebuilt).
+- Menu layout: inert status rows with colored dots (**Routing** state, **Tunnel** up/down, **Internet** online/unstable/offline with latency or outage duration (hidden when its setting is off), red **error** line) → **Routing** toggle and **Launch at Login** as plain `NSMenuItem`s with native `state` checkmarks (disabled/grayed during starting/stopping) → **Restart Tunnel** (supervised only) → Dashboard ⌘D / Settings ⌘, / About / Check for Updates… / Quit ⌘Q. Plain items give native hover highlighting and native checkmarks; the menu closes on selection (standard macOS). Menu items are updated in place from Combine sinks (never rebuilt).
 - The status-item icon is colorizable by state (`system.colorizeMenuIcon`, default on; recolored via an SF Symbol `paletteColors` configuration — template `contentTintColor` does not tint status items): green = on, amber = starting/stopping, orange = degraded, red = error, gray = off; off keeps the monochrome template icon.
 - Opening Settings from the AppKit menu fires the real SwiftUI-generated “Settings…” command item (SwiftUI’s Settings scene command is a private `menuAction:` item; `sendAction(showSettingsWindow:)` is a no-op), then fronts and activates the tracked Settings window once it exists (activating before it exists leaves it behind the previously active app).
 - `ObservableObject` `AppModel` (app-wide single source of truth), published: `state`, `config`, `tunnelUp`, `lastError`, `showOnboarding`, `sshRunning`, `sshError`, `helperState`, `authorizationDeferred`, plus navigation hints (`settingsSelection`, `revealTargetID`). The live feed/stats live on `TelemetryStore` (observed directly by the dashboard).
@@ -308,6 +308,7 @@ Responsibilities:
                 "managedShellRcs": ["~/.zshrc"], "crashWatchdog": true },
     "targets": [],
     "monitor": { "retentionDays": 7, "maxRows": 500000, "recordPaths": true },
+    "connectivity": { "enabled": true },
     "lock": { "enabled": false }
   }
   ```
@@ -377,7 +378,7 @@ State-tinted icon; click → menu:
 
 ### 8.5 Settings
 Sidebar: General / Appearance / Tunnel / Proxy / Targets / System / Monitoring / About.
-- General: launch at login, update frequency (Never/Daily/Weekly), version + "Check for Updates…", "Run setup again", "Reset all settings and data".
+- General: routing master switch + live internet reachability behind a "Monitor internet status" toggle (default on; status, latency/outage duration, recent-drop strip, Check Now), launch at login, update frequency (Never/Daily/Weekly), version + "Check for Updates…", "Run setup again", "Reset all settings and data".
 - Appearance: icon placement (Menu bar only / Menu bar + Dock / Dock only; Menu bar only still shows the Dock icon while the Dashboard or Settings window is open), color mode (System/Light/Dark), menu-bar icon style (Classic/Colorized).
 - Tunnel: MANUAL/MANAGED mode picker; MANUAL: host/port + test + supervised/launchd label; MANAGED: SSH host/port/username, key-file or password auth, local SOCKS host/port, status.
 - Proxy: bind host, port, fail-open/closed.

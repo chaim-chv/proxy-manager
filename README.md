@@ -21,6 +21,7 @@ A native macOS menu-bar app that routes **only the traffic you choose** — by h
 - **First-run onboarding** that walks you through pointing the app at your tunnel and choosing what to route.
 - **Run the tunnel for you**: the app can start and supervise an SSH SOCKS5 tunnel (key file or password auth, stored in Keychain), keeping it alive automatically.
 - **Live monitoring**: per-request feed with route decision, host, app, method, bytes, latency, status; per-route, per-host, and per-app stats.
+- **Live internet status**: the menu bar and Settings → General show whether the internet itself is reachable — with recent drops — so a connected Wi-Fi network whose router has lost its uplink is obvious instead of invisible. It uses Apple/Mozilla captive-portal endpoints and can be turned off in Settings → General.
 - **Per-app routing** (off by default): route each app's traffic — **Tunnel all**, **Use target rules**, or **Direct all** — from Settings → Apps, or set the frontmost app's mode right from the menu bar. An app rule wins over the hostname list.
 - **Presets** (DeepSeek, OpenAI, Anthropic/Claude, Google Gemini, GitHub, NVIDIA, WhatsApp) to get started fast, plus full manual control.
 - **Self-updating**: Sparkle 2 checks for new versions in the background (Never/Daily/Weekly in Settings → General → Updates) and always asks before installing.
@@ -207,6 +208,7 @@ ProxyManager/
 - TLS is passed through untouched; metadata only (host, app, size, timing, status).
 - The SSH password (if you use "Run the tunnel for me") is stored in the macOS Keychain — never in `config.json` or on a command line. Key-file auth stores nothing.
 - `Proxy-Authorization` headers are stripped in plain-HTTP forwarding and never logged.
+- The live internet-status check fetches a tiny HTTPS resource from Apple (falling back to Mozilla) every few seconds. It carries no identifiers and nothing about your traffic, bypasses the local proxy, and is not recorded in telemetry. Turn it off in Settings → General → Internet.
 
 ## Credits & License
 

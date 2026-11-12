@@ -149,6 +149,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 | App state machine / lifecycle / crash recovery | `docs/app-model-lifecycle.md` |
 | Config persistence | `docs/config.md` |
 | Tunnel health supervisor | `docs/tunnel-supervisor.md` |
+| Internet connectivity monitor | `docs/connectivity.md` |
 | SwiftUI / UI | `docs/ui.md` |
 | Build, signing, distribution | `docs/build-and-distribution.md` |
 | Auto-updates (Sparkle) | `docs/updates.md` |

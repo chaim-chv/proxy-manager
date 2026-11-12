@@ -109,7 +109,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var summary: String {
         switch self {
-        case .general: return "The master routing switch, startup behavior, and resetting the app."
+        case .general: return "The master routing switch, live internet status, startup behavior, and resetting the app."
         case .appearance: return "The menu bar icon and the app's light or dark look."
         case .tunnel: return "The encrypted pipe that carries your selected traffic to a remote machine."
         case .proxy: return "The local router that sends allow-listed hosts to the tunnel and everything else direct."
@@ -370,6 +370,7 @@ struct GeneralSettingsView: View {
         SettingsPage(title: SettingsSection.general.title, summary: SettingsSection.general.summary) {
             SettingsContent {
                 RoutingMasterGroup()
+                ConnectivityGroup()
 
                 SettingsGroup {
                     SettingsToggleRow(
@@ -530,6 +531,104 @@ private struct RoutingMasterGroup: View {
             }
             return "Nothing is routed. Turn this on to apply the system proxy and environment."
         }
+    }
+}
+
+// MARK: - Internet connectivity
+
+/// Live reachability, measured independently of the local link. This is the
+/// answer to "Wi-Fi says connected but nothing loads": the dot and the history
+/// strip make both the current state and a flapping uplink visible.
+private struct ConnectivityGroup: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject private var connectivity = ConnectivityMonitor.shared
+
+    private var enabled: Bool { model.config.connectivity.enabled }
+    private var snapshot: ConnectivitySnapshot { connectivity.snapshot }
+    private var health: ConnectivityHealth { snapshot.health() }
+
+    var body: some View {
+        SettingsGroup(
+            title: "Internet",
+            help: "When on, Proxy Manager fetches a tiny HTTPS resource every few seconds (faster while this page or the menu is open, slower in the background) to tell whether the internet itself is reachable, not just whether Wi-Fi is connected — a router with a dead uplink stays connected but has no internet. Each bar below is one check; a drop turns the status orange for ten minutes. Only the check request is sent, never browsing data. Turn it off to stop the checks entirely.",
+            example: "Online · 38 ms\nOnline — unstable   1 drop in the last hour\nOffline · 2 min"
+        ) {
+            VStack(spacing: 0) {
+                SettingsToggleRow(
+                    title: "Monitor internet status",
+                    isOn: Binding(
+                        get: { enabled },
+                        set: { model.setConnectivityMonitoring($0) }
+                    )
+                )
+
+                Divider()
+
+                if enabled {
+                    SettingsRow {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(snapshot.title())
+                                .font(.callout.weight(.medium))
+                            SettingsCaption(text: snapshot.detail())
+                        }
+                        Spacer()
+                        Button("Check Now") { connectivity.checkNow() }
+                    }
+
+                    if !snapshot.checks.isEmpty {
+                        Divider()
+                        SettingsRow {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Recent checks — newest on the right")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                ConnectivityHistoryBar(checks: snapshot.checks)
+                            }
+                        }
+                    }
+                } else {
+                    SettingsRow {
+                        SettingsCaption(text: "Off — no checks are sent and the menu bar won't show internet status.")
+                    }
+                }
+            }
+        }
+        .onAppear {
+            connectivity.setVisible(true, surface: "settings")
+            if enabled { connectivity.checkNow() }
+        }
+        .onDisappear {
+            connectivity.setVisible(false, surface: "settings")
+        }
+    }
+
+    private var statusColor: Color {
+        switch health {
+        case .checking: return Color(nsColor: .tertiaryLabelColor)
+        case .good: return .green
+        case .unstable: return .orange
+        case .down: return .red
+        }
+    }
+}
+
+private struct ConnectivityHistoryBar: View {
+    let checks: [ConnectivityCheck]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(checks) { check in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(check.ok ? Color.green.opacity(0.85) : Color.red)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 12)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel("Recent internet checks, newest on the right")
     }
 }
 

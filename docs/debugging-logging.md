@@ -11,7 +11,7 @@ Log.proxy.info("listening on \(host):\(port)")
 Log.telemetry.*  Log.system.*  Log.tunnel.*
 ```
 
-Categories map to subsystems in `docs/`. The helper daemon logs via `NSLog` (it's a separate binary).
+Categories map to subsystems in `docs/`. The helper daemon logs via `NSLog` (it's a separate binary). The internet monitor logs only status transitions at `.notice` (`internet connectivity: online/offline`, category `system`), so an ISP/router outage can be correlated with the app's behavior without per-probe noise.
 
 ### Log levels (persistence)
 

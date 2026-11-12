@@ -272,6 +272,12 @@ let legacy = """
 let legacyDecoded = try? JSONDecoder().decode(AppConfig.self, from: legacy)
 check("legacy config (missing policy/monitor/lock) decodes", legacyDecoded != nil)
 check("legacy config defaults injectGuiEnv to true", legacyDecoded?.system.injectGuiEnv == true)
+check("legacy config defaults connectivity checks on", legacyDecoded?.connectivity.enabled == true)
+
+let connectivityOff = try? JSONDecoder().decode(
+    AppConfig.self,
+    from: Data(#"{"connectivity":{"enabled":false}}"#.utf8))
+check("connectivity toggle decodes off", connectivityOff?.connectivity.enabled == false)
 
 // A newer config with an extra unknown key must not wipe data either.
 let future = """

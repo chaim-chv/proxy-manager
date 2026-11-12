@@ -14,6 +14,7 @@ private let statusMenuWidth: CGFloat = 250
 ///
 ///   ● Routing   On / Off / Degraded / Starting… / Stopping…   (status)
 ///   ● Tunnel    Up / Down                                     (status)
+///   ● Internet  Online / Offline / Checking…                  (status)
 ///   error line (red, only while `lastError` is set)
 ///   Retry                                                     (only while
 ///                                                            `authorizationDeferred`)
@@ -49,10 +50,12 @@ final class StatusMenuController: NSObject {
     // retains them via `item.view`) plus the plain toggle items we mutate.
     private let routingStatusRow = StatusRowView(title: "Routing")
     private let tunnelStatusRow = StatusRowView(title: "Tunnel")
+    private let internetStatusRow = StatusRowView(title: "Internet")
     private let errorRowView = ErrorRowView()
     private var routingToggleItem: NSMenuItem?
     private var launchAtLoginItem: NSMenuItem?
     private var errorMenuItem: NSMenuItem?
+    private var internetMenuItem: NSMenuItem?
     private var retryMenuItem: NSMenuItem?
     private var restartMenuItem: NSMenuItem?
     private var checkForUpdatesItem: NSMenuItem?
@@ -83,6 +86,9 @@ final class StatusMenuController: NSObject {
     private func buildMenu() {
         menu.addItem(viewItem(routingStatusRow))
         menu.addItem(viewItem(tunnelStatusRow))
+        let internetItem = viewItem(internetStatusRow)
+        internetMenuItem = internetItem
+        menu.addItem(internetItem)
 
         let errorItem = viewItem(errorRowView)
         errorItem.isHidden = true
@@ -174,6 +180,9 @@ final class StatusMenuController: NSObject {
         model.$config.receive(on: main)
             .sink { [weak self] _ in self?.refresh() }
             .store(in: &cancellables)
+        ConnectivityMonitor.shared.$snapshot.receive(on: main)
+            .sink { [weak self] _ in self?.refreshConnectivity() }
+            .store(in: &cancellables)
         UpdaterController.shared.$canCheckForUpdates.receive(on: main)
             .sink { [weak self] canCheck in
                 self?.checkForUpdatesItem?.isEnabled = canCheck
@@ -206,6 +215,8 @@ final class StatusMenuController: NSObject {
         tunnelStatusRow.update(dot: model.tunnelUp ? .systemGreen : .systemRed,
                                value: model.tunnelUp ? "Up" : "Down",
                                valueColor: model.tunnelUp ? .systemGreen : .systemRed)
+        refreshConnectivity()
+        internetMenuItem?.isHidden = !model.config.connectivity.enabled
         if let item = routingToggleItem {
             let busy = state == .starting || state == .stopping
             item.state = state.isActive ? .on : .off
@@ -221,6 +232,24 @@ final class StatusMenuController: NSObject {
         retryMenuItem?.isHidden = !model.authorizationDeferred
         restartMenuItem?.isHidden = !model.config.tunnel.supervised
         refreshAppControl()
+    }
+
+    private func refreshConnectivity() {
+        let snapshot = ConnectivityMonitor.shared.snapshot
+        let color = connectivityColor(snapshot.health())
+        internetStatusRow.update(dot: color,
+                                 value: snapshot.menuValue(),
+                                 valueColor: color)
+        internetStatusRow.toolTip = snapshot.detail()
+    }
+
+    private func connectivityColor(_ health: ConnectivityHealth) -> NSColor {
+        switch health {
+        case .checking: return .systemGray
+        case .good: return .systemGreen
+        case .unstable: return .systemOrange
+        case .down: return .systemRed
+        }
     }
 
     private func applyIcon() {
@@ -445,7 +474,17 @@ final class StatusMenuController: NSObject {
 extension StatusMenuController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard menu === self.menu else { return }
+        // Show fresh internet status even if App Nap deferred a background
+        // probe; the row updates in place when the result arrives.
+        ConnectivityMonitor.shared.setVisible(true, surface: "menu")
+        ConnectivityMonitor.shared.checkNow()
+        refreshConnectivity()
         refreshAppControl()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        ConnectivityMonitor.shared.setVisible(false, surface: "menu")
     }
 }
 

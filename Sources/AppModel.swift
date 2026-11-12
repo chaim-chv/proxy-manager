@@ -160,6 +160,7 @@ final class AppModel: ObservableObject {
         // the Keychain, observe network changes, or auto-enable routing.
         if !DemoMode.isEnabled {
             tunnelSupervisor.start()
+            ConnectivityMonitor.shared.setEnabled(config.connectivity.enabled)
             syncManagedTunnel(config)
             observeSystemEvents()
             refreshHelperState()
@@ -779,6 +780,7 @@ final class AppModel: ObservableObject {
         syncProxySettings()
         syncManagedTunnel(cfg)
         integration.apply(cfg.integration)
+        ConnectivityMonitor.shared.setEnabled(cfg.connectivity.enabled)
         scheduleSave()
         applyAppearance()
         applyIconMode()
@@ -1234,6 +1236,7 @@ final class AppModel: ObservableObject {
         // or the SSH runner, so quit must not either (disarming here would
         // clear the real app's watchdog marker).
         if DemoMode.isEnabled { return }
+        ConnectivityMonitor.shared.stop()
         integration.stop()
         // A queued backoff retry must never run during/after quit.
         enableRetry?.cancel()
@@ -1371,6 +1374,14 @@ final class AppModel: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    /// Turns the active internet-reachability probe on or off. `commitConfig`
+    /// applies it, so the toggle also works from config changes elsewhere.
+    func setConnectivityMonitoring(_ enabled: Bool) {
+        guard config.connectivity.enabled != enabled else { return }
+        config.connectivity.enabled = enabled
+        commitConfig()
     }
 
     /// Enables/disables the crash watchdog. Installing/uninstalling the

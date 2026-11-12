@@ -16,6 +16,14 @@ Goal: enabling the tunnel must be **imperceptible** — the user feels no change
 4. **No per-row allocations on main** — cached formatters; avoid materializing the whole feed every render (`suffix(250).reversed()`).
 5. **Only the Dashboard observes telemetry, and publishes are coalesced.** Never bridge `TelemetryStore.objectWillChange` into `AppModel` — `AppModel` is the environment object for every window (including the retained offscreen `Settings` window), so that invalidated the whole view tree at 10 Hz and cost 10–20% CPU while idle. `applyToUI` assigns each `@Published` at most once per tick and only on change.
 
+## Internet connectivity monitor
+
+- One small HTTPS request per cycle: **5 s** while General/the menu is visible, **20 s** in the background, **5 s** after a failed cycle. The single fallback runs only after the primary fails.
+- Apple's/Mozilla's captive-portal endpoints return 8–69 bytes; there is no per-probe telemetry and no Google/Cloudflare traffic.
+- No overlapping requests, 3 s request timeout, 12 s cycle watchdog; a late callback is ignored.
+- The probe bypasses the system proxy (empty proxy dictionary) and is never recorded in telemetry, so it stays off the proxy hot path.
+- `ConnectivityMonitor` publishes only its own snapshot on the main thread and is observed only by the status menu and Settings → General — never bridged into `AppModel.objectWillChange`. Opening the menu triggers a fresh check, so App Nap throttling cannot leave a stale badge.
+
 ## Resource footprint
 
 - Threads: ≤ ~256 connection threads (each idle connection held up to `idle` 120 s; half-closed connections reap in ~3 s grace).

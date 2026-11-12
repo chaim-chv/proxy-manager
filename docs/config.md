@@ -27,6 +27,7 @@
                "managedShellRcs": ["~/.zshrc"], "crashWatchdog": true },
   "targets": [ { "id": "…", "pattern": "example.com", "enabled": true } ],
   "monitor": { "retentionDays": 7, "maxRows": 500000, "recordPaths": true },
+  "connectivity": { "enabled": true },                // active internet-status checks
   "lock":    { "enabled": false },
   "apps":    { "enabled": false,                          // opt-in per-app routing
                "defaultMode": "TARGETS",                  // TUNNEL | TARGETS | DIRECT
@@ -45,8 +46,9 @@ Notes:
 - `tunnel.mode` selects who provides the tunnel: `MANUAL` (user's own SOCKS5) or `MANAGED` (the app runs `ssh -N -D`). `effectiveHost`/`effectivePort` resolve to `managed.socksHost/socksPort` in managed mode, else `host`/`port`.
 - `managed.auth` is `KEY` or `PASSWORD`; the password is **not** stored here — it lives in the Keychain (`SSHKeychain`, service `com.proxymanager.ssh`).
 - `tunnel.launchdLabel` (manual mode) is the optional launchd job label for "Supervised by app"; restart only acts when `supervised` is true **and** the label is non-empty.
+- `connectivity.enabled` (default **true**) controls the active internet-reachability monitor. Off stops all probe traffic and hides the status from General and the menu bar. It is applied live by `AppModel.commitConfig()`; see `docs/connectivity.md`.
 - `lock` is **reserved** (app-lock is not implemented): it is persisted/decoded but nothing reads `enabled` yet.
-- `TunnelSettings`, `SystemSettings`, and **every other config struct** (`AppConfig`, `ProxySettings`, `PolicySettings`, `MonitorSettings`, `LockSettings`, `ManagedTunnelSettings`, `TargetRule`) use custom Codable with `decodeIfPresent(...) ?? default`. This is required: synthesized `Codable` throws `keyNotFound` for a missing key even when the property has a default, so adding a field would fail whole-file decode and wipe the user's config. `Tests/RegressionHarness` asserts a legacy config (missing `policy`/`monitor`/`lock`) and a future config (unknown keys) both decode and preserve targets.
+- `TunnelSettings`, `SystemSettings`, and **every other config struct** (`AppConfig`, `ProxySettings`, `PolicySettings`, `MonitorSettings`, `ConnectivitySettings`, `LockSettings`, `ManagedTunnelSettings`, `TargetRule`) use custom Codable with `decodeIfPresent(...) ?? default`. This is required: synthesized `Codable` throws `keyNotFound` for a missing key even when the property has a default, so adding a field would fail whole-file decode and wipe the user's config. `Tests/RegressionHarness` asserts a legacy config (missing `policy`/`monitor`/`lock`) and a future config (unknown keys) both decode and preserve targets.
 
 ## `ConfigStore`
 
