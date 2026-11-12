@@ -296,32 +296,7 @@ final class StatusMenuController: NSObject {
     }
 
     @objc func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        // SwiftUI registers the Settings scene's command as an NSMenuItem whose
-        // action is `menuAction:` on a private callback — `sendAction(to: nil)`
-        // for `showSettingsWindow:` does *not* open it. Fire the real item.
-        guard let item = settingsMenuItem(), let action = item.action else { return }
-        NSApp.sendAction(action, to: item.target, from: item)
-        // Ensure it is key/front even if the SwiftUI action only orders front.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            if let w = NSApp.windows.first(where: { $0.isVisible && $0.title.contains("Settings") }) {
-                w.makeKeyAndOrderFront(nil)
-            }
-        }
-    }
-
-    /// The SwiftUI-generated "Settings…" command in the app menu.
-    private func settingsMenuItem() -> NSMenuItem? {
-        guard let mainMenu = NSApp.mainMenu else { return nil }
-        for top in mainMenu.items {
-            guard let submenu = top.submenu else { continue }
-            if let match = submenu.items.first(where: {
-                $0.action != nil && ($0.title == "Settings…" || $0.title.hasPrefix("Settings"))
-            }) {
-                return match
-            }
-        }
-        return nil
+        SettingsWindow.present()
     }
 
     @objc private func toggleRouting() {

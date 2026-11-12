@@ -1149,30 +1149,10 @@ final class AppModel: ObservableObject {
         openSettings()
     }
 
-    /// Opens the SwiftUI Settings window (reusing the menu-item sendAction
-    /// dance, since `showSettingsWindow:` is a no-op).
+    /// Opens the SwiftUI Settings window and brings it to the front. See
+    /// `SettingsWindow.present()` for why the app menu item is fired.
     func openSettings() {
-        NSApp.activate(ignoringOtherApps: true)
-        guard let item = Self.settingsMenuItem(), let action = item.action else { return }
-        NSApp.sendAction(action, to: item.target, from: item)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            if let w = NSApp.windows.first(where: { $0.isVisible && $0.title.contains("Settings") }) {
-                w.makeKeyAndOrderFront(nil)
-            }
-        }
-    }
-
-    private static func settingsMenuItem() -> NSMenuItem? {
-        guard let mainMenu = NSApp.mainMenu else { return nil }
-        for top in mainMenu.items {
-            guard let submenu = top.submenu else { continue }
-            if let match = submenu.items.first(where: {
-                $0.action != nil && ($0.title == "Settings…" || $0.title.hasPrefix("Settings"))
-            }) {
-                return match
-            }
-        }
-        return nil
+        SettingsWindow.present()
     }
 
     // MARK: - Tunnel

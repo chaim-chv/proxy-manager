@@ -92,6 +92,11 @@ run_harness WindowTrackerHarness \
   Sources/UI/AppWindowTracker.swift \
   Tests/WindowTrackerHarness/main.swift
 
+run_harness SettingsMenuHarness \
+  -framework AppKit \
+  Sources/UI/SettingsMenuCommand.swift \
+  Tests/SettingsMenuHarness/main.swift
+
 run_harness RegressionHarness \
   Sources/Config/ConfigModels.swift Sources/Config/ConfigStore.swift \
   Sources/Routing/RoutingEngine.swift \

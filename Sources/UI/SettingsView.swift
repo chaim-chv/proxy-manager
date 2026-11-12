@@ -6,6 +6,39 @@ import AppKit
 /// — so it must be identified by reference, not title.
 enum SettingsWindow {
     static weak var current: NSWindow?
+
+    /// Opens the SwiftUI Settings scene and brings the window to the front.
+    ///
+    /// SwiftUI wires its Settings command to a private `menuAction:` item (a
+    /// `showSettingsWindow:` send does nothing), so the real item is fired.
+    /// The app is activated only *after* the window exists: activating first
+    /// leaves the just-created window behind the previously active app. The
+    /// window is found through the tracked reference — the item's title is
+    /// localized and the window's title is the app name, so neither a title
+    /// nor a fixed delay is reliable.
+    static func present() {
+        guard let item = SettingsMenuCommand.item(in: NSApp.mainMenu),
+              let action = item.action else { return }
+        NSApp.sendAction(action, to: item.target, from: item)
+        frontWhenReady(attempt: 0)
+    }
+
+    /// SwiftUI may create the window on a later run-loop turn; wait for it
+    /// (bounded) instead of guessing a delay, then front it like
+    /// `DashboardWindowController.show()` does.
+    private static func frontWhenReady(attempt: Int) {
+        DispatchQueue.main.async {
+            if let window = current, window.isVisible {
+                if window.isMiniaturized { window.deminiaturize(nil) }
+                window.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+            } else if attempt < 10 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    frontWhenReady(attempt: attempt + 1)
+                }
+            }
+        }
+    }
 }
 
 private struct SettingsWindowRef: NSViewRepresentable {
