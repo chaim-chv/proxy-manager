@@ -21,6 +21,7 @@
 - [GUI apps may ignore the system proxy — publish env via `launchctl`](#gui-apps-may-ignore-the-system-proxy--publish-env-via-launchctl)
 - [Standalone Swift harness gotchas](#standalone-swift-harness-gotchas)
 - [Identify the originating app of a loopback connection via a `libproc` scan](#identify-the-originating-app-of-a-loopback-connection-via-a-libproc-scan)
+- [SwiftUI's Settings scene window is not resizable](#swiftuis-settings-scene-window-is-not-resizable)
 
 ## SwiftUI `.popover` is unusable for hover tooltips
 
@@ -202,3 +203,13 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 **Context:** Turning the PID into a user-facing app needs more than `NSRunningApplication(pid).bundleIdentifier`, which returns the helper's own id (e.g. `com.google.Chrome.helper`). Walking the executable path to the enclosing `.app` fixes Chrome/Slack helpers but fails for WebKit's shared `com.apple.WebKit.Networking` and for Chrome launched from a code-sign clone. The private `responsibility_get_pid_responsible_for_pid` (from `/usr/lib/system/libsystem_coreservices.dylib`, loaded with `dlsym`) returns the TCC-style responsible process and resolves all of these correctly (WebKit.Networking → its host app). It is a private API, so it must be best-effort with a fallback (enclosing `.app` → own bundle → executable path/name). For bundle-less CLI tools the responsible pid can be the launcher, so prefer the process's own executable there.
 
 **Related:** `docs/per-app-rules.md`, `AGENTS.md` (lesson 13 tolerant config decode), `docs/routing.md`, `Sources/Routing/RoutingEngine.swift`, `Sources/Proxy/ProxyServer.swift`.
+
+## SwiftUI's Settings scene window is not resizable
+
+**Status:** Fixed in `SettingsView.swift` (`SettingsWindowStyler`).
+
+**Summary:** SwiftUI's `Settings` scene creates an `NSWindow` **without** `.resizable` and sizes it to the *currently selected* page's ideal height (528 pt for General here). Long pages therefore always scrolled with no way to make the window taller. The fix is to make the window behave like a normal preferences window: `.resizable`, a sane `contentMinSize`, and one 900×720 enlargement on the first launch after upgrading (`SettingsWindowEnlarged` defaults flag) because frames saved by older versions were only as tall as their page. Frame persistence needs no custom autosave name — SwiftUI already owns `com_apple_SwiftUI_Settings_window` and autosaves size/position through it.
+
+**Context:** Two non-obvious traps. (1) Only setting `styleMask.insert(.resizable)` in `viewDidMoveToWindow` does not stick: SwiftUI re-applies its own style mask *after* the `NSViewRepresentable` attaches (observed `resizable=false` ~0.1 s later), so the flag has to be re-inserted whenever it changes — KVO on `window.styleMask` (KVO-compliant, unlike many AppKit properties) with an async handler (mutating inside the change handler re-enters KVO). (2) Don't add a second `setFrameAutosaveName`: SwiftUI overwrites it, and the saved frame ends up split across two defaults keys. Also note that AX/AppKit refuses to grow a window past the screen edge while its top stays fixed, which can look like a max-size cap when testing with `AXUIElementSetAttributeValue`.
+
+**Related:** `Sources/UI/SettingsView.swift`, `docs/ui.md` (Settings section).

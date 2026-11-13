@@ -51,6 +51,7 @@ private struct SettingsWindowRef: NSViewRepresentable {
         view.onWindowChange = { window in
             SettingsWindow.current = window
             AppWindowTracker.shared.settingsWindowChanged(window)
+            SettingsWindowStyler.configure(window)
         }
         return view
     }
@@ -58,12 +59,84 @@ private struct SettingsWindowRef: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
+/// SwiftUI's Settings scene creates its window without `.resizable` and sizes it
+/// to the *current* page's ideal height. Longer pages (General) then always
+/// scrolled and there was no way to give the window more room. SwiftUI also owns
+/// the window's frame autosave (`com_apple_SwiftUI_Settings_window`), so it is
+/// enough to make the window resizable: the size the user picks is persisted by
+/// the same autosave that already remembers its position.
+private enum SettingsWindowStyler {
+    static let minContentSize = NSSize(width: 720, height: 520)
+
+    /// Enough for the longest page (General) to fit without scrolling.
+    private static let initialContentSize = NSSize(width: 900, height: 720)
+
+    /// One-shot flag: windows saved by earlier versions are only as tall as the
+    /// page that happened to be showing, so a saved 500 pt frame would keep
+    /// scrolling after the upgrade. Enlarge once, then defer to the user.
+    private static var didEnlargeWindowsKey: String {
+        DemoMode.isEnabled ? "SettingsWindowEnlargedDemo" : "SettingsWindowEnlarged"
+    }
+
+    private static weak var configuredWindow: NSWindow?
+
+    static func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        keepResizable(window)
+        guard configuredWindow !== window else { return }
+        configuredWindow = window
+        window.contentMinSize = minContentSize
+        enlargeOnceIfNeeded(window)
+    }
+
+    /// Restores `.resizable`; called whenever SwiftUI replaces the style mask.
+    static func keepResizable(_ window: NSWindow) {
+        guard !window.styleMask.contains(.resizable) else { return }
+        window.styleMask.insert(.resizable)
+    }
+
+    private static func enlargeOnceIfNeeded(_ window: NSWindow) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: didEnlargeWindowsKey) else { return }
+        defaults.set(true, forKey: didEnlargeWindowsKey)
+        // SwiftUI applies its saved frame after this view attaches; resizing
+        // first would simply be undone.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            let content = window.contentLayoutRect.size
+            let screenHeight = window.screen?.visibleFrame.height ?? 900
+            let height = min(initialContentSize.height, screenHeight - 120)
+            guard content.height < height else { return }
+            window.setContentSize(NSSize(width: max(content.width, initialContentSize.width),
+                                         height: max(height, minContentSize.height)))
+        }
+    }
+}
+
 private final class SettingsWindowRefView: NSView {
     var onWindowChange: ((NSWindow?) -> Void)?
 
+    private var observedWindow: NSWindow?
+    private var styleMaskObservation: NSKeyValueObservation?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        observeWindow(window)
         onWindowChange?(window)
+    }
+
+    /// SwiftUI configures the window *after* this view attaches and re-applies
+    /// its own constraints — notably a non-resizable style mask — so the flag is
+    /// re-inserted whenever it is replaced.
+    private func observeWindow(_ window: NSWindow?) {
+        guard observedWindow !== window else { return }
+        styleMaskObservation = nil
+        observedWindow = window
+        guard let window else { return }
+        styleMaskObservation = window.observe(\.styleMask, options: [.new]) { window, _ in
+            // Deferred: mutating `styleMask` from inside its own change handler
+            // would re-enter KVO.
+            DispatchQueue.main.async { SettingsWindowStyler.keepResizable(window) }
+        }
     }
 }
 
@@ -162,18 +235,7 @@ struct SettingsView: View {
 
                 Divider()
 
-                HStack {
-                    Button {
-                        DashboardWindowController.shared.show()
-                    } label: {
-                        Image(systemName: "chart.line.uptrend.xyaxis")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Open Dashboard")
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                SidebarDashboardButton()
             }
             .frame(width: 200)
 
@@ -205,6 +267,36 @@ struct SettingsView: View {
         case .monitoring: MonitoringSettingsView()
         case .about: AboutSettingsView()
         }
+    }
+}
+
+/// The Dashboard shortcut below the sidebar list. The entire row is the hit
+/// target — the icon is just its label — and the hover highlight makes that
+/// visible, so a click anywhere on the row opens the Dashboard.
+private struct SidebarDashboardButton: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        Button {
+            DashboardWindowController.shared.show()
+        } label: {
+            HStack(spacing: 0) {
+                Image(systemName: "chart.line.uptrend.xyaxis")
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHovering ? Color.primary.opacity(0.08) : Color.clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("Open Dashboard")
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
     }
 }
 
