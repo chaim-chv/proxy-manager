@@ -129,7 +129,7 @@ final class RoutingEngine {
         return h
     }
 
-    private static func normalizePattern(_ pattern: String) -> String {
+    static func normalizePattern(_ pattern: String) -> String {
         var p = pattern.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         while p.hasSuffix(".") && p != "*" { p.removeLast() }
         return p

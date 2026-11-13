@@ -25,13 +25,15 @@ struct RequestDetailView: View {
                         hostRow
                         row("Port", String(event.port))
                         appRow
-                        row("Source port", String(event.srcPort))
+                        if !event.path.isEmpty {
+                            row("Path", event.path)
+                        }
                     }
                     card(title: "Routing") {
                         routeDecisionRow
                         reasonRow
                         optionsRow
-                        if let error = event.error, !error.isEmpty {
+                        if let error = ErrorText.describe(event.error) {
                             HStack(alignment: .top, spacing: 8) {
                                 Text("Error").foregroundStyle(.secondary)
                                 Spacer()
@@ -44,11 +46,12 @@ struct RequestDetailView: View {
                         }
                     }
                     card(title: "Data") {
-                        row("Status", event.status > 0 ? String(event.status) : "—")
-                        row("Bytes in", Format.bytes(event.bytesIn))
-                        row("Bytes out", Format.bytes(event.bytesOut))
+                        row("Status", statusText)
+                        row("Connect", Format.latency(event.connectMs))
+                        row("Downloaded", Format.bytes(event.bytesIn))
+                        row("Uploaded", Format.bytes(event.bytesOut))
                         row("Total", Format.bytes(event.bytesIn + event.bytesOut))
-                        row("Duration", Format.duration(event.durationMs))
+                        row("Open for", Format.duration(event.durationMs))
                     }
                 }
                 .padding(14)
@@ -57,6 +60,16 @@ struct RequestDetailView: View {
     }
 
     // MARK: - Header
+
+    /// The recorded code is the proxy's verdict, not an HTTP status: CONNECT
+    /// gets 200 when the tunnel opens, plain HTTP gets 0. Say what it means.
+    private var statusText: String {
+        if event.status >= 400 { return "Failed (\(event.status))" }
+        if event.status > 0 {
+            return event.method == "CONNECT" ? "Tunnel established" : "Relayed"
+        }
+        return "—"
+    }
 
     private var header: some View {
         HStack(spacing: 8) {
@@ -67,7 +80,7 @@ struct RequestDetailView: View {
                 Image(systemName: "xmark")
             }
             .buttonStyle(.borderless)
-            .help("Close (click the row again to clear)")
+            .help("Close")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)

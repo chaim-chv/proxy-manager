@@ -191,6 +191,25 @@ check("the label font affects the measured height",
 check("zero max width measures to zero",
       TooltipMetrics.size(text: "short", font: tooltipFont, maxWidth: 0) == .zero)
 
+print("== Formatting + error vocabulary ==")
+check("zero bytes prints as 0, not Zero KB", Format.bytes(0) == "0")
+check("counts are grouped", Format.count(12_392) == "12,392")
+check("connection lifetime has an hours case", Format.duration(15_126_441) == "4.2h")
+check("latency of 0 means unknown", Format.latency(0) == "—")
+check("latency under a second is ms", Format.latency(250) == "250ms")
+check("no error describes to nil", ErrorText.describe(nil) == nil)
+check("a stored timeout code reads as a sentence",
+      ErrorText.describe("connect_failed: timeout") == "Timed out")
+check("a stored DNS code reads as a sentence",
+      ErrorText.describe("connect_failed: dns") == "DNS lookup failed")
+check("a legacy Foundation error is not shown verbatim",
+      ErrorText.describe("The operation couldn't be completed. (ProxyManager.SocketError error 0.)")
+        == "Connection failed")
+check("a fail-open row is explained",
+      ErrorText.describe("tunnel_down") == "Tunnel down — sent direct")
+check("classifies a raw socket message",
+      ErrorText.classify("connect(host:443) failed: Connection refused") == .refused)
+
 print("")
 print("== SUMMARY: \(checks - failures)/\(checks) passed ==")
 exit(failures == 0 ? 0 : 1)

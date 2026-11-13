@@ -17,16 +17,22 @@ struct FeedRow: Identifiable, Equatable {
 /// them on the next launch. The cells mirror the previous SwiftUI look
 /// (caption text, monospaced digits, live dot, route chip, inset style).
 struct FeedTable: NSViewRepresentable {
-    static let autosaveName = "ProxyManagerDashboardFeed.v2"
+    // v3: Method was replaced by Connect (latency) and Open (lifetime); a new
+    // autosave name stops a stale saved layout from hiding the new columns.
+    static let autosaveName = "ProxyManagerDashboardFeed.v3"
 
     let rows: [FeedRow]
     @Binding var selectedID: UUID?
+    @Binding var sortKey: String
+    @Binding var sortAscending: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        // The columns are sized to fit the default window; with the inspector
+        // open the last column is the one that gives way.
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
@@ -40,18 +46,20 @@ struct FeedTable: NSViewRepresentable {
         table.rowHeight = 22
         table.intercellSpacing = NSSize(width: 0, height: 0)
 
+        // Width budget at the 1120 pt demo/default window: 18+64+74+300+120+64+
+        // 72+60+52+260 = 1084, leaving the Error column room to grow.
         FeedTable.addColumn(table, "dot", title: "", width: 18, min: 18, max: 18, resizable: false)
-        FeedTable.addColumn(table, "time", title: "Time", width: 64, min: 48, max: 200, resizable: true)
-        FeedTable.addColumn(table, "route", title: "Route", width: 74, min: 60, max: 200, resizable: true)
-        FeedTable.addColumn(table, "method", title: "Method", width: 62, min: 50, max: 200, resizable: true)
-        FeedTable.addColumn(table, "host", title: "Host", width: 300, min: 120, max: 4000, resizable: true)
-        FeedTable.addColumn(table, "app", title: "App", width: 120, min: 60, max: 400, resizable: true)
-        FeedTable.addColumn(table, "status", title: "Status", width: 48, min: 40, max: 200, resizable: true)
-        FeedTable.addColumn(table, "bytes", title: "Bytes", width: 76, min: 60, max: 300, resizable: true)
-        FeedTable.addColumn(table, "duration", title: "Duration", width: 66, min: 52, max: 300, resizable: true)
+        FeedTable.addColumn(table, "time", title: "Time", width: 60, min: 48, max: 200, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "route", title: "Route", width: 74, min: 60, max: 200, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "host", title: "Host", width: 260, min: 120, max: 4000, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "app", title: "App", width: 116, min: 60, max: 400, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "connect", title: "Connect", width: 64, min: 52, max: 200, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "bytes", title: "Bytes", width: 72, min: 60, max: 300, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "open", title: "Open", width: 60, min: 50, max: 300, resizable: true, sortable: true)
+        FeedTable.addColumn(table, "status", title: "Result", width: 52, min: 44, max: 120, resizable: true, sortable: true)
         // The last column absorbs leftover width when the window is resized
         // (NSTableView's built-in lastColumnOnlyAutoresizingStyle).
-        FeedTable.addColumn(table, "error", title: "Error", width: 260, min: 100, max: 4000, resizable: true)
+        FeedTable.addColumn(table, "error", title: "Error", width: 260, min: 100, max: 4000, resizable: true, sortable: true)
 
         let coordinator = context.coordinator
         coordinator.table = table
@@ -59,6 +67,7 @@ struct FeedTable: NSViewRepresentable {
         table.delegate = coordinator
         table.autosaveName = FeedTable.autosaveName
         table.autosaveTableColumns = true
+        table.sortDescriptors = [NSSortDescriptor(key: sortKey, ascending: sortAscending)]
 
         scrollView.documentView = table
         return scrollView
@@ -66,18 +75,25 @@ struct FeedTable: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         context.coordinator.onSelect = { selectedID = $0 }
+        context.coordinator.onSort = { key, ascending in
+            sortKey = key
+            sortAscending = ascending
+        }
         context.coordinator.update(rows: rows, selectedID: selectedID)
     }
 
     private static func addColumn(_ table: NSTableView, _ id: String, title: String,
                                   width: CGFloat, min: CGFloat, max: CGFloat,
-                                  resizable: Bool) {
+                                  resizable: Bool, sortable: Bool = false) {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
         column.title = title
         column.width = width
         column.minWidth = min
         column.maxWidth = max
         column.resizingMask = resizable ? .userResizingMask : []
+        if sortable {
+            column.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: false)
+        }
         table.addTableColumn(column)
     }
 
@@ -86,6 +102,7 @@ struct FeedTable: NSViewRepresentable {
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         fileprivate var table: NSTableView?
         fileprivate var onSelect: ((UUID?) -> Void)?
+        fileprivate var onSort: ((String, Bool) -> Void)?
         private var rows: [FeedRow] = []
         private var lastRows: [FeedRow] = []
         private var lastIDs: [UUID] = []
@@ -100,7 +117,7 @@ struct FeedTable: NSViewRepresentable {
         }
 
         /// Columns whose value changes while a row's identity stays the same.
-        private static let mutableColumnIDs: Set<String> = ["dot", "status", "bytes", "duration"]
+        private static let mutableColumnIDs: Set<String> = ["dot", "status", "bytes", "open", "connect"]
 
         /// Looked up by identifier (not position) because the user can reorder
         /// columns. Falls back to every column if the layout is unexpected.
@@ -245,6 +262,12 @@ struct FeedTable: NSViewRepresentable {
             onSelect?(id)
         }
 
+        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard let descriptor = tableView.sortDescriptors.first,
+                  let key = descriptor.key else { return }
+            onSort?(key, descriptor.ascending)
+        }
+
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard row < rows.count, let tableColumn = tableColumn else { return nil }
             let feed = rows[row]
@@ -260,43 +283,57 @@ struct FeedTable: NSViewRepresentable {
                              color: .secondaryLabelColor, align: .left)
             case "route":
                 return badge(reuseID, tableView: tableView, route: event.route)
-            case "method":
-                return label(reuseID, tableView: tableView, text: event.method,
-                             font: .systemFont(ofSize: 11, weight: .regular),
-                             color: .labelColor, align: .left)
+            case "connect":
+                // Real latency (accept → upstream established). "—" means the
+                // row predates the measurement, not that it was instant.
+                return label(reuseID, tableView: tableView, text: Format.latency(event.connectMs),
+                             font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+                             color: .secondaryLabelColor, align: .right)
             case "host":
                 return host(reuseID, tableView: tableView, host: event.host, port: event.port)
             case "app":
                 return app(reuseID, tableView: tableView, app: event.app, bundleId: event.appBundle)
             case "status":
+                // A glyph, not an HTTP code: 200 here means "the tunnel opened",
+                // 502 "could not connect", 0 "plain HTTP, no status seen".
                 let text: String
                 let color: NSColor
-                if event.status > 0 {
-                    text = "\(event.status)"
-                    color = event.status >= 400 ? .systemRed : .secondaryLabelColor
-                } else if feed.isLive {
+                let tip: String?
+                if feed.isLive {
                     text = "…"
                     color = .tertiaryLabelColor
+                    tip = "Still open"
+                } else if event.status >= 400 {
+                    text = "✗"
+                    color = .systemRed
+                    tip = "Could not connect"
+                } else if event.status > 0 {
+                    text = "✓"
+                    color = .secondaryLabelColor
+                    tip = event.method == "CONNECT" ? "Tunnel established" : "Relayed"
                 } else {
-                    text = ""
-                    color = .clear
+                    text = "—"
+                    color = .tertiaryLabelColor
+                    tip = "Plain HTTP — the origin's status is not visible to the proxy"
                 }
-                return label(reuseID, tableView: tableView, text: text,
-                             font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
-                             color: color, align: .left)
+                let cell = label(reuseID, tableView: tableView, text: text,
+                                 font: .systemFont(ofSize: 12, weight: .semibold),
+                                 color: color, align: .center)
+                if let tip { (cell as? FeedLabelCell)?.toolTip = tip }
+                return cell
             case "bytes":
                 return label(reuseID, tableView: tableView, text: Format.bytes(event.bytesIn + event.bytesOut),
                              font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
                              color: .secondaryLabelColor, align: .right)
-            case "duration":
+            case "open":
                 return label(reuseID, tableView: tableView, text: Format.duration(event.durationMs),
                              font: .monospacedDigitSystemFont(ofSize: 11, weight: .regular),
                              color: feed.isLive ? .systemOrange : .secondaryLabelColor, align: .right)
             case "error":
-                let err = event.error ?? ""
+                let err = ErrorText.describe(event.error) ?? ""
                 return label(reuseID, tableView: tableView, text: err,
                              font: .systemFont(ofSize: 11, weight: .regular),
-                             color: .systemRed, align: .left, truncation: .byTruncatingMiddle,
+                             color: .systemRed, align: .left, truncation: .byTruncatingTail,
                              tooltipIfTruncated: true)
             default:
                 return nil
