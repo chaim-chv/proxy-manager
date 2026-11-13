@@ -154,6 +154,9 @@ enum DemoMode {
             TargetRule(pattern: "*.github.com"),
             TargetRule(pattern: "objects.githubusercontent.com"),
             TargetRule(pattern: "*.nvidia.com"),
+            // Deliberately exact (no wildcard) so the Target panel can show its
+            // coverage warning: models.opencode.ai goes direct.
+            TargetRule(pattern: "opencode.ai"),
             TargetRule(pattern: "*.whatsapp.com", enabled: false),
         ]
     }
@@ -177,6 +180,12 @@ enum DemoMode {
             return ("node", nil)
         case "cdn.jsdelivr.net", "swift.org", "www.apple.com":
             return ("Safari", "com.apple.Safari")
+        case "g.whatsapp.net":
+            return ("WhatsApp", "net.whatsapp.WhatsApp")
+        case "api.anthropic.com", "claude.ai":
+            return ("Claude", "com.anthropic.claudefordesktop")
+        case "chatgpt.com":
+            return ("ChatGPT", "com.openai.chat")
         default:
             return ("Google Chrome", "com.google.Chrome")
         }
@@ -216,7 +225,9 @@ enum DemoMode {
             if managed { model.sshRunning = true }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { present(model) }
+        // Give the flusher a moment to publish the seeded history to the UI and
+        // write it to SQLite before the long-range queries run.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { present(model) }
     }
 
     /// Seeds a realistic managed ("run the tunnel for me") configuration. No SSH
@@ -257,7 +268,10 @@ enum DemoMode {
                 window.center()
                 window.makeKeyAndOrderFront(nil)
             } else if window.title == "Proxy Manager" {
-                window.setContentSize(NSSize(width: 1120, height: 720))
+                // The detail capture needs room for the inspector's Routing and
+                // Data cards below the fold at 720.
+                let height: CGFloat = screen == "dashboard-detail" ? 1060 : 720
+                window.setContentSize(NSSize(width: 1120, height: height))
                 window.center()
                 window.makeKeyAndOrderFront(nil)
             }
@@ -270,28 +284,15 @@ enum DemoMode {
     private static func seedTelemetry(_ telemetry: TelemetryStore) {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         var rng = RNG(seed: 0x5EED_1234)
+        var events: [RequestEvent] = []
 
-        var completed: [RequestEvent] = []
-        var tunneled = 0
-        var direct = 0
-        var blocked = 0
-        var bytesIn: Int64 = 0
-        var bytesOut: Int64 = 0
-
-        // Spread ~260 requests across the last 5 minutes so the 5m chart and the
-        // feed both look busy.
-        for i in 0..<260 {
-            let profile = profiles.weightedPick(&rng)
-            let ageMs = Int64(Double(i) / 260.0 * 300_000.0) + rng.int64(0...2_500)
-            let ts = now - ageMs
+        func makeEvent(ts: Int64, profile: HostProfile, connectMs: Int64? = nil) -> RequestEvent {
             let isConnect = profile.method == "CONNECT"
             let status = profile.status(&rng)
             let error = profile.error(for: status)
             let path = isConnect ? "" : profile.paths.randomElement(using: &rng) ?? ""
-            let dl = rng.int64(profile.download)
-            let ul = rng.int64(profile.upload)
             let app = appForHost(profile.host)
-            let event = RequestEvent(
+            return RequestEvent(
                 ts: ts,
                 scheme: profile.scheme,
                 method: profile.method,
@@ -300,27 +301,66 @@ enum DemoMode {
                 path: path,
                 route: profile.route,
                 status: status,
-                bytesIn: dl,
-                bytesOut: ul,
+                bytesIn: rng.int64(profile.download),
+                bytesOut: rng.int64(profile.upload),
                 durationMs: rng.int64(profile.duration),
                 error: error,
                 srcPort: rng.int(50_000...65_000),
+                connectMs: connectMs ?? rng.int64(status >= 400 ? 300...4_000 : 8...260),
                 app: app.name,
                 appBundle: app.bundle
             )
-            completed.append(event)
-            switch profile.route {
-            case .tunnel: tunneled += 1
-            case .direct: direct += 1
-            case .block: blocked += 1
-            }
-            bytesIn += dl
-            bytesOut += ul
         }
 
-        completed.sort { $0.ts < $1.ts }
+        // 1. The last five minutes, dense: the 5 m chart and the live feed.
+        for i in 0..<140 {
+            let profile = profiles.weightedPick(&rng)
+            let ageMs = Int64(Double(i) / 140.0 * 300_000.0) + rng.int64(0...2_500)
+            events.append(makeEvent(ts: now - ageMs, profile: profile))
+        }
 
-        // A few in-progress connections so the live dot and "Active" stat render.
+        // 2. The previous 24 hours with a working-day rhythm, so the 24 h chart
+        //    has a real shape instead of a single spike.
+        let hourlyVolume = [2, 1, 1, 1, 1, 2, 3, 6, 11, 16, 19, 21, 19, 18, 19, 20, 18, 16, 13, 10, 7, 5, 3, 2]
+        func volume(at ts: Int64, divisor: Int, jitter: Int) -> Int {
+            let hour = Int((ts / 3_600_000) % 24)
+            return max(1, hourlyVolume[(hour + 24) % 24] / divisor + rng.int(0...jitter))
+        }
+        for hoursAgo in 1..<24 {
+            let stamp = now - Int64(hoursAgo) * 3_600_000
+            for _ in 0..<(volume(at: stamp, divisor: 1, jitter: 2) * 3) {
+                let ts = stamp - rng.int64(0...3_500_000)
+                events.append(makeEvent(ts: ts, profile: profiles.weightedPick(&rng)))
+            }
+        }
+
+        // 3. Days 2–7, lighter: the 7 d chart.
+        for day in 2...7 {
+            for hour in 0..<24 {
+                let stamp = now - Int64(day) * 86_400_000 - Int64(hour) * 3_600_000
+                for _ in 0..<volume(at: stamp, divisor: 2, jitter: 1) {
+                    let ts = stamp - rng.int64(0...3_500_000)
+                    events.append(makeEvent(ts: ts, profile: profiles.weightedPick(&rng)))
+                }
+            }
+        }
+
+        // 4. A target that only covers its exact name: its child host went
+        //    direct. The Targets tab reports this; it is the counter-evidence a
+        //    routing tool exists to surface.
+        for _ in 0..<14 {
+            events.append(RequestEvent(
+                ts: now - rng.int64(600_000...72_000_000),
+                host: "models.opencode.ai", port: 443, route: .direct,
+                status: 200, bytesIn: rng.int64(20_000...400_000), bytesOut: rng.int64(600...4_000),
+                durationMs: rng.int64(400...9_000), srcPort: rng.int(50_000...65_000),
+                connectMs: rng.int64(40...300), app: "codex", appBundle: nil))
+        }
+
+        events.sort { $0.ts < $1.ts }
+        for event in events { telemetry.record(event) }
+
+        // A few in-progress connections so the live dot and "Active" render.
         var live: [RequestEvent] = []
         for profile in [HostProfile.liveDeepSeek, .liveOpenAI, .liveGitHub, .liveDirect] {
             let app = appForHost(profile.host)
@@ -338,22 +378,14 @@ enum DemoMode {
                 durationMs: rng.int64(200...4_000),
                 error: nil,
                 srcPort: rng.int(50_000...65_000),
+                connectMs: rng.int64(10...180),
                 app: app.name,
                 appBundle: app.bundle
             )
             live.append(event)
         }
 
-        telemetry.recentRequests = completed
         telemetry.seedDemoLive(live)
-        telemetry.stats = StatsSnapshot(
-            tunneledRequests: tunneled,
-            directRequests: direct,
-            blockedRequests: blocked,
-            bytesIn: bytesIn,
-            bytesOut: bytesOut,
-            activeConnections: live.count
-        )
         telemetry.setActiveConnections(live.count)
     }
 
@@ -381,7 +413,9 @@ enum DemoMode {
 
         func error(for status: Int) -> String? {
             if route == .block { return "tunnel_down" }
-            if status == 502 { return "connect_failed: upstream timeout" }
+            if status == 502 {
+                return route == .tunnel ? "connect_failed: timeout" : "connect_failed: dns"
+            }
             return nil
         }
 
@@ -434,6 +468,9 @@ enum DemoMode {
         HostProfile(host: "chatgpt.com", route: .tunnel, method: "CONNECT", scheme: "https", port: 443,
                     weight: 8, paths: [], download: 80_000...600_000, upload: 1_000...5_000,
                     duration: 500...4_000, failureRate: 0.01),
+        HostProfile(host: "g.whatsapp.net", route: .tunnel, method: "CONNECT", scheme: "https", port: 443,
+                    weight: 11, paths: [], download: 20_000...600_000, upload: 2_000...18_000,
+                    duration: 1_200...30_000, failureRate: 0.01),
         HostProfile(host: "api.anthropic.com", route: .tunnel, method: "CONNECT", scheme: "https", port: 443,
                     weight: 9, paths: [], download: 70_000...900_000, upload: 900...6_000,
                     duration: 700...6_500, failureRate: 0.02),
@@ -466,7 +503,7 @@ enum DemoMode {
                     weight: 5, paths: [], download: 8_000...140_000, upload: 300...1_000,
                     duration: 70...700, failureRate: 0.01),
         HostProfile(host: "metrics.vendor.example", route: .block, method: "CONNECT", scheme: "https", port: 443,
-                    weight: 3, paths: [], download: 0...0, upload: 0...0,
+                    weight: 1, paths: [], download: 0...0, upload: 0...0,
                     duration: 5...40, failureRate: 1),
     ])
 
