@@ -2,7 +2,27 @@
 
 `Sources/Telemetry/TelemetryStore.swift`
 
-Records one `RequestEvent` (scheme/method/host/port/path/route/status/bytes/latency/error, plus the originating **app** when per-app telemetry is on) per connection, persists to SQLite, and drives a live SwiftUI feed + aggregate stats.
+Records one `RequestEvent` (scheme/method/host/port/path/route/status/bytes/connect latency/lifetime/error, plus the originating **app** when per-app telemetry is on) per connection, persists to SQLite, and drives a live SwiftUI feed + aggregate stats.
+
+## Field semantics (what a row actually means)
+
+- **One row = one accepted connection**, not one HTTP request. A CONNECT tunnel carrying an
+  h2/keep-alive session is one row; the proxy cannot see inside it.
+- **`status` is the proxy's verdict**, never the origin's: `200` = the proxy wrote
+  `200 Connection Established` (recorded before any payload flows), `0` = forwarded plain HTTP
+  (the origin status is not parsed), `4xx/5xx` only for proxy-generated failures. The feed shows
+  a ✓/✗/— glyph, not this code.
+- **`duration_ms` is connection lifetime** (accept → relay exit), not latency.
+- **`connect_ms` is the only latency**: accept → upstream established (DNS + TCP + SOCKS
+  handshake). `0` = not measured (legacy rows). Added with an idempotent `ALTER TABLE` migration.
+- **`bytes_in` = downloaded** (upstream→client), **`bytes_out` = uploaded**; stream bytes only
+  (the CONNECT request/response heads are excluded).
+- **`error` is a stable code** (`connect_failed: dns|timeout|refused|unreachable|reset|closed|
+  socks_auth|socks_rejected|socks_timeout`, plus `tunnel_down` / `blocked_private_destination` /
+  `bad_request`). `ErrorText` maps codes and legacy strings to one short sentence for the UI.
+  `SocketError`/`SOCKS5Error` conform to `LocalizedError` so the underlying message survives.
+- **`path`** is `host:port` for CONNECT and the origin path **including the query string** for
+  plain HTTP; empty when `monitor.recordPaths` is off. Shown in the inspector when present.
 
 ## Live sessions (connections appear in the feed while open)
 
@@ -21,7 +41,10 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 - A single `DispatchSourceTimer` flusher — **10 Hz / 25 ms leeway** while routing is active or a window is open, dropping to **5 s / 2 s leeway** when idle (`setFlusherIdle(_:)`, driven by `AppModel.updateTelemetryFlusherMode()`), so App Nap can coalesce wakeups:
   - drains completions → publishes `recentRequests` + `stats` on main (one batched update), and
   - republishes `liveRequests` rows that changed.
-  - accumulates into `dbAccumulator`; every **1000** rows it flushes to SQLite as **one transaction** using a **prepared statement**.
+  - accumulates into `dbAccumulator`; writes it to SQLite as **one transaction** with a prepared
+    statement when it reaches **1000 rows**, or when it is non-empty and **1 s** has passed since
+    the last write (`dbFlushIntervalMs`). The time-based flush gives a light install a populated
+    1 h/24 h/7 d chart instead of an empty one, and bounds crash loss to about a second.
 - `applyToUI` rebuilds each `@Published` collection locally and assigns it **at most once per tick, and only when it actually changed**; a tick with an all-zero delta and an unchanged active count skips the stats block entirely. Combine `@Published` fires `objectWillChange` on every set with no equality check, so the old per-operation writes re-rendered every observer several times per tick.
 - `maybePurge` reuses the `nowMs` `flush` already computed instead of calling `Date()` on every 10 Hz tick.
 - `setActiveConnections(_:)` is an atomic counter (no main-thread dispatch per connection).
@@ -33,10 +56,11 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 ## Storage
 
 - DB at `~/Library/Application Support/ProxyManager/telemetry.sqlite` (WAL, `synchronous=NORMAL`, `cache_size=-8000`).
-- `requests` table (per-request rows, indexed on `ts`/`host`/`route`). Charts aggregate directly from it (`minute_stats` was removed — it was write-only). Columns: `… src_port, app, app_bundle`.
-- **Per-app columns + migration**: `app` (display name) and `app_bundle` (bundle id, nullable) were added for per-app telemetry. `CREATE TABLE IF NOT EXISTS` never alters an existing table, so `migrateSchema()` runs `PRAGMA table_info(requests)` and `ALTER TABLE … ADD COLUMN` for any missing column before the prepared `INSERT` is created. Without it, every write on an upgraded install would fail. Regression: `Tests/TelemetryHarness` (fresh DB + a pre-per-app DB with a legacy row).
+- `requests` table (one row per connection, indexed on `ts`/`host`/`route`). Charts aggregate directly from it (`minute_stats` was removed — it was write-only). Columns: `… src_port, app, app_bundle, connect_ms`.
+- **Per-app columns + migration**: `app` (display name), `app_bundle` (bundle id, nullable) and `connect_ms` (latency) were added over time. `CREATE TABLE IF NOT EXISTS` never alters an existing table, so `migrateSchema()` runs `PRAGMA table_info(requests)` and `ALTER TABLE … ADD COLUMN` for any missing column before the prepared `INSERT` is created. Without it, every write on an upgraded install would fail. Regression: `Tests/TelemetryHarness` (fresh DB + a pre-per-app DB with a legacy row).
 - The app is recorded only when per-app routing is enabled and `apps.recordInTelemetry` is on (`ProxyRuntimeSettings.recordAppInTelemetry`); otherwise the columns stay NULL and no identity scan runs.
-- `topApps(rangeSeconds:limit:completion:)` groups non-empty `app` values for the dashboard's Hosts/Apps breakdown (mirrors `topHosts`).
+- `topApps(rangeSeconds:limit:completion:)` groups non-empty `app` values **for `route = 'TUNNEL'` only**, so the Hosts and Apps tabs of the dashboard card answer the same question (`topHosts` is tunnel-only too).
+- `rangeStats`, `hostActivity` and `topFailingHosts` back the dashboard strip, the per-target panel and the failure triage respectively; all three share the chart's cutoff.
 - Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`).
 
 ## Threading

@@ -366,11 +366,14 @@ State-tinted icon; click → menu:
 - Only **deliberate** quits terminate: the status-menu Quit item, a click on the app-menu Quit item, the Settings → General **Quit** button, Restart, and Sparkle installing an update. ⌘Q and the Dock menu's Quit just close the front window; logout/restart/shutdown is always allowed. See `docs/app-model-lifecycle.md`.
 
 ### 8.3 Dashboard
-- Single window (`NSWindow`, frame autosaved) with a stats strip, a chart + "top tunneled hosts" row, and a feed/detail `HSplitView`:
-  - Header: live toggle, host search, pause, purge.
-  - Stats strip: Tunneled / Direct / Blocked / Bytes / Active.
-  - Chart: metric picker (Requests/Bytes/Errors) and range buttons 5m/1h/24h/7d; long ranges load from SQLite.
-  - Feed: AppKit `NSTableView` (columns: live dot, time, route, method, host:port, status, bytes, duration, error) with route filter; selecting a row opens the detail pane.
+- Single window (`NSWindow`, frame autosaved) with a status line, a range-scoped stats strip, a chart + breakdown card, and a feed/detail `HSplitView`:
+  - Header: live toggle, **Freeze feed**, settings, **Delete history…** (confirmed).
+  - Status line: Routing / Tunnel / Recording (or history unavailable), a red pill only when blocked, `lastError`.
+  - Stats strip: **Through tunnel** (with share), Direct, **Via tunnel** (tunnel bytes), **Active** — all sharing the selected range and labelled with it.
+  - Chart: `Connections` / `Bytes` / `Failures`, ranges 5m/1h/24h/7d, pinned x domain, zero-filled buckets, hover readout, stacked tunnel-only byte area; long ranges load from SQLite (5 s/15 s/60 s).
+  - Breakdown: **Top tunneled hosts** / **Top tunneled apps** (tunnel-only) / **Targets** (fixed 24 h: per-target traffic, last seen, app-rule tunnels, exact-vs-wildcard coverage warning).
+  - Feed: AppKit `NSTableView` (dot, time, route, host:port, app, **connect latency**, bytes, **open for**, **result glyph**, error), sortable columns; filters + sorting run over the 5,000-row buffer and the table shows the newest 250 matches (`showing 250 of N buffered`).
+  - Detail: route/reason/options plus status, connect, downloaded/uploaded/total, open-for, and path.
 - Auto-updating via `@Published` feed (throttled to ~10 Hz UI refresh); the dashboard observes `TelemetryStore` directly.
 
 ### 8.4 Targets editor
