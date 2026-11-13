@@ -38,6 +38,9 @@ final class DashboardWindowController: NSObject, NSWindowDelegate {
             w.delegate = self
             window = w
         }
+        // The policy must be `.regular` *before* ordering front: activating an
+        // accessory app is ignored, and a later policy transform deactivates it.
+        AppModel.shared.ensureRegularActivationForWindow()
         window?.makeKeyAndOrderFront(nil)
         if let window { AppWindowTracker.shared.trackDashboardWindow(window) }
         NSApp.activate(ignoringOtherApps: true)

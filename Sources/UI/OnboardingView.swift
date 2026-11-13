@@ -476,6 +476,7 @@ final class OnboardingWindowController: NSObject, NSWindowDelegate {
             w.delegate = self
             window = w
         }
+        AppModel.shared.ensureRegularActivationForWindow()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

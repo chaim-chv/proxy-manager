@@ -212,11 +212,30 @@ final class AppModel: ObservableObject {
     /// is open; the other modes are always `.regular`. The status item's own
     /// visibility is owned by `StatusMenuController`, which observes `config`;
     /// this only switches the Dock presence.
+    ///
+    /// Applied synchronously on main: `NSApp.activate` is ignored while the app
+    /// is `.accessory`, so deferring the policy change to the next run-loop turn
+    /// fronted the window before the app could be activated.
     private func applyIconMode() {
-        let showDock = config.system.iconMode.dockIconVisible(
-            hasOpenAppWindow: AppWindowTracker.shared.hasOpenWindow)
-        let policy: NSApplication.ActivationPolicy = showDock ? .regular : .accessory
-        DispatchQueue.main.async { NSApp.setActivationPolicy(policy) }
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.applyIconMode() }
+            return
+        }
+        ActivationPolicy.apply(
+            ActivationPolicy.policy(
+                iconMode: config.system.iconMode,
+                hasOpenWindow: AppWindowTracker.shared.hasOpenWindow))
+    }
+
+    /// Makes the app `.regular` before a window is ordered front. An accessory
+    /// app cannot be activated, and a policy transform *after* activation
+    /// deactivates it again, leaving the new window behind the previous app.
+    func ensureRegularActivationForWindow() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.ensureRegularActivationForWindow() }
+            return
+        }
+        ActivationPolicy.apply(.regular)
     }
 
     // MARK: - System events (sleep/wake, network change) & App Nap

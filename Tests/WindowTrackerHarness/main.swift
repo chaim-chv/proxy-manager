@@ -97,6 +97,50 @@ pump()
 check("closing the last window closes the tracker", !tracker.hasOpenWindow)
 check("closed windows are cleaned up", tracker.frontmostOpenWindow() == nil)
 
+print("== Window tracker: no phantom close while reopening ==")
+// Reproduce the app's lifecycle: DashboardWindowController nils its strong
+// reference on close, so the window deallocates and the tracker keeps a dead
+// entry until the next track(). Pruning it must not report "no window open"
+// after the new window has already been ordered front — that flipped the
+// activation policy to .accessory, deactivating the app mid-open.
+var events: [Bool] = []
+tracker.onChange = { events.append(tracker.hasOpenWindow) }
+
+weak var deadWindow: NSWindow?
+func openAndAbandonDashboard() {
+    // The explicit pool makes the closed window deallocate (as it does in the
+    // app once `DashboardWindowController` nils its reference).
+    autoreleasepool {
+        let window = makeWindow()
+        window.isReleasedWhenClosed = false
+        deadWindow = window
+        tracker.trackDashboardWindow(window)
+        window.makeKeyAndOrderFront(nil)
+        pump()
+        window.close()
+        pump()
+    }
+}
+openAndAbandonDashboard()
+pump(0.3)
+check("closed Dashboard window was released", deadWindow == nil)
+
+let reopened = makeWindow()
+reopened.makeKeyAndOrderFront(nil)
+events.removeAll()
+tracker.trackDashboardWindow(reopened)
+pump()
+check("reopening reports an open window first, with no phantom close",
+      events == [true])
+
+events.removeAll()
+tracker.settingsWindowChanged(nil)
+check("untracking a closed Settings window does not notify", events.isEmpty)
+
+reopened.close()
+pump()
+check("closing the reopened Dashboard closes the tracker", !tracker.hasOpenWindow)
+
 print("")
 if failures == 0 {
     print("PASS: window tracker (\(checks) checks)")

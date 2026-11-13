@@ -92,6 +92,12 @@ run_harness WindowTrackerHarness \
   Sources/UI/AppWindowTracker.swift \
   Tests/WindowTrackerHarness/main.swift
 
+run_harness ActivationPolicyHarness \
+  -framework AppKit \
+  Sources/Config/ConfigModels.swift \
+  Sources/UI/ActivationPolicy.swift \
+  Tests/ActivationPolicyHarness/main.swift
+
 run_harness SettingsMenuHarness \
   -framework AppKit \
   Sources/UI/SettingsMenuCommand.swift \

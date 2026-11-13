@@ -167,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } ?? open.first
         if let front {
             if front.isMiniaturized { front.deminiaturize(nil) }
+            AppModel.shared.ensureRegularActivationForWindow()
             front.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {

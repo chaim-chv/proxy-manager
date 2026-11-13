@@ -66,9 +66,11 @@ final class AppWindowTracker: NSObject {
     }
 
     private func track(_ window: NSWindow) {
-        pruneDeadEntries()
         let id = ObjectIdentifier(window)
-        guard entries[id] == nil else { return }
+        guard entries[id] == nil else {
+            pruneDeadEntries()
+            return
+        }
 
         // `isVisible` is KVO-compliant and fires on show, close, order-out, and
         // minimize, unlike the (nonexistent) "did become visible" notification.
@@ -85,6 +87,9 @@ final class AppWindowTracker: NSObject {
         entries[id] = Entry(window: window,
                             isOpen: window.isVisible || window.isMiniaturized,
                             observers: [observer])
+        // Prune after inserting: a stale open entry removed here must not report
+        // "no windows open" while the window being tracked is already open.
+        pruneDeadEntries()
         onChange?()
     }
 
@@ -122,6 +127,11 @@ final class AppWindowTracker: NSObject {
         for observer in entry.observers {
             NotificationCenter.default.removeObserver(observer)
         }
-        onChange?()
+        // A dead/closed entry never counted as open, so untracking it cannot
+        // change `hasOpenWindow`. Notifying anyway made `applyIconMode` compute
+        // `.accessory` in the middle of `track()` (pruning the previous
+        // Dashboard), transforming the process type and deactivating the app
+        // just as the new window was fronted.
+        if entry.isOpen { onChange?() }
     }
 }

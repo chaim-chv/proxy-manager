@@ -19,6 +19,9 @@ enum SettingsWindow {
     static func present() {
         guard let item = SettingsMenuCommand.item(in: NSApp.mainMenu),
               let action = item.action else { return }
+        // Regular policy *before* the window exists: the app cannot activate
+        // itself while accessory, and SwiftUI may show the window immediately.
+        AppModel.shared.ensureRegularActivationForWindow()
         NSApp.sendAction(action, to: item.target, from: item)
         frontWhenReady(attempt: 0)
     }
@@ -30,6 +33,7 @@ enum SettingsWindow {
         DispatchQueue.main.async {
             if let window = current, window.isVisible {
                 if window.isMiniaturized { window.deminiaturize(nil) }
+                AppModel.shared.ensureRegularActivationForWindow()
                 window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
             } else if attempt < 10 {
