@@ -85,6 +85,7 @@ run_harness UIHarness \
   -framework AppKit \
   Sources/UI/TruncationDetector.swift Sources/UI/FeedTableDiff.swift \
   Sources/UI/AppIcon.swift Sources/UI/TooltipMetrics.swift \
+  Sources/UI/Format.swift Sources/Support/ErrorText.swift \
   Tests/UIHarness/main.swift
 
 run_harness WindowTrackerHarness \
@@ -128,7 +129,7 @@ run_harness ProxyE2E \
   Sources/Routing/AppIdentity.swift Sources/Routing/AppResolver.swift \
   Sources/Proxy/Atomic.swift Sources/Proxy/HTTPParser.swift \
   Sources/Proxy/HostClassifier.swift \
-  Sources/Support/Log.swift \
+  Sources/Support/Log.swift Sources/Support/ErrorText.swift \
   Sources/Socks/Socket.swift Sources/Socks/SOCKS5.swift \
   Sources/Proxy/ProxyServer.swift Sources/Telemetry/TelemetryStore.swift \
   Tests/ProxyE2E/main.swift

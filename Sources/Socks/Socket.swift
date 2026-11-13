@@ -1,8 +1,17 @@
 import Foundation
 import Darwin
 
-enum SocketError: Error {
+enum SocketError: Error, LocalizedError {
     case message(String)
+
+    /// Keep the text that says *why* (DNS / timeout / refused / closed) when
+    /// anything persists or displays `localizedDescription`. Without this a
+    /// plain `Error` enum renders as "The operation couldn't be completed."
+    var errorDescription: String? {
+        switch self {
+        case let .message(text): return text
+        }
+    }
 }
 
 /// Thread-safe counter for the resolver diagnostics: the DNS-timeout regression

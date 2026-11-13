@@ -124,13 +124,16 @@ let freshPath = tmpDir + "pm-telemetry-fresh-\(getpid()).sqlite"
 try? FileManager.default.removeItem(atPath: freshPath)
 let store = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: freshPath), maxRows: 1000, retentionDays: 1))
 store.record(RequestEvent(host: "a.example", route: .tunnel, app: "Google Chrome", appBundle: "com.google.Chrome"))
-store.record(RequestEvent(host: "b.example", route: .direct, app: "node"))
+store.record(RequestEvent(host: "b.example", route: .tunnel, app: "node"))
+// Direct traffic must not appear in the tunnel breakdown.
+store.record(RequestEvent(host: "c.example", route: .direct, app: "Safari",
+                          appBundle: "com.apple.Safari"))
 store.flushNow()
 
 if let db = openDB(freshPath) {
     check("app column created", columns(db).contains("app"))
     check("app_bundle column created", columns(db).contains("app_bundle"))
-    check("both rows persisted", queryInt(db, "SELECT COUNT(*) FROM requests") == 2)
+    check("all rows persisted", queryInt(db, "SELECT COUNT(*) FROM requests") == 3)
     check("app stored", queryString(db, "SELECT app FROM requests WHERE host='a.example'") == "Google Chrome")
     check("app_bundle stored", queryString(db, "SELECT app_bundle FROM requests WHERE host='a.example'") == "com.google.Chrome")
     check("missing app_bundle stored as NULL",
@@ -152,7 +155,8 @@ let deadline = Date().addingTimeInterval(5)
 while !topDone && Date() < deadline {
     RunLoop.main.run(until: Date().addingTimeInterval(0.05))
 }
-check("topApps returns both apps", topResult.count == 2)
+check("topApps returns both tunneled apps", topResult.count == 2)
+check("topApps excludes direct-only apps", !topResult.contains { $0.app == "Safari" })
 check("topApps never returns empty app names", topResult.allSatisfy { !$0.app.isEmpty })
 check("topApps carries the bundle id for the icon",
       topResult.contains { $0.bundle == "com.google.Chrome" })
@@ -183,6 +187,7 @@ store2.flushNow()
 if let db2 = openDB(legacyPath) {
     check("migration added app column", columns(db2).contains("app"))
     check("migration added app_bundle column", columns(db2).contains("app_bundle"))
+    check("migration added connect_ms column", columns(db2).contains("connect_ms"))
     check("legacy row preserved", queryInt(db2, "SELECT COUNT(*) FROM requests WHERE host='legacy.example'") == 1)
     check("legacy row has NULL app", queryInt(db2, "SELECT COUNT(*) FROM requests WHERE host='legacy.example' AND app IS NULL") == 1)
     check("new row written after migration", queryString(db2, "SELECT app FROM requests WHERE host='new.example'") == "Safari")
@@ -836,9 +841,69 @@ usleep(700_000)
 check("a store released before setup opened no DB file",
       !FileManager.default.fileExists(atPath: abandonedPath))
 
+print("== connect latency + range aggregates (dashboard v2) ==")
+let aggPath = tmpDir + "pm-telemetry-aggregates-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: aggPath)
+let aggStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: aggPath),
+                                         maxRows: 10_000, retentionDays: 30))
+let aggNow = Int64(Date().timeIntervalSince1970 * 1000)
+aggStore.record(RequestEvent(ts: aggNow - 1_000, host: "tunnel.example", route: .tunnel,
+                             status: 200, bytesIn: 1_000, bytesOut: 100, connectMs: 42))
+aggStore.record(RequestEvent(ts: aggNow - 2_000, host: "direct.example", route: .direct,
+                             status: 200, bytesIn: 500, bytesOut: 50, connectMs: 12))
+aggStore.record(RequestEvent(ts: aggNow - 3_000, host: "fail.example", route: .direct,
+                             status: 502, error: "connect_failed: timeout", connectMs: 900))
+aggStore.flushNow()
+
+if let db = openDB(aggPath) {
+    check("connect_ms persisted", queryInt(db, "SELECT connect_ms FROM requests WHERE host='tunnel.example'") == 42)
+    check("every aggregate row written", queryInt(db, "SELECT COUNT(*) FROM requests") == 3)
+    sqlite3_close(db)
+} else {
+    check("open aggregate DB", false)
+}
+
+var aggStats = RangeStats()
+aggStore.rangeStats(rangeSeconds: 3_600) { aggStats = $0 }
+pumpMain(until: { aggStats.total == 3 })
+check("rangeStats counts tunneled", aggStats.tunneled == 1)
+check("rangeStats counts direct", aggStats.direct == 2)
+check("rangeStats sums tunnel bytes only", aggStats.tunnelBytes == 1_100)
+check("rangeStats counts failures", aggStats.failed == 1)
+
+var activity: [HostActivity] = []
+aggStore.hostActivity(rangeSeconds: 3_600) { activity = $0 }
+pumpMain(until: { activity.count == 3 })
+check("hostActivity returns one row per host", activity.count == 3)
+check("hostActivity marks the tunnelled host",
+      activity.first(where: { $0.host == "tunnel.example" })?.tunneled == 1)
+
+var failing: [(host: String, count: Int)] = []
+aggStore.topFailingHosts(rangeSeconds: 3_600) { failing = $0 }
+pumpMain(until: { !failing.isEmpty })
+check("topFailingHosts finds the failed host",
+      failing.first?.host == "fail.example" && failing.first?.count == 1)
+
+print("== a single event reaches SQLite without waiting for 1,000 rows ==")
+let timedPath = tmpDir + "pm-telemetry-timedflush-\(getpid()).sqlite"
+try? FileManager.default.removeItem(atPath: timedPath)
+let timedStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: timedPath),
+                                           maxRows: 1000, retentionDays: 1))
+timedStore.record(RequestEvent(host: "timed.example", route: .direct))
+// No flushNow(): the store must persist a low-traffic event on its own.
+pumpMain(seconds: 2.0)
+if let db = openDB(timedPath) {
+    check("one event flushed within 2 s (time-based flush)",
+          queryInt(db, "SELECT COUNT(*) FROM requests WHERE host='timed.example'") == 1)
+    sqlite3_close(db)
+} else {
+    check("open timed-flush DB", false)
+}
+
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
              purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath,
-             analyticsPath, churnPath, backlogPath, asyncPath, bigPath, earlyFlushPath] {
+             analyticsPath, churnPath, backlogPath, asyncPath, bigPath, earlyFlushPath,
+             aggPath, timedPath] {
     try? FileManager.default.removeItem(atPath: base)
     try? FileManager.default.removeItem(atPath: base + "-wal")
     try? FileManager.default.removeItem(atPath: base + "-shm")

@@ -296,6 +296,7 @@ final class ProxyServer {
         var errMsg: String?
         var bytesIn: Int64 = 0
         var bytesOut: Int64 = 0
+        var connectMs: Int64 = 0
         var appName: String?
         var appBundle: String?
 
@@ -376,12 +377,18 @@ final class ProxyServer {
             do {
                 upstream = try connectUpstream(host: host, port: port, route: route, settings: s,
                                                clientIsLoopback: clientIsLoopback)
+                // The only real latency in the row: accept → upstream established.
+                connectMs = elapsedMs(from: start)
             } catch {
                 status = 502
-                errMsg = "connect_failed: \(error.localizedDescription)"
+                errMsg = "connect_failed: \(ErrorText.kind(for: error).rawValue)"
+                connectMs = elapsedMs(from: start)
                 try sendResponse(cfd, status: 502, reason: "Bad Gateway")
+                // A failed connect still took time (DNS + TCP + SOCKS budget).
+                // Recording 0 made a 10 s timeout look instantaneous.
                 record(startTs: startTs, srcPort: srcPort, host: host, port: port, method: method, scheme: scheme,
-                       path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut, error: errMsg,
+                       path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut,
+                       error: errMsg, connectMs: connectMs, durationMs: connectMs,
                        app: appName, appBundle: appBundle)
                 return
             }
@@ -396,6 +403,7 @@ final class ProxyServer {
                 let session = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
                                                            scheme: scheme, method: method, host: host, port: port,
                                                            path: path, route: route, status: status, error: nil,
+                                                           connectMs: connectMs,
                                                            app: appName, appBundle: appBundle))
                 let counts = relay(cfd, upstream, initial: leftover, idle: s.idleTimeout,
                                    progress: { [weak self] in self?.telemetry.updateSession(session, bytesIn: $0, bytesOut: $1) })
@@ -405,7 +413,7 @@ final class ProxyServer {
                                                       scheme: scheme, method: method, host: host, port: port,
                                                       path: path, route: route, status: status, error: errMsg,
                                                       bytesIn: bytesIn, bytesOut: bytesOut,
-                                                      durationMs: elapsedMs(from: start),
+                                                      durationMs: elapsedMs(from: start), connectMs: connectMs,
                                                       app: appName, appBundle: appBundle))
                 return
             } else {
@@ -417,6 +425,7 @@ final class ProxyServer {
                 let session = telemetry.beginSession(event(startTs: startTs, srcPort: srcPort,
                                                            scheme: scheme, method: method, host: host, port: port,
                                                            path: path, route: route, status: 0, error: nil,
+                                                           connectMs: connectMs,
                                                            app: appName, appBundle: appBundle))
                 let counts = relay(cfd, upstream, initial: [], idle: s.idleTimeout,
                                    progress: { [weak self] in self?.telemetry.updateSession(session, bytesIn: $0, bytesOut: $1) })
@@ -426,18 +435,19 @@ final class ProxyServer {
                                                       scheme: scheme, method: method, host: host, port: port,
                                                       path: path, route: route, status: 0, error: errMsg,
                                                       bytesIn: bytesIn, bytesOut: bytesOut,
-                                                      durationMs: elapsedMs(from: start),
+                                                      durationMs: elapsedMs(from: start), connectMs: connectMs,
                                                       app: appName, appBundle: appBundle))
                 return
             }
         } catch let e as SocketError {
-            errMsg = errMsg ?? e.localizedDescription
+            errMsg = errMsg ?? ErrorText.code(for: e)
         } catch {
-            errMsg = errMsg ?? "\(error)"
+            errMsg = errMsg ?? ErrorText.code(for: error)
         }
 
         record(startTs: startTs, srcPort: srcPort, host: host, port: port, method: method, scheme: scheme,
-               path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut, error: errMsg,
+               path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut,
+               error: errMsg, connectMs: connectMs, durationMs: elapsedMs(from: start),
                app: appName, appBundle: appBundle)
     }
 
@@ -450,19 +460,22 @@ final class ProxyServer {
     private func event(id: UUID = UUID(), startTs: Int64, srcPort: Int, scheme: String, method: String, host: String,
                        port: UInt16, path: String, route: Route, status: Int, error: String?,
                        bytesIn: Int64 = 0, bytesOut: Int64 = 0, durationMs: Int64 = 0,
+                       connectMs: Int64 = 0,
                        app: String? = nil, appBundle: String? = nil) -> RequestEvent {
         RequestEvent(id: id, ts: startTs, scheme: scheme, method: method, host: host, port: port,
                      path: path, route: route, status: status, bytesIn: bytesIn, bytesOut: bytesOut,
-                     durationMs: durationMs, error: error, srcPort: srcPort,
+                     durationMs: durationMs, error: error, srcPort: srcPort, connectMs: connectMs,
                      app: app, appBundle: appBundle)
     }
 
     private func record(startTs: Int64, srcPort: Int, host: String, port: UInt16, method: String, scheme: String,
                         path: String, route: Route, status: Int, bytesIn: Int64, bytesOut: Int64, error: String?,
+                        connectMs: Int64 = 0, durationMs: Int64 = 0,
                         app: String? = nil, appBundle: String? = nil) {
         telemetry.record(event(startTs: startTs, srcPort: srcPort, scheme: scheme, method: method,
                                host: host, port: port, path: path, route: route, status: status, error: error,
-                               bytesIn: bytesIn, bytesOut: bytesOut, app: app, appBundle: appBundle))
+                               bytesIn: bytesIn, bytesOut: bytesOut, durationMs: durationMs,
+                               connectMs: connectMs, app: app, appBundle: appBundle))
     }
 
     private func connectUpstream(host: String, port: UInt16, route: Route, settings: ProxyRuntimeSettings,

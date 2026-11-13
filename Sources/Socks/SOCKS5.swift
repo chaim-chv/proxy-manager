@@ -1,8 +1,16 @@
 import Foundation
 import Darwin
 
-enum SOCKS5Error: Error {
+enum SOCKS5Error: Error, LocalizedError {
     case message(String)
+
+    /// See `SocketError.errorDescription`: the SOCKS5 reply that explains the
+    /// failure must survive `localizedDescription`.
+    var errorDescription: String? {
+        switch self {
+        case let .message(text): return text
+        }
+    }
 }
 
 /// RFC 1928 SOCKS5 client (no-auth, ATYP=0x03 domain so DNS resolves on the

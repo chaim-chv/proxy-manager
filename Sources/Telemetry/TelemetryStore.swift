@@ -27,6 +27,10 @@ struct RequestEvent: Identifiable, Equatable {
     var durationMs: Int64
     var error: String?
     var srcPort: Int
+    /// Time from accepting the client to the upstream connection being
+    /// established (ms). `0` means unknown (legacy rows / never connected).
+    /// This is the only field that is real latency; `durationMs` is lifetime.
+    var connectMs: Int64
     /// Originating app display name, when per-app routing/telemetry is enabled.
     var app: String?
     /// Stable app identity (bundle id) when available; nil for CLI tools.
@@ -37,7 +41,7 @@ struct RequestEvent: Identifiable, Equatable {
          port: UInt16 = 443, path: String = "", route: Route = .direct,
          status: Int = 0, bytesIn: Int64 = 0, bytesOut: Int64 = 0,
          durationMs: Int64 = 0, error: String? = nil, srcPort: Int = 0,
-         app: String? = nil, appBundle: String? = nil) {
+         connectMs: Int64 = 0, app: String? = nil, appBundle: String? = nil) {
         self.id = id
         self.ts = ts
         self.scheme = scheme
@@ -52,6 +56,7 @@ struct RequestEvent: Identifiable, Equatable {
         self.durationMs = durationMs
         self.error = error
         self.srcPort = srcPort
+        self.connectMs = connectMs
         self.app = app
         self.appBundle = appBundle
     }
@@ -62,8 +67,45 @@ struct RequestEvent: Identifiable, Equatable {
         RequestEvent(id: id, ts: ts, scheme: scheme, method: method, host: host,
                      port: port, path: path, route: route, status: status,
                      bytesIn: bytesIn, bytesOut: bytesOut, durationMs: durationMs,
-                     error: error, srcPort: srcPort, app: app, appBundle: appBundle)
+                     error: error, srcPort: srcPort, connectMs: connectMs,
+                     app: app, appBundle: appBundle)
     }
+}
+
+/// Aggregates for one dashboard range, computed from SQLite (1 h / 24 h / 7 d)
+/// or from the in-memory feed (5 m). Every number has the same period, which is
+/// what the old lifetime counters could not promise.
+struct RangeStats: Equatable {
+    var tunneled: Int = 0
+    var direct: Int = 0
+    var blocked: Int = 0
+    /// Bytes that actually crossed the tunnel (both directions).
+    var tunnelBytes: Int64 = 0
+    var failed: Int = 0
+
+    var total: Int { tunneled + direct + blocked }
+    var tunnelShare: Double { total > 0 ? Double(tunneled) / Double(total) : 0 }
+}
+
+/// One host's activity in a range, for the per-target health panel. `latestTs`
+/// is the newest connection start seen for that host.
+struct HostActivity: Equatable {
+    let host: String
+    let total: Int
+    let tunneled: Int
+    let latestTs: Int64
+    let bytes: Int64
+}
+
+/// A target row enriched with the traffic it carried in the selected range.
+struct TargetHealth: Identifiable, Equatable {
+    let id: UUID
+    let pattern: String
+    let enabled: Bool
+    let connections: Int
+    let latestTs: Int64
+
+    var used: Bool { connections > 0 }
 }
 
 struct StatsSnapshot: Equatable {
@@ -200,6 +242,11 @@ final class TelemetryStore: ObservableObject {
     private var pending: [RequestEvent] = []
     private var pendingDelta = StatsSnapshot()
     private var dbAccumulator: [RequestEvent] = []
+    /// Last time a batch was handed to the writer. Used by the time-based flush
+    /// (see `flush`), so a low-traffic install still gets history instead of
+    /// waiting for 1,000 rows or a quit.
+    private var lastDbFlushMs: Int64 = 0
+    static let dbFlushIntervalMs: Int64 = 1_000
     private var activeCount = 0
     private var lastPurgeMs: Int64 = Int64(Date().timeIntervalSince1970 * 1000)
 
@@ -499,7 +546,8 @@ final class TelemetryStore: ObservableObject {
             error TEXT,
             src_port INTEGER,
             app TEXT,
-            app_bundle TEXT
+            app_bundle TEXT,
+            connect_ms INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
         CREATE INDEX IF NOT EXISTS idx_requests_host ON requests(host);
@@ -545,6 +593,10 @@ final class TelemetryStore: ObservableObject {
         if !existing.contains("app_bundle") {
             execChecked(db, "ALTER TABLE requests ADD COLUMN app_bundle TEXT;", "app_bundle column migration")
         }
+        if !existing.contains("connect_ms") {
+            execChecked(db, "ALTER TABLE requests ADD COLUMN connect_ms INTEGER DEFAULT 0;",
+                        "connect_ms column migration")
+        }
     }
 
     private func prepareStatements() {
@@ -555,8 +607,8 @@ final class TelemetryStore: ObservableObject {
         let insertSQL = """
         INSERT INTO requests (ts, scheme, method, host, port, path, route, status,
                               bytes_in, bytes_out, duration_ms, error, src_port,
-                              app, app_bundle)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                              app, app_bundle, connect_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let rc = sqlite3_prepare_v2(db, insertSQL, -1, &insertStmt, nil)
         guard rc == SQLITE_OK, insertStmt != nil else {
@@ -746,6 +798,7 @@ final class TelemetryStore: ObservableObject {
         var dbBatch: [RequestEvent] = []
         var enqueuedDB = false
         let flushDB = dbAccumulator.count >= Self.dbBatchSize || canRetry
+            || (!dbAccumulator.isEmpty && nowMs - lastDbFlushMs >= Self.dbFlushIntervalMs)
         // Non-blocking permit: never queue a strong batch behind four batches
         // that are already waiting on a locked/slow writer. Without a permit the
         // events stay in the (capped) accumulator and are retried next tick.
@@ -753,6 +806,7 @@ final class TelemetryStore: ObservableObject {
             dbBatch = dbAccumulator
             dbAccumulator.removeAll(keepingCapacity: true)
             dbWritesInFlightCount += 1
+            lastDbFlushMs = nowMs
             enqueuedDB = true
         }
         let dropped = trimDbAccumulatorLocked()
@@ -1008,6 +1062,7 @@ final class TelemetryStore: ObservableObject {
             if let bundle = e.appBundle {
                 bindText(stmt, 15, Self.clampText(bundle, to: Self.maxAppLength))
             } else { sqlite3_bind_null(stmt, 15) }
+            sqlite3_bind_int64(stmt, 16, e.connectMs)
             let stepRC = sqlite3_step(stmt)
             if stepRC != SQLITE_DONE {
                 failed += 1
@@ -1570,16 +1625,18 @@ final class TelemetryStore: ObservableObject {
         })
     }
 
-    /// Top apps by request count over a range, for the dashboard breakdown.
-    /// Groups by app identity (bundle id when present) and returns a bundle id
-    /// so the UI can show the app icon.
+    /// Top apps by connection count over a range, for the dashboard breakdown.
+    /// Tunnel-only, matching `topHosts`: both tabs of the same card answer the
+    /// same question ("what did I send through the tunnel"). Groups by app
+    /// identity (bundle id when present) and returns a bundle id so the UI can
+    /// show the app icon.
     func topApps(rangeSeconds: Int, limit: Int = 10,
                  completion: @escaping ([(app: String, bundle: String?, count: Int)]) -> Void) {
         let cutoff = Int64(Date().timeIntervalSince1970) - Int64(rangeSeconds)
         let sql = """
         SELECT MAX(app) AS name, MAX(app_bundle) AS bundle, COUNT(*) AS c
         FROM requests
-        WHERE ts >= \(cutoff * 1000) AND app IS NOT NULL AND app != ''
+        WHERE ts >= \(cutoff * 1000) AND route = 'TUNNEL' AND app IS NOT NULL AND app != ''
         GROUP BY COALESCE(app_bundle, app) ORDER BY c DESC LIMIT \(limit);
         """
         runAnalyticsQuery({ db in
@@ -1590,6 +1647,101 @@ final class TelemetryStore: ObservableObject {
                     let name = String(cString: sqlite3_column_text(s, 0))
                     let bundle = sqlite3_column_text(s, 1).map { String(cString: $0) }
                     result.append((name, bundle, Int(sqlite3_column_int(s, 2))))
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(result) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
+    }
+
+    /// Per-range totals for the dashboard strip. One query, same cutoff for
+    /// every number, so the strip can never disagree with the chart beside it.
+    func rangeStats(rangeSeconds: Int, completion: @escaping (RangeStats) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT route, COUNT(*), COALESCE(SUM(bytes_in + bytes_out), 0),
+               COALESCE(SUM(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END), 0)
+        FROM requests WHERE ts >= ? GROUP BY route;
+        """
+        runAnalyticsQuery({ db in
+            var stats = RangeStats()
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, cutoff)
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let route = Route(rawValue: String(cString: sqlite3_column_text(s, 0))) ?? .direct
+                    let count = Int(sqlite3_column_int64(s, 1))
+                    let bytes = sqlite3_column_int64(s, 2)
+                    let failed = Int(sqlite3_column_int64(s, 3))
+                    switch route {
+                    case .tunnel:
+                        stats.tunneled += count
+                        stats.tunnelBytes += bytes
+                    case .direct: stats.direct += count
+                    case .block: stats.blocked += count
+                    }
+                    stats.failed += failed
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(stats) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion(RangeStats()) }
+        })
+    }
+
+    /// Per-host activity for the target-health panel. Distinct hosts are few
+    /// (hundreds, not rows), so this stays cheap even for 7 days.
+    func hostActivity(rangeSeconds: Int, completion: @escaping ([HostActivity]) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT host, COUNT(*), SUM(CASE WHEN route = 'TUNNEL' THEN 1 ELSE 0 END),
+               MAX(ts), COALESCE(SUM(bytes_in + bytes_out), 0)
+        FROM requests WHERE ts >= ? GROUP BY host ORDER BY 2 DESC;
+        """
+        runAnalyticsQuery({ db in
+            var result: [HostActivity] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, cutoff)
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let host = String(cString: sqlite3_column_text(s, 0))
+                    result.append(HostActivity(
+                        host: host,
+                        total: Int(sqlite3_column_int64(s, 1)),
+                        tunneled: Int(sqlite3_column_int64(s, 2)),
+                        latestTs: sqlite3_column_int64(s, 3),
+                        bytes: sqlite3_column_int64(s, 4)))
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(result) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
+    }
+
+    /// Hosts with the most failed connections (4xx/5xx or a recorded error) in
+    /// the range. This is the "why are there errors?" answer the chart lacked.
+    func topFailingHosts(rangeSeconds: Int, limit: Int = 3,
+                         completion: @escaping ([(host: String, count: Int)]) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT host, COUNT(*) AS c FROM requests
+        WHERE ts >= ? AND (status >= 400 OR error IS NOT NULL)
+        GROUP BY host ORDER BY c DESC LIMIT ?;
+        """
+        runAnalyticsQuery({ db in
+            var result: [(String, Int)] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, cutoff)
+                sqlite3_bind_int(s, 2, Int32(limit))
+                while sqlite3_step(s) == SQLITE_ROW {
+                    result.append((String(cString: sqlite3_column_text(s, 0)),
+                                   Int(sqlite3_column_int64(s, 1))))
                 }
             }
             sqlite3_finalize(stmt)
