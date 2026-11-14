@@ -91,7 +91,7 @@
       <figure class="hero-shot" data-tilt>
         <picture>
           <source srcset="assets/dashboard-dark.png" media="(prefers-color-scheme: dark)">
-          <img src="assets/dashboard-light.png" alt="Proxy Manager dashboard: live request feed, request-rate chart, and per-route stats." data-dark="assets/dashboard-dark.png" data-light="assets/dashboard-light.png" width="2240" height="1496">
+          <img src="assets/dashboard-light.png" alt="Proxy Manager dashboard: routing and tunnel status, range-scoped stats, a connections chart, top tunneled hosts, and a live request feed with connect latency and open time." data-dark="assets/dashboard-dark.png" data-light="assets/dashboard-light.png" width="2240" height="1496">
         </picture>
       </figure>
     </div>
@@ -126,6 +126,19 @@
       <p class="section-lede">Live decisions, sizes, and timings — on your machine.</p>
 
       <div class="shots">
+        <article class="shot reverse">
+          <div class="shot-media" data-tilt>
+            <picture>
+              <source srcset="assets/dashboard-targets-dark.png" media="(prefers-color-scheme: dark)">
+              <img src="assets/dashboard-targets-light.png" alt="The dashboard Targets tab: per-target connection counts and last-seen times for the last 24 hours, with a warning that models.opencode.ai went direct under the exact opencode.ai rule and needs a wildcard." data-dark="assets/dashboard-targets-dark.png" data-light="assets/dashboard-targets-light.png" loading="lazy" width="2240" height="1496">
+            </picture>
+          </div>
+          <div class="shot-copy">
+            <h3>Which targets actually carried traffic</h3>
+            <p>Per-target connections and last-seen for the last 24 hours — zero is shown, not hidden. If a host slipped out under an exact rule that needs a wildcard, the panel says so.</p>
+          </div>
+        </article>
+
         <article class="shot">
           <div class="shot-media" data-tilt>
             <picture>
@@ -135,7 +148,7 @@
           </div>
           <div class="shot-copy">
             <h3>Per-request detail</h3>
-            <p>Method, host, route, status, source port, and bytes. Metadata only.</p>
+            <p>Method, host, path, route, and the plain-language reason it went that way. Metadata only.</p>
           </div>
         </article>
 
@@ -265,7 +278,7 @@
           <li><strong>Raw sockets, not a framework.</strong> Outbound connections use <code>connect(2)</code> directly, so they never re-enter the system proxy this app sets.</li>
           <li><strong>Streaming, not buffering.</strong> <code>CONNECT</code> tunnels are relayed byte-for-byte with backpressure, so SSE and LLM token streams arrive as they are produced. WebSocket sessions (<code>ws://</code> and <code>wss://</code>) relay full-duplex too.</li>
           <li><strong>Bounded memory.</strong> Fixed 256 KB buffers per direction, with half-close handled so responses are never truncated.</li>
-          <li><strong>Telemetry off the hot path.</strong> Per-request recording is a lock and an append; a single batched writer flushes SQLite.</li>
+          <li><strong>Telemetry off the hot path.</strong> Per-connection recording is a lock and an append; a single batched writer flushes SQLite once a second.</li>
           <li><strong>Internet, not just Wi-Fi.</strong> An optional active check (Apple’s captive-portal probe, with a Mozilla fallback) distinguishes a working uplink from a connected network. The responses are 8–69 bytes, bypass the local proxy, are never recorded, and can be turned off in Settings.</li>
           <li><strong>Per-app identity, resolved locally.</strong> With per-app routing on, each connection is matched to its originating app by a local process scan — helpers resolve to their host app. Off by default, so the hot path is unchanged.</li>
           <li><strong>Crash-safe.</strong> A watchdog user agent restores your original proxy settings within milliseconds if the app dies. The app keeps its saved recovery state until a restore actually succeeds, so a transient failure can’t erase it.</li>
