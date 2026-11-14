@@ -25,11 +25,14 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
-# screen-key:PROXYMANAGER_SCREEN
+# key:PROXYMANAGER_SCREEN[:EXTRA_ENV...]
+# EXTRA_ENV is passed to `env`, so one screen can render a specific range/tab
+# (the Targets panel is the dashboard at 24h with the Targets tab selected).
 SCREENS=(
   "general:settings-general"
   "dashboard:dashboard"
-  "dashboard-detail:dashboard-detail"
+  "dashboard-detail:dashboard-detail:PROXYMANAGER_HEIGHT=720"
+  "dashboard-targets:dashboard:PROXYMANAGER_RANGE=24h PROXYMANAGER_TOP=targets"
   "tunnel:settings-tunnel"
   "tunnel-managed:settings-tunnel-managed"
   "targets:settings-targets"
@@ -41,6 +44,10 @@ APPEARANCES=("dark" "light")
 
 HELPER="$(mktemp -d)/window-id"
 xcrun swiftc -O "$HERE/window-id.swift" -o "$HELPER"
+# Park the pointer outside the demo window: a hover readout or tooltip must not
+# end up baked into the screenshot.
+WARP="$(mktemp -d)/warp-cursor"
+xcrun swiftc -O "$HERE/warp-cursor.swift" -o "$WARP"
 
 mkdir -p "$OUT"
 
@@ -49,13 +56,15 @@ trap cleanup EXIT
 
 for appearance in "${APPEARANCES[@]}"; do
   for entry in "${SCREENS[@]}"; do
-    name="${entry%%:*}"
-    screen="${entry##*:}"
+    IFS=':' read -r name screen extra <<< "$entry"
     file="$OUT/$name-$appearance.png"
 
     cleanup
     sleep 0.4
 
+    # `env` is required: an expanded `$extra` is not treated as an assignment
+    # prefix by the shell.
+    env $extra \
     PROXYMANAGER_DEMO=1 \
     PROXYMANAGER_SCREEN="$screen" \
     PROXYMANAGER_APPEARANCE="$appearance" \
@@ -70,6 +79,8 @@ for appearance in "${APPEARANCES[@]}"; do
       continue
     fi
     sleep 0.8
+    "$WARP"
+    sleep 0.15
     screencapture -x -o -l "$wid" "$file"
     echo "captured $file"
     kill -9 "$pid" 2>/dev/null || true

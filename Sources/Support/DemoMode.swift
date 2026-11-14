@@ -269,8 +269,10 @@ enum DemoMode {
                 window.makeKeyAndOrderFront(nil)
             } else if window.title == "Proxy Manager" {
                 // The detail capture needs room for the inspector's Routing and
-                // Data cards below the fold at 720.
-                let height: CGFloat = screen == "dashboard-detail" ? 1060 : 720
+                // Data cards below the fold at 720; a capture can override it
+                // (the site uses the standard framing).
+                let override = Int(ProcessInfo.processInfo.environment["PROXYMANAGER_HEIGHT"] ?? "")
+                let height = CGFloat(override ?? (screen == "dashboard-detail" ? 1060 : 720))
                 window.setContentSize(NSSize(width: 1120, height: height))
                 window.center()
                 window.makeKeyAndOrderFront(nil)
