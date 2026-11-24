@@ -19,10 +19,12 @@ import AppKit
 /// Environment variables (all optional):
 ///   PROXYMANAGER_DEMO=1            enable the demo (required)
 ///   PROXYMANAGER_SCREEN            dashboard | dashboard-detail |
+///                                  dashboard-internet |
 ///                                  settings-general | settings-tunnel |
 ///                                  settings-tunnel-managed |
 ///                                  settings-targets | settings-apps |
-///                                  settings-about | about-panel |
+///                                  settings-about | settings-monitoring |
+///                                  settings-integration | about-panel |
 ///                                  onboarding                    (default dashboard)
 ///   PROXYMANAGER_APPEARANCE        dark | light                    (default dark)
 ///   PROXYMANAGER_ONBOARDING_STEP   0..3                            (default 2)
@@ -94,6 +96,7 @@ enum DemoMode {
         config.apps.recordInTelemetry = true
         config.apps.rules = demoAppRules()
         config.monitor.recordPaths = true
+        config.connectivity.enabled = true
         config.integration.enabled = true
         config.integration.urlSchemeEnabled = true
         config.integration.xpcEnabled = true
@@ -199,6 +202,7 @@ enum DemoMode {
     static func apply(to model: AppModel) {
         guard isEnabled else { return }
         seedTelemetry(model.telemetry)
+        model.telemetry.seedDemoConnectivity()
         ConnectivityMonitor.shared.seedDemo()
 
         let managed = (screen == "settings-tunnel-managed")
@@ -212,6 +216,7 @@ enum DemoMode {
         case "settings-apps": model.settingsSelection = .apps
         case "settings-about": model.settingsSelection = .about
         case "settings-integration": model.settingsSelection = .integration
+        case "settings-monitoring": model.settingsSelection = .monitoring
         default: break
         }
 
@@ -248,7 +253,7 @@ enum DemoMode {
         case "onboarding":
             model.showOnboarding = true
             OnboardingWindowController.shared.show()
-        case "settings-general", "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about", "settings-integration":
+        case "settings-general", "settings-tunnel", "settings-tunnel-managed", "settings-targets", "settings-apps", "settings-about", "settings-integration", "settings-monitoring":
             if screen == "settings-apps" {
                 model.revealAppRuleID = model.config.apps.rules.first?.id
             }
@@ -361,6 +366,15 @@ enum DemoMode {
 
         events.sort { $0.ts < $1.ts }
         for event in events { telemetry.record(event) }
+
+        // Two tunneled connections inside the seeded DNS outage: the Internet
+        // screenshot then shows that the tunnel kept working while DNS failed.
+        let outageBase = Int64(Date().timeIntervalSince1970 - 14 * 60) * 1000
+        for (index, host) in ["chat.example.com", "api.example.com"].enumerated() {
+            telemetry.record(RequestEvent(ts: outageBase + Int64(index) * 1_000,
+                                          host: host, route: .tunnel,
+                                          status: 200, connectMs: 38))
+        }
 
         // A few in-progress connections so the live dot and "Active" render.
         var live: [RequestEvent] = []
