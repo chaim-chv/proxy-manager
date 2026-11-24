@@ -556,6 +556,17 @@ final class TelemetryStore: ObservableObject {
         -- columns in one index; `idx_requests_route` alone scans every row of
         -- that route regardless of the time range (TM-04).
         CREATE INDEX IF NOT EXISTS idx_requests_ts_route ON requests(ts, route);
+        -- Internet reachability probes. One row per completed cycle (5-20 s),
+        -- so this grows slowly; it is the only place outages survive a restart.
+        -- `failure` is NULL for a healthy check and 'dns'/'network' otherwise.
+        CREATE TABLE IF NOT EXISTS connectivity_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            ok INTEGER NOT NULL,
+            latency_ms INTEGER,
+            failure TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_connectivity_ts ON connectivity_checks(ts);
         -- `minute_stats` was a write-only aggregate (never queried); drop it on
         -- upgrade. Charts read the `requests` table directly.
         DROP TABLE IF EXISTS minute_stats;
@@ -1308,6 +1319,11 @@ final class TelemetryStore: ObservableObject {
         let limits = currentLimits()
         let cutoff = Self.retentionCutoffMs(nowMs: Self.nowMs(), days: limits.retentionDays)
         var deleted = deleteOlderThan(cutoff, db: db, label: "retention purge")
+        // Probe history is small and has no row cap; aging it out is one
+        // statement and keeps the outage timeline on the same retention clock
+        // as the request log it is compared with.
+        _ = execChecked(db, "DELETE FROM connectivity_checks WHERE ts < \(cutoff);",
+                        "connectivity retention")
         let cap = limits.maxRows
         if cap > 0 {
             deleted = trimToMaxRows(cap, db: db) || deleted
@@ -1485,6 +1501,7 @@ final class TelemetryStore: ObservableObject {
             self.lock.unlock()
             guard stillCurrent else { return }
             guard self.execChecked(db, "DELETE FROM requests;", "history purge") else { return }
+            _ = self.execChecked(db, "DELETE FROM connectivity_checks;", "connectivity purge")
             self.checkpointTruncate(db, "history purge")
             // `DELETE` only frees pages for reuse; `VACUUM` is what returns the
             // space to the filesystem. User-initiated only because it rewrites
@@ -1751,3 +1768,252 @@ final class TelemetryStore: ObservableObject {
         })
     }
 }
+
+// MARK: - Internet connectivity history
+
+/// Probe history lives beside the request log: same file, same retention rule,
+/// same WAL reader, so the dashboard can compare "the internet was down" with
+/// "the tunnel still worked" without a second connection or store.
+extension TelemetryStore: ConnectivityHistorySink {
+    /// Called from the monitor on the main thread, at most once per probe cycle
+    /// (5-20 s). The insert hops to `dbQueue`, so a slow disk can never stall a
+    /// probe or the UI.
+    func recordConnectivity(_ record: ConnectivityRecord) {
+        let ts = Int64(record.at.timeIntervalSince1970 * 1000)
+        let failure = record.failure == .none ? nil : record.failure.rawValue
+        dbQueue.async { [weak self] in
+            guard let self, let db = self.db else { return }
+            var stmt: OpaquePointer?
+            let sql = "INSERT INTO connectivity_checks (ts, ok, latency_ms, failure) VALUES (?, ?, ?, ?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt else {
+                self.noteDatabaseFailure("connectivity INSERT prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+                return
+            }
+            sqlite3_bind_int64(s, 1, ts)
+            sqlite3_bind_int(s, 2, record.ok ? 1 : 0)
+            if let latency = record.latencyMS {
+                sqlite3_bind_int(s, 3, Int32(clamping: latency))
+            } else {
+                sqlite3_bind_null(s, 3)
+            }
+            if let failure {
+                self.bindText(s, 4, failure)
+            } else {
+                sqlite3_bind_null(s, 4)
+            }
+            if sqlite3_step(s) != SQLITE_DONE {
+                self.noteDatabaseFailure("connectivity INSERT failed: \(String(cString: sqlite3_errmsg(db)))")
+            }
+            sqlite3_finalize(stmt)
+        }
+    }
+
+    /// Totals for the selected range: uptime, outage classes, average healthy
+    /// latency. One aggregate query; the dashboard never loads raw rows for this.
+    func connectivityStats(rangeSeconds: Int,
+                           completion: @escaping (ConnectivityRangeStats) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT COUNT(*),
+               COALESCE(SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN failure = 'dns' THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN failure = 'network' THEN 1 ELSE 0 END), 0),
+               AVG(CASE WHEN ok = 1 THEN latency_ms END),
+               MIN(ts)
+        FROM connectivity_checks WHERE ts >= ?;
+        """
+        runAnalyticsQuery({ db in
+            var stats = ConnectivityRangeStats()
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, cutoff)
+                if sqlite3_step(s) == SQLITE_ROW {
+                    stats.total = Int(sqlite3_column_int64(s, 0))
+                    stats.ok = Int(sqlite3_column_int64(s, 1))
+                    stats.failed = Int(sqlite3_column_int64(s, 2))
+                    stats.dnsFailed = Int(sqlite3_column_int64(s, 3))
+                    stats.networkFailed = Int(sqlite3_column_int64(s, 4))
+                    if sqlite3_column_type(s, 5) != SQLITE_NULL {
+                        stats.averageLatencyMS = Int(sqlite3_column_int64(s, 5))
+                    }
+                    if sqlite3_column_type(s, 6) != SQLITE_NULL {
+                        stats.firstCheck = Date(timeIntervalSince1970:
+                            Double(sqlite3_column_int64(s, 6)) / 1000)
+                    }
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(stats) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion(ConnectivityRangeStats()) }
+        })
+    }
+
+    /// Per-bucket probe outcomes for the timeline chart.
+    func connectivityBuckets(rangeSeconds: Int, bucketMs: Int64,
+                             completion: @escaping ([ConnectivityBucket]) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = """
+        SELECT (ts / ?) * ? AS bucket, COUNT(*),
+               COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN failure = 'dns' THEN 1 ELSE 0 END), 0),
+               AVG(CASE WHEN ok = 1 THEN latency_ms END)
+        FROM connectivity_checks WHERE ts >= ?
+        GROUP BY bucket ORDER BY bucket;
+        """
+        runAnalyticsQuery({ db in
+            var result: [ConnectivityBucket] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, bucketMs)
+                sqlite3_bind_int64(s, 2, bucketMs)
+                sqlite3_bind_int64(s, 3, cutoff)
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let avg: Int? = sqlite3_column_type(s, 4) == SQLITE_NULL
+                        ? nil : Int(sqlite3_column_int64(s, 4))
+                    result.append(ConnectivityBucket(
+                        startMs: sqlite3_column_int64(s, 0),
+                        total: Int(sqlite3_column_int64(s, 1)),
+                        failed: Int(sqlite3_column_int64(s, 2)),
+                        dnsFailed: Int(sqlite3_column_int64(s, 3)),
+                        averageLatencyMS: avg))
+                }
+            }
+            sqlite3_finalize(stmt)
+            DispatchQueue.main.async { completion(result) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
+    }
+
+    /// Outages are replayed from the probe rows through the same builder the
+    /// live monitor uses, so history and the live banner can never disagree.
+    /// Rows are streamed on the analytics queue; only outages come back.
+    func connectivityOutages(rangeSeconds: Int,
+                             completion: @escaping ([ConnectivityOutage]) -> Void) {
+        let cutoff = Int64(Date().timeIntervalSince1970 * 1000) - Int64(rangeSeconds) * 1000
+        let sql = "SELECT ts, ok, failure FROM connectivity_checks WHERE ts >= ? ORDER BY ts;"
+        runAnalyticsQuery({ db in
+            var builder = ConnectivityOutageBuilder()
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, cutoff)
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let at = Date(timeIntervalSince1970: Double(sqlite3_column_int64(s, 0)) / 1000)
+                    let ok = sqlite3_column_int(s, 1) != 0
+                    let raw = sqlite3_column_text(s, 2).map { String(cString: $0) }
+                    let failure = raw.flatMap(ConnectivityFailure.init(rawValue:)) ?? .none
+                    builder.add(at: at, ok: ok, failure: failure)
+                }
+            }
+            sqlite3_finalize(stmt)
+            let outages = builder.all()
+            DispatchQueue.main.async { completion(outages) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion([]) }
+        })
+    }
+
+    /// Joins the request log against outage windows: "did tunneled connections
+    /// still succeed while the internet probe was failing?" Only `TUNNEL` rows
+    /// in the outage span are loaded (thousands, not millions).
+    func tunnelEvidence(for outages: [ConnectivityOutage],
+                        completion: @escaping (OutageTunnelEvidence) -> Void) {
+        guard let first = outages.map(\.start).min(),
+              let last = outages.map({ $0.end ?? Date() }).max() else {
+            DispatchQueue.main.async { completion(OutageTunnelEvidence()) }
+            return
+        }
+        let from = Int64(first.timeIntervalSince1970 * 1000)
+        let to = Int64(last.timeIntervalSince1970 * 1000)
+        let sql = "SELECT ts, error FROM requests WHERE route = 'TUNNEL' AND ts >= ? AND ts <= ? ORDER BY ts;"
+        runAnalyticsQuery({ db in
+            var rows: [(Int64, Bool)] = []
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt {
+                sqlite3_bind_int64(s, 1, from)
+                sqlite3_bind_int64(s, 2, to)
+                while sqlite3_step(s) == SQLITE_ROW {
+                    let error = sqlite3_column_text(s, 1).map { String(cString: $0) }
+                    rows.append((sqlite3_column_int64(s, 0), (error ?? "").isEmpty))
+                }
+            }
+            sqlite3_finalize(stmt)
+            var evidence = OutageTunnelEvidence()
+            for outage in outages {
+                let start = Int64(outage.start.timeIntervalSince1970 * 1000)
+                let end = Int64((outage.end ?? Date()).timeIntervalSince1970 * 1000)
+                var counts = OutageTunnel()
+                for row in rows where row.0 >= start && row.0 <= end {
+                    if row.1 { counts.ok += 1 } else { counts.failed += 1 }
+                }
+                evidence.perOutage[outage.start] = counts
+                evidence.tunnelOK += counts.ok
+                evidence.tunnelFailed += counts.failed
+                if counts.attempted > 0 { evidence.outagesWithTraffic += 1 }
+                if counts.ok > 0 { evidence.outagesWithSuccess += 1 }
+            }
+            DispatchQueue.main.async { completion(evidence) }
+        }, unavailable: {
+            DispatchQueue.main.async { completion(OutageTunnelEvidence()) }
+        })
+    }
+}
+
+#if SCREENSHOT_MODE
+extension TelemetryStore {
+    /// Screenshot builds only: a day of plausible probe history so the Internet
+    /// tab has an uptime line and a few outages to show. Written in one
+    /// transaction on `dbQueue`; the demo presents its window ~1.8 s later.
+    func seedDemoConnectivity(now: Date = Date()) {
+        let minutes = 24 * 60
+        var failures: [Int: ConnectivityFailure] = [:]
+        // minutes-from-now → cause, chosen to exercise every UI state:
+        // a sustained DNS outage, a network outage, a mixed one and a blip.
+        for offset in 12...17 { failures[offset] = .dns }
+        for offset in 37...38 { failures[offset] = .network }
+        failures[61] = .dns
+        failures[62] = .dns
+        failures[63] = .network
+        failures[180] = .dns
+        failures[300] = .network
+        failures[301] = .network
+
+        dbQueue.async { [weak self] in
+            guard let self, let db = self.db else { return }
+            guard self.execChecked(db, "BEGIN;", "demo connectivity seed") else { return }
+            var stmt: OpaquePointer?
+            let sql = "INSERT INTO connectivity_checks (ts, ok, latency_ms, failure) VALUES (?, ?, ?, ?);"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let s = stmt else {
+                _ = self.execChecked(db, "COMMIT;", "demo connectivity seed")
+                return
+            }
+            var rng: UInt64 = 0xD3A0_5EED
+            for minute in 0..<minutes {
+                let offset = minutes - minute
+                let at = now.addingTimeInterval(-Double(offset) * 60)
+                let failure = failures[offset]
+                rng = rng &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                let latency = 22 + Int((rng >> 33) % 70)
+                sqlite3_bind_int64(s, 1, Int64(at.timeIntervalSince1970 * 1000))
+                sqlite3_bind_int(s, 2, failure == nil ? 1 : 0)
+                if failure == nil {
+                    sqlite3_bind_int(s, 3, Int32(latency))
+                } else {
+                    sqlite3_bind_null(s, 3)
+                }
+                if let failure {
+                    self.bindText(s, 4, failure.rawValue)
+                } else {
+                    sqlite3_bind_null(s, 4)
+                }
+                sqlite3_step(s)
+                sqlite3_reset(s)
+            }
+            sqlite3_finalize(stmt)
+            _ = self.execChecked(db, "COMMIT;", "demo connectivity seed")
+        }
+    }
+}
+#endif

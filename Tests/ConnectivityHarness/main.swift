@@ -93,6 +93,77 @@ expect(ring.checks.last?.at == t0.addingTimeInterval(Double(ConnectivitySnapshot
        "history keeps the newest check")
 expect(ring.checks.first?.id != ring.checks.last?.id, "history ids are unique")
 
+// Failure classification: a failed name lookup while a literal IP answered is
+// DNS, not "no internet" — the distinction the dashboard and menu must keep.
+var dnsSnapshot = ConnectivitySnapshot()
+dnsSnapshot.record(ok: false, latencyMS: nil, at: t0, failure: .dns)
+expect(dnsSnapshot.failure == .dns, "dns failure is recorded")
+expect(dnsSnapshot.title(at: t0) == "Offline — DNS failing", "dns title names DNS")
+expect(dnsSnapshot.menuValue(at: t0) == "No DNS · 0s", "dns menu value says No DNS")
+expect(dnsSnapshot.detail(at: t0).contains("IP-level check still answered"),
+       "dns detail explains the IP-level evidence")
+expect(dnsSnapshot.health(at: t0) == .down, "a dns failure is still an outage")
+
+dnsSnapshot.record(ok: true, latencyMS: 12, at: t0.addingTimeInterval(30))
+expect(dnsSnapshot.failure == .none, "recovery clears the failure cause")
+
+var networkSnapshot = ConnectivitySnapshot()
+networkSnapshot.record(ok: false, latencyMS: nil, at: t0, failure: .network)
+expect(networkSnapshot.title(at: t0) == "Offline", "network failure keeps the plain title")
+expect(networkSnapshot.menuValue(at: t0) == "Offline · 0s", "network menu shows the duration")
+expect(networkSnapshot.detail(at: t0).contains("IP-level check also failed"),
+       "network detail says the IP check failed too")
+
+// A later cycle that classifies the outage fills in a cause the watchdog could
+// not determine, without moving the outage start or counting a second drop.
+var lateClassified = ConnectivitySnapshot()
+lateClassified.record(ok: false, latencyMS: nil, at: t0, failure: .none)
+lateClassified.record(ok: false, latencyMS: nil, at: t0.addingTimeInterval(5), failure: .dns)
+expect(lateClassified.failure == .dns, "a later cycle can classify an unclassified outage")
+expect(lateClassified.outages.count == 1, "classification is not a new drop")
+expect(lateClassified.offlineSince == t0, "classification keeps the outage start")
+
+// Outage grouping: one outage per run of failures, first cause kept.
+var builder = ConnectivityOutageBuilder()
+builder.add(at: t0, ok: true, failure: .none)
+builder.add(at: t0.addingTimeInterval(10), ok: false, failure: .dns)
+builder.add(at: t0.addingTimeInterval(20), ok: false, failure: .network)
+builder.add(at: t0.addingTimeInterval(30), ok: true, failure: .none)
+builder.add(at: t0.addingTimeInterval(40), ok: false, failure: .dns)
+var grouped = builder.all()
+expect(grouped.count == 2, "two failure runs are two outages")
+expect(grouped[0].failure == .dns, "the first cause of an outage is kept")
+expect(grouped[0].checks == 2, "consecutive failures count as one outage")
+expect(grouped[0].end == t0.addingTimeInterval(30), "recovery closes the outage")
+expect(grouped[0].duration(at: t0.addingTimeInterval(90)) == 20, "closed duration is start→end")
+expect(grouped[1].isOpen, "a trailing failure stays open")
+expect(grouped[1].duration(at: t0.addingTimeInterval(100)) == 60, "open duration runs to now")
+expect(grouped[0].dnsChecks == 1 && grouped[0].networkChecks == 1,
+       "an outage counts each cause")
+expect(grouped[0].isMixed, "an outage with both causes is mixed")
+expect(grouped[0].dominantFailure == .dns, "a tie keeps the first cause")
+expect(grouped[1].isBrief, "a single failed check is brief")
+expect(grouped[1].causeSummary == "1 DNS check", "cause summary is human-readable")
+
+// A clear majority wins even when the first check was the other cause.
+var majority = ConnectivityOutageBuilder()
+majority.add(at: t0, ok: false, failure: .dns)
+majority.add(at: t0.addingTimeInterval(5), ok: false, failure: .network)
+majority.add(at: t0.addingTimeInterval(10), ok: false, failure: .network)
+let majorityOutages = majority.all()
+expect(majorityOutages[0].dominantFailure == .network, "the majority cause wins")
+expect(majorityOutages[0].causeSummary == "1 DNS + 2 network checks",
+       "mixed cause summary counts both")
+
+// A long gap between failed checks (sleep/quit) is not one giant outage.
+var gapped = ConnectivityOutageBuilder()
+gapped.add(at: t0, ok: false, failure: .dns)
+gapped.add(at: t0.addingTimeInterval(ConnectivityOutageBuilder.maxGap + 120),
+           ok: false, failure: .dns)
+let split = gapped.all()
+expect(split.count == 2, "a gap longer than the limit splits the outage")
+expect(split[0].end == t0, "the first burst closes where it was last observed")
+
 // Duration formatting used by the menu/detail.
 expect(ConnectivitySnapshot.shortDuration(0) == "0s", "0 seconds")
 expect(ConnectivitySnapshot.shortDuration(45) == "45s", "45 seconds")

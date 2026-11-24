@@ -131,7 +131,8 @@ run_harness ProxyE2E \
   Sources/Proxy/HostClassifier.swift \
   Sources/Support/Log.swift Sources/Support/ErrorText.swift \
   Sources/Socks/Socket.swift Sources/Socks/SOCKS5.swift \
-  Sources/Proxy/ProxyServer.swift Sources/Telemetry/TelemetryStore.swift \
+  Sources/Proxy/ProxyServer.swift Sources/System/ConnectivityState.swift \
+  Sources/Telemetry/TelemetryStore.swift \
   Tests/ProxyE2E/main.swift
 
 run_probe CrashProbe_oversized_port \
@@ -160,6 +161,7 @@ run_harness AskpassHarness \
 
 run_harness TelemetryHarness \
   Sources/Config/ConfigModels.swift \
+  Sources/System/ConnectivityState.swift \
   Sources/Telemetry/TelemetryStore.swift \
   Tests/TelemetryHarness/main.swift
 

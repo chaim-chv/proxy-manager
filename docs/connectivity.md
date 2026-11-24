@@ -37,6 +37,41 @@ The probe uses `URLSessionConfiguration.ephemeral` with
 `127.0.0.1:8888` while routing is on, and probing through its own proxy would
 make the monitor depend on the thing it is monitoring (and could loop back).
 
+### DNS vs network: the failure classification
+
+Every URL starts with a DNS lookup, so a plain "probe failed" cannot tell a
+broken resolver from a dead uplink. That distinction matters here more than in
+most apps: the SOCKS tunnel resolves hostnames **on the remote side**, so a
+DNS-only outage leaves tunneled traffic working while everything direct fails.
+Telemetry from real outages shows exactly that (see
+[`internet-outage-investigation.md`](internet-outage-investigation.md)).
+
+When the primary HTTPS probe fails, the monitor starts a second, independent
+check **concurrently with the fallbacks**: a raw BSD-socket `connect` to literal
+IPs `1.1.1.1:443` and `9.9.9.9:443` with a 2 s budget. This path never calls
+`getaddrinfo` and never touches the system proxy (it must not use
+`Network.framework` for the same reason the proxy core does not).
+
+| Name probe | IP-literal probe | `ConnectivityFailure` | UI |
+|---|---|---|---|
+| fails | answers | `.dns` | "Offline — DNS failing", menu "No DNS · 2 min" |
+| fails | fails | `.network` | "Offline", menu "Offline · 2 min" |
+| cycle watchdog cut it short | — | `.none` | "Offline" (no false claim) |
+
+A classification is only applied once **both** the fallbacks and the IP probe
+have answered, so a cycle can never report "network is down" before TCP was
+actually tried. Two endpoints avoid blaming DNS for one blocked IP.
+
+### Persistence
+
+Each completed cycle is written to `connectivity_checks`
+(`ts`, `ok`, `latency_ms`, `failure`) through `ConnectivityHistorySink`
+(`TelemetryStore` conforms; the monitor stays network-only). Probes are low
+frequency (5–20 s), so the write is one prepared statement on the DB queue and
+never on the probe path. History is replayed by the dashboard, survives a
+relaunch, ages out with `monitor.retentionDays`, and is deleted by "Delete
+history…". See [`telemetry.md`](telemetry.md).
+
 ## Cadence and energy
 
 | State | Next probe |
@@ -53,7 +88,9 @@ slower: the status is only visible when a surface is open, and `NWPathMonitor`
 still triggers an immediate re-check on route changes.
 
 All endpoints time out after 3 s, so an offline cycle (primary + fallback) takes
-about 6 s and a recovery is noticed within roughly 10 s.
+about 6 s and a recovery is noticed within roughly 10 s. The IP classification
+runs in parallel with the fallbacks (2 s budget), so it does not lengthen that
+window.
 
 - No request overlaps another; the next one is scheduled after a cycle
   completes.
@@ -64,8 +101,9 @@ about 6 s and a recovery is noticed within roughly 10 s.
   forward. It is **not** bridged into `AppModel.objectWillChange`; the status
   menu and the General pane observe `ConnectivityMonitor.shared` directly.
 
-The check traffic is one small HTTPS request every 5–20 s. It is not recorded in
-telemetry; probes bypass the proxy entirely.
+The check traffic is one small HTTPS request every 5–20 s. It bypasses the
+proxy entirely (so it never appears in the connection feed), but the *outcome*
+is recorded in `connectivity_checks` — see "Persistence" above.
 
 ## Toggle and config
 
@@ -86,6 +124,9 @@ a real "no traffic" state, not a hidden UI-only preference.
 `Tests/ConnectivityHarness`:
 
 - `ConnectivityStatus`: `checking` → `online` / `offline`.
+- `ConnectivityFailure`: `.none` / `.dns` / `.network` (see above). The first
+  failure's cause is kept for the outage; a later cycle can fill in `.none`
+  without moving the outage start or counting a second drop.
 - On failure: `offlineSince` is set on the first failure; repeated failures do
   not count as new drops.
 - On recovery within 10 minutes the health is **unstable** (orange), which makes
@@ -97,19 +138,48 @@ a real "no traffic" state, not a hidden UI-only preference.
 
 ## UI surfaces
 
+- **Dashboard → Internet**: a full habitability view backed by persisted probes:
+  a live status banner (with the DNS/network nuance), **Uptime / Outages /
+  Longest / Tunnel during outages** for 1 h / 24 h / 7 d, an availability
+  timeline (stacked passed/failed checks per bucket, x-axis pinned to the
+  range), and an outage list with start, duration, cause pill (DNS / Network /
+  Unknown) and "ongoing". "Tunnel during outages" joins the outage windows
+  against real `TUNNEL` rows, so "the tunnel still worked" is measured, not
+  assumed. See [`ui.md`](ui.md).
 - **Settings → General → Internet**: a **Monitor internet status** toggle (on by
   default), then a colored dot + status title, one-line detail (latency, outage
-  duration, recent drop count), a **Check Now** button, and the recent-checks
-  strip (each bar is one probe; newest on the right). With the toggle off, only
-  the toggle and an "Off — no checks are sent…" caption are shown.
+  duration, recent drop count, DNS explanation), a **Check Now** button, and the
+  recent-checks strip (each bar is one probe; newest on the right). With the
+  toggle off, only the toggle and an "Off — no checks are sent…" caption are
+  shown.
 - **Menu bar menu**: an inert **Internet** status row after **Tunnel**
-  (`Online · 38 ms`, `Online · unstable`, `Offline · 2 min`, `Checking…`), with
-  the detail text as its tooltip. The row is updated in place while the menu is
-  open, and is hidden entirely when the setting is off.
+  (`Online · 38 ms`, `Online · unstable`, `No DNS · 2 min`, `Offline · 2 min`,
+  `Checking…`), with the detail text as its tooltip. The row is updated in place
+  while the menu is open, and is hidden entirely when the setting is off.
 
 The menu-bar icon itself still reflects routing state, deliberately unchanged:
 colorizing/badging it for connectivity would make "it is on" and "the internet
 is down" collide.
+
+## What the history is for
+
+The screen is designed around questions users actually ask, not around the
+probe:
+
+| Question | Where it is answered |
+|---|---|
+| "Is my provider reliable this week?" | `Uptime`, `Outages`, `Longest` over 24 h / 7 d |
+| "Was it DNS or the line?" | the cause pill on each outage (DNS / Network / Mixed / Unknown) and the DNS-vs-network check counts |
+| "Did my tunnel keep working?" | `Tunnel during outages` and the per-row `n/m tunneled` badge |
+| "Why did my call drop at 21:04?" | the outage list with minute-accurate start, duration and check count |
+| "Can I show this to my ISP?" | `Copy summary` produces a plain-text digest of the window |
+| "Did changing DNS/VPN/router help?" | compare the same range before and after; history is persisted and retention-scoped |
+
+Deliberate limits: a single failed probe is labelled **brief** (it was a real
+failure, but calling it an outage overstates it), a >5-minute gap between
+failed probes splits the outage (sleep/quit is unknown time, not downtime), and
+a cycle cut short by the watchdog is **Unknown** rather than being blamed on DNS
+or the network.
 
 ## Lifecycle
 
