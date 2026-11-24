@@ -10,6 +10,7 @@
 
 - `setNoSIGPIPE` — sets `SO_NOSIGPIPE` on every fd the app creates or accepts; macOS has no `MSG_NOSIGNAL`, so without it a `send()` to a reset peer raises `SIGPIPE` and kills the process.
 - `connect(host:port:timeout:)` — `resolve` runs `getaddrinfo` (AF_UNSPEC) on a detached thread with a hard deadline (the resolver itself is unbounded), then tries each resolved address: non-blocking `connect()`, `poll()` for `POLLOUT` + `SO_ERROR`. `timeout` is one overall budget across DNS + all attempts. Closes the fd on every failure path; `defer { freeaddrinfo(info) }`.
+- `resolve` is bounded by a permit semaphore: at most **24 concurrent `getaddrinfo` calls**, waiting **200 ms** for a slot. A blackholed resolver therefore cannot spawn unbounded threads, but a burst of connections (a browser opening 30 sockets) queues instead of being rejected in 50 ms. The old 8/50 ms pair produced 6,458 instant `dns_busy` failures in one week — see [`internet-outage-investigation.md`](internet-outage-investigation.md). Regression: `Tests/CrashProbes/dns_timeout`.
 - `waitForWritable` — uses `poll()` (not `select`/`fd_set`, which had a `fd≥32` bit-indexing bug).
 - `setNonBlocking`, `setTimeouts` (`SO_RCVTIMEO`/`SO_SNDTIMEO`).
 - `recvExact`, `sendAll` — loop for partial I/O; treat `EINTR` carefully.

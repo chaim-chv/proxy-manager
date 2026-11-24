@@ -7,8 +7,8 @@ import Darwin
 // The `delay` test seam makes the resolver thread deterministically outlive a
 // short caller timeout. `Socket.liveResolutions` counts allocated-but-not-freed
 // lists, and `Socket.liveResolverThreads` counts detached resolver threads that
-// are still inside `getaddrinfo` (permit-bounded to 8). Once the threads drain,
-// both must return to 0.
+// are still inside `getaddrinfo` (permit-bounded). Once the threads drain, both
+// must return to 0.
 //
 // Compiled with Sources/Socks/Socket.swift. Exit 0 = no leak/bound violation.
 
@@ -32,10 +32,10 @@ let peakThreads = Socket.liveResolverThreads.value
 print("PROBE: immediately after \(iterations) lookups: liveResolverThreads=\(peakThreads) " +
       "(timedOut=\(timedOut), resolverBusy=\(busy))")
 var failed = false
-if peakThreads <= 8 {
-    print("PROBE: resolver threads bounded (<= 8)")
+if peakThreads <= Socket.maxConcurrentResolutions {
+    print("PROBE: resolver threads bounded (<= \(Socket.maxConcurrentResolutions))")
 } else {
-    print("PROBE: UNBOUNDED — \(peakThreads) resolver threads live (cap 8)")
+    print("PROBE: UNBOUNDED — \(peakThreads) resolver threads live (cap \(Socket.maxConcurrentResolutions))")
     failed = true
 }
 
@@ -57,10 +57,10 @@ if live == 0 {
     failed = true
 }
 
-// Saturation phase: 24 concurrent lookups against an 8-permit resolver must cap
-// the live resolver threads and fail the excess callers fast with a clear
-// "resolver busy" error instead of spawning unbounded orphans.
-let concurrent = 24
+// Saturation phase: more concurrent lookups than permits must cap the live
+// resolver threads and reject the excess callers with a clear "resolver busy"
+// error instead of spawning unbounded orphans.
+let concurrent = Socket.maxConcurrentResolutions + 16
 let group = DispatchGroup()
 let busyLock = NSLock()
 var concurrentBusy = 0
@@ -82,10 +82,10 @@ group.wait()
 let saturatedThreads = Socket.liveResolverThreads.value
 print("PROBE: concurrent saturation: liveResolverThreads=\(saturatedThreads) " +
       "resolverBusy=\(concurrentBusy)/\(concurrent)")
-if saturatedThreads <= 8 {
-    print("PROBE: concurrent resolver threads bounded (<= 8)")
+if saturatedThreads <= Socket.maxConcurrentResolutions {
+    print("PROBE: concurrent resolver threads bounded (<= \(Socket.maxConcurrentResolutions))")
 } else {
-    print("PROBE: UNBOUNDED — \(saturatedThreads) concurrent resolver threads (cap 8)")
+    print("PROBE: UNBOUNDED — \(saturatedThreads) concurrent resolver threads (cap \(Socket.maxConcurrentResolutions))")
     failed = true
 }
 if concurrentBusy > 0 {
