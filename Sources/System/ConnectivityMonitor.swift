@@ -1,4 +1,5 @@
 import Combine
+import Darwin
 import Foundation
 import Network
 
@@ -23,6 +24,10 @@ final class ConnectivityMonitor: ObservableObject {
     static let shared = ConnectivityMonitor()
 
     @Published private(set) var snapshot = ConnectivitySnapshot()
+
+    /// Set by `AppModel` once telemetry exists. Weak: history must never keep
+    /// the store alive, and probe writing is best-effort.
+    weak var history: ConnectivityHistorySink?
 
     private struct Probe {
         let url: URL
@@ -58,6 +63,12 @@ final class ConnectivityMonitor: ObservableObject {
         var succeeded = false
         var bestLatencyMS: Int?
         var tasks: [URLSessionDataTask] = []
+        /// Set when every fallback probe has answered (success or failure).
+        var fallbacksDone = false
+        /// Result of the IP-literal probe. `nil` until it answers; a failure is
+        /// classified only when both halves of the cycle are in, so a cycle can
+        /// never report "network is down" before TCP was actually tried.
+        var classification: ConnectivityFailure?
     }
 
     private var pathMonitor: NWPathMonitor?
@@ -162,9 +173,16 @@ final class ConnectivityMonitor: ObservableObject {
         guard DemoMode.isEnabled else { return }
         var seeded = ConnectivitySnapshot()
         let now = Date()
+        // One recent drop then recovery: the demo shows "Online — unstable"
+        // and a red blip in the history strip without claiming a current outage.
+        let dropIndex = ConnectivitySnapshot.maxChecks - 36
         for index in 0..<ConnectivitySnapshot.maxChecks {
             let at = now.addingTimeInterval(Double(index - ConnectivitySnapshot.maxChecks + 1) * Self.activeInterval)
-            seeded.record(ok: true, latencyMS: 28 + index % 9, at: at)
+            let ok = index != dropIndex
+            seeded.record(ok: ok,
+                          latencyMS: ok ? 28 + index % 9 : nil,
+                          at: at,
+                          failure: ok ? .none : .dns)
         }
         snapshot = seeded
     }
@@ -177,16 +195,29 @@ final class ConnectivityMonitor: ObservableObject {
         self.cycle = cycle
 
         let watchdog = Timer(timeInterval: Self.cycleWatchdog, repeats: false) { [weak self] _ in
-            self?.complete(ok: false, latencyMS: nil, cycle: cycle)
+            // A cycle cut short has no trustworthy cause: never claim "network
+            // down" from a watchdog.
+            self?.complete(ok: false, latencyMS: nil, failure: .none, cycle: cycle)
         }
         RunLoop.main.add(watchdog, forMode: .common)
         self.watchdog = watchdog
 
-        request(Self.primary, cycle: cycle) { [weak self] ok, latency in
+        request(Self.primary, cycle: cycle) { [weak self] ok, latency, gotResponse in
             guard let self else { return }
             if ok {
-                self.complete(ok: true, latencyMS: latency, cycle: cycle)
+                self.complete(ok: true, latencyMS: latency, failure: .none, cycle: cycle)
+            } else if gotResponse {
+                // The name resolved and something answered, but it was not our
+                // marker: a captive portal / intercepting proxy, not DNS. Do
+                // not claim "DNS failing" without evidence.
+                cycle.classification = ConnectivityFailure.none
+                self.probeFallbacks(for: cycle)
             } else {
+                // DNS and IP reachability fail for different reasons and need
+                // different advice. Probe both halves concurrently: an HTTPS
+                // name probe can only fail at the resolver, while a raw TCP
+                // connect to a literal address never touches DNS.
+                self.classifyFailure(for: cycle)
                 self.probeFallbacks(for: cycle)
             }
         }
@@ -194,8 +225,13 @@ final class ConnectivityMonitor: ObservableObject {
 
     private func probeFallbacks(for cycle: Cycle) {
         cycle.remaining = Self.fallbacks.count
+        guard !Self.fallbacks.isEmpty else {
+            cycle.fallbacksDone = true
+            completeIfReady(cycle)
+            return
+        }
         for probe in Self.fallbacks {
-            request(probe, cycle: cycle) { [weak self] ok, latency in
+            request(probe, cycle: cycle) { [weak self] ok, latency, _ in
                 guard let self, self.cycle === cycle else { return }
                 if ok {
                     cycle.succeeded = true
@@ -205,17 +241,62 @@ final class ConnectivityMonitor: ObservableObject {
                 }
                 cycle.remaining -= 1
                 if cycle.remaining == 0 {
-                    self.complete(ok: cycle.succeeded,
-                                  latencyMS: cycle.bestLatencyMS,
-                                  cycle: cycle)
+                    cycle.fallbacksDone = true
+                    self.completeIfReady(cycle)
                 }
             }
         }
     }
 
+    /// Distinguishes "DNS is broken" from "the network is down" with a raw TCP
+    /// connect to literal addresses (no resolver, no system proxy). Two
+    /// independent endpoints avoid blaming the user's DNS for one blocked IP.
+    private func classifyFailure(for cycle: Cycle) {
+        let endpoints: [(String, UInt16)] = [("1.1.1.1", 443), ("9.9.9.9", 443)]
+        let lock = NSLock()
+        var remaining = endpoints.count
+        var reachable = false
+        for (host, port) in endpoints {
+            classifyProbe(host: host, port: port) { [weak self] ok in
+                lock.lock()
+                if ok { reachable = true }
+                remaining -= 1
+                let finished = remaining == 0
+                let result: ConnectivityFailure = reachable ? .dns : .network
+                lock.unlock()
+                guard finished, let self else { return }
+                cycle.classification = result
+                self.completeIfReady(cycle)
+            }
+        }
+    }
+
+    private func classifyProbe(host: String, port: UInt16, completion: @escaping (Bool) -> Void) {
+        // Raw BSD socket on a detached thread: `NWConnection` would honor the
+        // system proxy and this probe must never route through our own proxy.
+        Thread.detachNewThread {
+            var reachable = false
+            if let fd = try? Socket.connect(host: host, port: port, timeout: 2,
+                                            allowPrivate: false) {
+                reachable = true
+                close(fd)
+            }
+            DispatchQueue.main.async { completion(reachable) }
+        }
+    }
+
+    private func completeIfReady(_ cycle: Cycle) {
+        guard self.cycle === cycle, cycle.fallbacksDone,
+              let classification = cycle.classification else { return }
+        complete(ok: cycle.succeeded,
+                 latencyMS: cycle.bestLatencyMS,
+                 failure: cycle.succeeded ? .none : classification,
+                 cycle: cycle)
+    }
+
     private func request(_ probe: Probe,
                          cycle: Cycle,
-                         completion: @escaping (Bool, Int?) -> Void) {
+                         completion: @escaping (Bool, Int?, Bool) -> Void) {
         var request = URLRequest(url: probe.url,
                                  cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: Self.requestTimeout)
@@ -225,9 +306,9 @@ final class ConnectivityMonitor: ObservableObject {
         let task = session.dataTask(with: request) { data, response, error in
             var ok = false
             var latencyMS: Int?
-            if error == nil,
-               let http = response as? HTTPURLResponse,
-               http.statusCode == probe.expectedStatus {
+            let http = response as? HTTPURLResponse
+            let gotResponse = http != nil
+            if error == nil, let http, http.statusCode == probe.expectedStatus {
                 if let needle = probe.bodyNeedle {
                     ok = data.map { String(decoding: $0, as: UTF8.self).contains(needle) } ?? false
                 } else {
@@ -235,13 +316,13 @@ final class ConnectivityMonitor: ObservableObject {
                 }
                 if ok { latencyMS = Int(Date().timeIntervalSince(startedAt) * 1_000) }
             }
-            DispatchQueue.main.async { completion(ok, latencyMS) }
+            DispatchQueue.main.async { completion(ok, latencyMS, gotResponse) }
         }
         cycle.tasks.append(task)
         task.resume()
     }
 
-    private func complete(ok: Bool, latencyMS: Int?, cycle: Cycle) {
+    private func complete(ok: Bool, latencyMS: Int?, failure: ConnectivityFailure, cycle: Cycle) {
         guard self.cycle === cycle else { return }
         self.cycle = nil
         watchdog?.invalidate()
@@ -250,15 +331,19 @@ final class ConnectivityMonitor: ObservableObject {
         cycle.tasks.forEach { $0.cancel() }
 
         var next = snapshot
-        next.record(ok: ok, latencyMS: latencyMS, at: cycle.startedAt)
+        next.record(ok: ok, latencyMS: latencyMS, at: cycle.startedAt, failure: failure)
         snapshot = next
+
+        history?.recordConnectivity(ConnectivityRecord(at: cycle.startedAt, ok: ok,
+                                                       latencyMS: latencyMS,
+                                                       failure: ok ? .none : failure))
 
         if next.status != lastLoggedStatus {
             lastLoggedStatus = next.status
             if next.status == .online {
                 Log.system.notice("internet connectivity: online (\(latencyMS ?? 0) ms)")
             } else if next.status == .offline {
-                Log.system.notice("internet connectivity: offline")
+                Log.system.notice("internet connectivity: offline (\(failure.rawValue))")
             }
         }
 

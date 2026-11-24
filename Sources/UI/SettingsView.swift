@@ -646,7 +646,7 @@ private struct ConnectivityGroup: View {
     var body: some View {
         SettingsGroup(
             title: "Internet",
-            help: "When on, Proxy Manager fetches a tiny HTTPS resource every few seconds (faster while this page or the menu is open, slower in the background) to tell whether the internet itself is reachable, not just whether Wi-Fi is connected — a router with a dead uplink stays connected but has no internet. Each bar below is one check; a drop turns the status orange for ten minutes. Only the check request is sent, never browsing data. Turn it off to stop the checks entirely.",
+            help: "When on, Proxy Manager fetches a tiny HTTPS resource every few seconds (faster while this page or the menu is open, slower in the background) to tell whether the internet itself is reachable, not just whether Wi-Fi is connected — a router with a dead uplink stays connected but has no internet. Each bar below is one check; a drop turns the status orange for ten minutes. Only the check request is sent, never browsing data. Outcomes are stored locally (same retention as request history) so the Dashboard → Internet timeline survives a relaunch. Turn it off to stop the checks entirely.",
             example: "Online · 38 ms\nOnline — unstable   1 drop in the last hour\nOffline · 2 min"
         ) {
             VStack(spacing: 0) {
@@ -706,7 +706,9 @@ private struct ConnectivityGroup: View {
         case .checking: return Color(nsColor: .tertiaryLabelColor)
         case .good: return .green
         case .unstable: return .orange
-        case .down: return .red
+        // DNS-only failures leave IP connectivity (and the tunnel) working, so
+        // they are a degraded state, not the same red as a dead uplink.
+        case .down: return snapshot.failure == .dns ? .orange : .red
         }
     }
 }
@@ -1160,13 +1162,14 @@ struct SystemSettingsView: View {
 
 struct MonitoringSettingsView: View {
     @EnvironmentObject var model: AppModel
+    @State private var confirmPurge = false
 
     var body: some View {
         SettingsPage(title: SettingsSection.monitoring.title, summary: SettingsSection.monitoring.summary) {
             SettingsContent {
                 SettingsGroup(
                     title: "History",
-                    help: "Host, size, and timing are always stored; bodies and headers are never stored."
+                    help: "Host, size, and timing are always stored; bodies and headers are never stored. Internet reachability checks use the same retention period, so the outage timeline and the connection log always cover the same window."
                 ) {
                     VStack(spacing: 0) {
                         SettingsRow {
@@ -1179,16 +1182,28 @@ struct MonitoringSettingsView: View {
                         }
                         Divider()
                         SettingsToggleRow(title: "Record request paths", isOn: model.binding(\.monitor.recordPaths))
+                        Divider()
+                        SettingsRow {
+                            SettingsCaption(text: "Applies to connection history and internet checks, so the outage timeline and the connection log always cover the same window.")
+                        }
                     }
                 }
 
                 SettingsGroup(
                     title: "Data",
-                    help: "Purge deletes everything recorded so far. Recording continues afterward."
+                    help: "Purge deletes every recorded connection and internet check, including the outage timeline. Recording continues afterward. This cannot be undone."
                 ) {
                     SettingsRow {
-                        Button("Purge history now") { model.telemetry.purge() }
+                        Button("Purge history now") { confirmPurge = true }
                         Spacer()
+                    }
+                    .confirmationDialog("Purge all history?",
+                                        isPresented: $confirmPurge, titleVisibility: .visible) {
+                        Button("Purge History", role: .destructive) { model.telemetry.purge() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Deletes every recorded connection and internet check, including the "
+                             + "outage timeline. This cannot be undone.")
                     }
                 }
             }

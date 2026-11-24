@@ -22,6 +22,7 @@
 - [Standalone Swift harness gotchas](#standalone-swift-harness-gotchas)
 - [Identify the originating app of a loopback connection via a `libproc` scan](#identify-the-originating-app-of-a-loopback-connection-via-a-libproc-scan)
 - [SwiftUI's Settings scene window is not resizable](#swiftuis-settings-scene-window-is-not-resizable)
+- [Every connection starts with DNS, so telemetry cannot tell "no DNS" from "no internet"](#every-connection-starts-with-dns-so-telemetry-cannot-tell-no-dns-from-no-internet)
 
 ## SwiftUI `.popover` is unusable for hover tooltips
 
@@ -213,3 +214,13 @@ Use `view.hoverTooltip("text")` (a `View` extension) for any immediate tooltip. 
 **Context:** Two non-obvious traps. (1) Only setting `styleMask.insert(.resizable)` in `viewDidMoveToWindow` does not stick: SwiftUI re-applies its own style mask *after* the `NSViewRepresentable` attaches (observed `resizable=false` ~0.1 s later), so the flag has to be re-inserted whenever it changes — KVO on `window.styleMask` (KVO-compliant, unlike many AppKit properties) with an async handler (mutating inside the change handler re-enters KVO). (2) Don't add a second `setFrameAutosaveName`: SwiftUI overwrites it, and the saved frame ends up split across two defaults keys. Also note that AX/AppKit refuses to grow a window past the screen edge while its top stays fixed, which can look like a max-size cap when testing with `AXUIElementSetAttributeValue`.
 
 **Related:** `Sources/UI/SettingsView.swift`, `docs/ui.md` (Settings section).
+
+## Every connection starts with DNS, so telemetry cannot tell "no DNS" from "no internet"
+
+**Status:** Implemented — `ConnectivityFailure` + IP-literal probe in the monitor; persisted history in `connectivity_checks`.
+
+**Summary:** A failed direct connection is recorded as `connect_failed: dns` whenever `getaddrinfo` does not answer within the 10 s budget, even if the whole uplink is down — because DNS is the first step and nothing ever reaches TCP. Conversely, a DNS-only outage leaves the SOCKS tunnel working, since the tunnel sends `ATYP=0x03` (hostname) to the remote server. The only way to distinguish the two is a probe that never resolves: a raw TCP connect to a literal IP (the monitor uses `1.1.1.1:443` and `9.9.9.9:443`). Do not use `Network.framework` for it (it honors the system proxy).
+
+**Context:** Seven days of real telemetry showed 92.7% of all DIRECT failures were DNS, 2,267 of them waiting exactly 10 s. During several outages tunneled connections succeeded while every direct attempt failed at the resolver — so "the internet is down" was a resolver failure, not a line failure. The monitor used to report both as plain "Offline"; it now reports "Offline — DNS failing" only when a literal-IP TCP probe answered, and "Offline" only when it also failed. A captive portal is detected as "name probe got an HTTP response but not our marker" and deliberately stays unclassified instead of being mislabelled DNS.
+
+**Related:** `Sources/System/ConnectivityState.swift`, `Sources/System/ConnectivityMonitor.swift`, `docs/connectivity.md`, `docs/internet-outage-investigation.md`, `Tools/analyze-telemetry.py`.

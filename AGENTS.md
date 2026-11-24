@@ -150,6 +150,7 @@ These are hard-won from this codebase's history. **Violating any of them causes 
 | Config persistence | `docs/config.md` |
 | Tunnel health supervisor | `docs/tunnel-supervisor.md` |
 | Internet connectivity monitor | `docs/connectivity.md` |
+| Outage investigation (DNS vs tunnel, real data) | `docs/internet-outage-investigation.md` |
 | SwiftUI / UI | `docs/ui.md` |
 | Build, signing, distribution | `docs/build-and-distribution.md` |
 | Auto-updates (Sparkle) | `docs/updates.md` |

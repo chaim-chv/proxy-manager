@@ -900,6 +900,93 @@ if let db = openDB(timedPath) {
     check("open timed-flush DB", false)
 }
 
+print("== internet connectivity history ==")
+let connectivityPath = tmpDir + "pm-connectivity-\(getpid()).sqlite"
+for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: connectivityPath + suffix) }
+let connectivityStore = readyStore(TelemetryStore(dbURL: URL(fileURLWithPath: connectivityPath),
+                                                   maxRows: 1000, retentionDays: 7))
+
+func connectivityRowCount() -> Int? {
+    guard let db = openDB(connectivityPath) else { return nil }
+    defer { sqlite3_close(db) }
+    return queryInt(db, "SELECT COUNT(*) FROM connectivity_checks")
+}
+
+// Recent, so the 24 h query cutoff includes it (the store compares to `now`).
+let baseDate = Date().addingTimeInterval(-600)
+connectivityStore.recordConnectivity(ConnectivityRecord(at: baseDate, ok: true, latencyMS: 21, failure: .none))
+connectivityStore.recordConnectivity(ConnectivityRecord(at: baseDate.addingTimeInterval(10),
+                                                        ok: false, latencyMS: nil, failure: .dns))
+connectivityStore.recordConnectivity(ConnectivityRecord(at: baseDate.addingTimeInterval(20),
+                                                        ok: false, latencyMS: nil, failure: .dns))
+connectivityStore.recordConnectivity(ConnectivityRecord(at: baseDate.addingTimeInterval(30),
+                                                        ok: true, latencyMS: 19, failure: .none))
+// One tunnelled connection *inside* the outage window proves the comparison the
+// dashboard shows ("did the tunnel still work?") is real.
+connectivityStore.record(RequestEvent(ts: Int64((baseDate.addingTimeInterval(15).timeIntervalSince1970) * 1000),
+                                      host: "tunnel.example", route: .tunnel))
+connectivityStore.record(RequestEvent(ts: Int64((baseDate.addingTimeInterval(16).timeIntervalSince1970) * 1000),
+                                      host: "down.example", route: .tunnel, status: 502,
+                                      error: "connect_failed: socks_timeout"))
+connectivityStore.flushNow()
+
+pumpMain(timeout: 5, until: { connectivityRowCount() == 4 })
+check("connectivity checks persist", connectivityRowCount() == 4)
+
+if let db = openDB(connectivityPath) {
+    check("a healthy check stores no failure code",
+          queryString(db, "SELECT failure FROM connectivity_checks WHERE ok = 1 LIMIT 1") == nil)
+    check("a failed check stores its cause",
+          queryString(db, "SELECT failure FROM connectivity_checks WHERE ok = 0 LIMIT 1") == "dns")
+    sqlite3_close(db)
+} else {
+    check("open connectivity DB", false)
+}
+
+var connectivityStats = ConnectivityRangeStats()
+connectivityStore.connectivityStats(rangeSeconds: 86_400) { connectivityStats = $0 }
+pumpMain(until: { connectivityStats.total == 4 })
+check("connectivityStats counts every check", connectivityStats.total == 4)
+check("connectivityStats counts successes", connectivityStats.ok == 2)
+check("connectivityStats counts failures", connectivityStats.failed == 2)
+check("connectivityStats separates DNS failures", connectivityStats.dnsFailed == 2)
+check("connectivityStats averages healthy latency", connectivityStats.averageLatencyMS == 20)
+check("connectivityStats reports the first stored check", connectivityStats.firstCheck != nil)
+
+var connectivityBuckets: [ConnectivityBucket] = []
+connectivityStore.connectivityBuckets(rangeSeconds: 86_400, bucketMs: 15 * 60_000) { connectivityBuckets = $0 }
+pumpMain(until: { !connectivityBuckets.isEmpty })
+check("connectivityBuckets returns one bucket for this minute", connectivityBuckets.count == 1)
+check("connectivityBuckets splits ok/failed",
+      connectivityBuckets.first?.total == 4 && connectivityBuckets.first?.failed == 2)
+
+var connectivityOutages: [ConnectivityOutage] = []
+connectivityStore.connectivityOutages(rangeSeconds: 86_400) { connectivityOutages = $0 }
+pumpMain(until: { !connectivityOutages.isEmpty })
+check("connectivityOutages groups the failure run", connectivityOutages.count == 1)
+check("connectivityOutages keeps the DNS cause", connectivityOutages.first?.failure == .dns)
+// SQLite stores milliseconds, so compare at that resolution.
+check("connectivityOutages closes on recovery",
+      abs((connectivityOutages.first?.end ?? Date.distantPast)
+          .timeIntervalSince(baseDate.addingTimeInterval(30))) < 0.002)
+check("connectivityOutages counts the failed checks", connectivityOutages.first?.checks == 2)
+
+var tunnelEvidence = OutageTunnelEvidence()
+connectivityStore.tunnelEvidence(for: connectivityOutages) { tunnelEvidence = $0 }
+pumpMain(until: { tunnelEvidence.attempted > 0 })
+check("tunnelEvidence finds the tunnel connection inside the outage",
+      tunnelEvidence.outagesWithSuccess == 1 && tunnelEvidence.tunnelOK == 1)
+check("tunnelEvidence reports per-outage counts",
+      tunnelEvidence.perOutage[connectivityOutages[0].start]?.ok == 1)
+check("tunnelEvidence records a failed attempt as failed",
+      tunnelEvidence.perOutage[connectivityOutages[0].start]?.failed == 1)
+
+connectivityStore.purge()
+pumpMain(timeout: 5, until: { connectivityRowCount() == 0 })
+check("purge removes internet history too", connectivityRowCount() == 0)
+
+for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: connectivityPath + suffix) }
+
 for base in [freshPath, legacyPath, lockedPath, capPath, expiryPath, walPath, livePath, liveCapPath,
              purgePath, purgeBatchPath, purgeStatsPath, clampPath, budgetPath, corruptPath,
              analyticsPath, churnPath, backlogPath, asyncPath, bigPath, earlyFlushPath,

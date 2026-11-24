@@ -98,10 +98,23 @@ private enum ChartMetric: String, CaseIterable, Identifiable {
     }
 }
 
+private enum DashboardMode: String, CaseIterable, Identifiable {
+    case traffic, internet
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .traffic: return "Traffic"
+        case .internet: return "Internet"
+        }
+    }
+}
+
 struct DashboardView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var telemetry: TelemetryStore
+    @ObservedObject private var connectivity = ConnectivityMonitor.shared
 
+    @State private var mode: DashboardMode = DashboardView.initialMode
     @State private var routeFilter: String = "All"
     @State private var hostFilter: String = ""
     @State private var appFilterKey: String?
@@ -140,10 +153,17 @@ struct DashboardView: View {
         default: return .hosts
         }
     }
+
+    /// Screenshot builds can open straight on the Internet tab.
+    private static var initialMode: DashboardMode {
+        ProcessInfo.processInfo.environment["PROXYMANAGER_SCREEN"] == "dashboard-internet"
+            ? .internet : .traffic
+    }
     #else
     private static let initialRange: TimeRange = .m5
     private static let initialMetric: ChartMetric = .requests
     private static let initialTopMetric: TopMetric = .hosts
+    private static let initialMode: DashboardMode = .traffic
     #endif
 
     // Long-range chart/top-hosts data, loaded from SQLite. The 2 s ticker below
@@ -238,6 +258,20 @@ struct DashboardView: View {
     /// every value here walks the live/recent event arrays or the chart data, so
     /// an occluded/minimized/hidden window skips all of it (UI-08).
     private func loadedContent() -> some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if mode == .internet {
+                InternetHealthView()
+            } else {
+                trafficContent()
+            }
+        }
+    }
+
+    /// The request-log dashboard. Split from `loadedContent` so the Internet tab
+    /// never pays for the feed/chart aggregation it does not show.
+    private func trafficContent() -> some View {
         let baseRows = baseFeedRows()
         let appOptions = appFilterOptions(from: paused ? pausedSnapshot : baseRows)
         let appOptionIds = appOptions.map(\.id)
@@ -250,8 +284,6 @@ struct DashboardView: View {
         let targets = currentTargets(activity: currentActivity())
 
         return VStack(spacing: 0) {
-            header
-            Divider()
             statusAndStats(stats: stats)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -295,9 +327,19 @@ struct DashboardView: View {
             }
             .disabled(model.state == .starting || model.state == .stopping)
 
-            Toggle("Freeze feed", isOn: $paused)
-                .toggleStyle(.checkbox)
-                .help("Stop the feed from scrolling while you read a row. The chart and statistics keep updating.")
+            if mode == .traffic {
+                Toggle("Freeze feed", isOn: $paused)
+                    .toggleStyle(.checkbox)
+                    .help("Stop the feed from scrolling while you read a row. The chart and statistics keep updating.")
+            }
+
+            Picker("Dashboard", selection: $mode) {
+                ForEach(DashboardMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 168)
+            .help("Traffic: what the proxy carried. Internet: whether the internet itself was reachable, with an outage timeline and causes.")
 
             Spacer()
 
@@ -314,13 +356,14 @@ struct DashboardView: View {
             } label: {
                 Label("Delete history…", systemImage: "trash")
             }
-            .help("Delete every recorded request from the local database")
-            .confirmationDialog("Delete all request history?",
+            .help("Delete every recorded request and internet check from the local database")
+            .confirmationDialog("Delete all request and internet history?",
                                 isPresented: $showingClearConfirm, titleVisibility: .visible) {
                 Button("Delete History", role: .destructive) { telemetry.purge() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This removes every recorded request from the local database and cannot be undone. "
+                Text("This removes every recorded connection and internet check from the local database, "
+                     + "including the outage timeline, and cannot be undone. "
                      + "Your configuration and target list are not affected.")
             }
         }
@@ -340,6 +383,15 @@ struct DashboardView: View {
                     StatusPill(text: model.tunnelUp ? "Tunnel up" : "Tunnel down",
                                color: model.tunnelUp ? .green : .orange,
                                icon: "arrow.left.arrow.right")
+                }
+                if let internet = internetPill {
+                    Button {
+                        mode = .internet
+                    } label: {
+                        StatusPill(text: internet.text, color: internet.color, icon: internet.icon)
+                    }
+                    .buttonStyle(.plain)
+                    .help(internet.help + " Click to open the Internet history.")
                 }
                 if telemetry.telemetryUnavailable {
                     StatusPill(text: "History unavailable", color: .red, icon: "exclamationmark.triangle.fill")
@@ -411,6 +463,29 @@ struct DashboardView: View {
         case .degraded: return .orange
         case .starting, .stopping: return .yellow
         case .off: return .secondary
+        }
+    }
+
+    /// The internet state belongs next to routing/tunnel, not only on a
+    /// separate tab: "tunnel up" with "internet offline" is the combination a
+    /// user needs to see at a glance.
+    private var internetPill: (text: String, color: Color, icon: String, help: String)? {
+        guard model.config.connectivity.enabled else { return nil }
+        let snapshot = connectivity.snapshot
+        switch snapshot.status {
+        case .checking:
+            return ("Internet: checking…", .secondary, "globe", "Waiting for the first reachability check.")
+        case .online:
+            let unstable = snapshot.health() == .unstable
+            return (unstable ? "Internet: unstable" : "Internet online",
+                    unstable ? .orange : .green,
+                    "globe",
+                    snapshot.detail())
+        case .offline:
+            if snapshot.failure == .dns {
+                return ("Internet: no DNS", .orange, "exclamationmark.triangle.fill", snapshot.detail())
+            }
+            return ("Internet offline", .red, "wifi.slash", snapshot.detail())
         }
     }
 

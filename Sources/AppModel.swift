@@ -160,6 +160,9 @@ final class AppModel: ObservableObject {
         // the Keychain, observe network changes, or auto-enable routing.
         if !DemoMode.isEnabled {
             tunnelSupervisor.start()
+            // Probe history outlives a relaunch (the in-memory snapshot does
+            // not); the dashboard replays it to show real outages.
+            ConnectivityMonitor.shared.history = telemetry
             ConnectivityMonitor.shared.setEnabled(config.connectivity.enabled)
             syncManagedTunnel(config)
             observeSystemEvents()
@@ -1399,6 +1402,11 @@ final class AppModel: ObservableObject {
     /// applies it, so the toggle also works from config changes elsewhere.
     func setConnectivityMonitoring(_ enabled: Bool) {
         guard config.connectivity.enabled != enabled else { return }
+        // Demo builds never start the probe, and the sink is set here too so a
+        // later opt-in (monitoring was off at launch) still persists history.
+        if enabled && !DemoMode.isEnabled {
+            ConnectivityMonitor.shared.history = telemetry
+        }
         config.connectivity.enabled = enabled
         commitConfig()
     }

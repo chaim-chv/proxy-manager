@@ -44,8 +44,14 @@ enum Socket {
 
     /// Bound on concurrent `getaddrinfo` calls. Without it a blackholed resolver
     /// lets timed-out callers spawn detached threads without limit.
-    private static let maxResolverThreads = 8
-    private static let resolverSemaphore = DispatchSemaphore(value: maxResolverThreads)
+    ///
+    /// 24 (not 8) with a 200 ms gate: a browser opening 30 sockets to one host
+    /// must queue for a resolver slot instead of being rejected in 50 ms. The
+    /// old pair turned a slow resolver into hundreds of instant `dns_busy`
+    /// failures, which every app renders as "no internet".
+    static let maxConcurrentResolutions = 24
+    private static let resolverGateWait: TimeInterval = 0.2
+    private static let resolverSemaphore = DispatchSemaphore(value: maxConcurrentResolutions)
 
     /// macOS has no `MSG_NOSIGNAL`; `SO_NOSIGPIPE` is the per-socket equivalent.
     /// Without it a `send()` to a reset peer raises SIGPIPE and kills the app.
@@ -107,8 +113,8 @@ enum Socket {
     /// caller timeout deterministically (production always passes 0).
     static func resolve(host: String, port: UInt16, timeout: TimeInterval,
                         delay: TimeInterval = 0) throws -> UnsafeMutablePointer<addrinfo> {
-        guard resolverSemaphore.wait(timeout: .now() + 0.05) == .success else {
-            throw SocketError.message("resolver busy: \(maxResolverThreads) lookups already in flight")
+        guard resolverSemaphore.wait(timeout: .now() + resolverGateWait) == .success else {
+            throw SocketError.message("resolver busy: \(maxConcurrentResolutions) lookups already in flight")
         }
         let box = ResolutionBox()
         let sem = DispatchSemaphore(value: 0)

@@ -61,7 +61,34 @@ The proxy cannot see inside CONNECT tunnels (TLS passes through), so a connectio
 - The app is recorded only when per-app routing is enabled and `apps.recordInTelemetry` is on (`ProxyRuntimeSettings.recordAppInTelemetry`); otherwise the columns stay NULL and no identity scan runs.
 - `topApps(rangeSeconds:limit:completion:)` groups non-empty `app` values **for `route = 'TUNNEL'` only**, so the Hosts and Apps tabs of the dashboard card answer the same question (`topHosts` is tunnel-only too).
 - `rangeStats`, `hostActivity` and `topFailingHosts` back the dashboard strip, the per-target panel and the failure triage respectively; all three share the chart's cutoff.
-- Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`).
+- Retention: `maybePurge()` runs every 5 min — deletes rows older than `monitor.retentionDays`, then enforces `monitor.maxRows` (delete-oldest via `ORDER BY ts DESC ... OFFSET maxRows`). Probe history has no row cap, only the same age cutoff.
+
+### Internet checks (`connectivity_checks`)
+
+One row per completed reachability probe (`ts`, `ok`, `latency_ms`, `failure`),
+written by `TelemetryStore.recordConnectivity(_:)` from
+`ConnectivityHistorySink`. It is the only table written outside the request
+pipeline, and it cannot share the request batching: probes are 5–20 s apart, so
+each is a single prepared `INSERT` on `dbQueue` (never on the probe path).
+`failure` is `NULL` when healthy, `dns` when a literal-IP TCP probe still
+answered, `network` when it did not.
+
+Read side (all on the analytics connection):
+
+- `connectivityStats(rangeSeconds:)` — totals, DNS vs network failures, average
+  healthy latency (uptime is derived).
+- `connectivityBuckets(rangeSeconds:bucketMs:)` — passed/failed per bucket for
+  the availability timeline.
+- `connectivityOutages(rangeSeconds:)` — replayed through
+  `ConnectivityOutageBuilder`, the same grouping the live monitor uses. A gap
+  longer than 5 min between failed checks splits the outage rather than
+  reporting sleep/quit time as one outage.
+- `tunnelEvidence(for:completion:)` — loads `TUNNEL` rows in the outages' span
+  and reports how many outages still had a successful tunneled connection. This
+  is what makes "the tunnel survived a DNS outage" measurable.
+
+`purge()` (Delete history…) deletes this table too; the confirmation dialog
+says so.
 
 ## Threading
 

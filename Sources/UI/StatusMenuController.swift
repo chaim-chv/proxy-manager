@@ -236,19 +236,20 @@ final class StatusMenuController: NSObject {
 
     private func refreshConnectivity() {
         let snapshot = ConnectivityMonitor.shared.snapshot
-        let color = connectivityColor(snapshot.health())
+        let color = connectivityColor(snapshot)
         internetStatusRow.update(dot: color,
                                  value: snapshot.menuValue(),
                                  valueColor: color)
         internetStatusRow.toolTip = snapshot.detail()
     }
 
-    private func connectivityColor(_ health: ConnectivityHealth) -> NSColor {
-        switch health {
+    private func connectivityColor(_ snapshot: ConnectivitySnapshot) -> NSColor {
+        switch snapshot.health() {
         case .checking: return .systemGray
         case .good: return .systemGreen
         case .unstable: return .systemOrange
-        case .down: return .systemRed
+        // DNS-only: the path is up, name resolution is not. Orange, not red.
+        case .down: return snapshot.failure == .dns ? .systemOrange : .systemRed
         }
     }
 
